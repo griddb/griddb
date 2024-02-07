@@ -786,7 +786,6 @@ void ChunkManager::allocateChunk(MeshedChunkTable::Group &group, ChunkAccessor &
 		}
 		group.set(chunkinfo.getChunkId(), offset, logversion_, true);
 		ChunkBufferFrameRef frameRef;
-		Chunk* chunk;
 		chunkBuffer_.pinChunk(pId_, offset, true, true, groupId, frameRef);
 		ca.set(
 				chunkTable_, &chunkBuffer_, pId_, groupId, chunkinfo.getChunkId(),

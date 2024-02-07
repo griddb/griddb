@@ -364,7 +364,7 @@ void BasicChunkBuffer<L>::validatePinCount() {
 		LRUTable::Cursor bufferTableCursor = bufferTable_->createCursor();
 		LRUFrame *fr;
 		int32_t pos;
-		while (fr = bufferTableCursor.next(pos)) {
+		while (((fr = bufferTableCursor.next(pos)))) {
 			assert(fr->pincount_ == 0);
 			if (fr->pincount_ != 0) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_OID,
@@ -382,7 +382,7 @@ uint64_t BasicChunkBuffer<L>::getTotalPinCount() {
 		LRUTable::Cursor bufferTableCursor = bufferTable_->createCursor();
 		LRUFrame* fr;
 		int32_t pos;
-		while (fr = bufferTableCursor.next(pos)) {
+		while ((fr = bufferTableCursor.next(pos))) {
 			pinCount += fr->pincount_;
 		}
 	}
@@ -419,7 +419,7 @@ bool BasicChunkBuffer<L>::resize(int32_t newCapacity) {
 		LRUTable::Cursor bufferTableCursor = bufferTable_->createCursor();
 		LRUFrame *fr;
 		int32_t pos;
-		while (fr = bufferTableCursor.next(pos)) {
+		while ((fr = bufferTableCursor.next(pos))) {
 			if (bufferTable_->getCurrentNumElems() == 0 || swapNum == 0) {
 				break;
 			}
@@ -553,7 +553,7 @@ int32_t BasicChunkBuffer<L>::ChunkAccessor::swapOut(int32_t limit, int32_t &pos)
 	LRUTable::Cursor bufferTableCursor = bcBuffer_.bufferTable_->createCursor();
 	int32_t reusePos = -1;
 	LRUFrame *fr;
-	while (fr = bufferTableCursor.next(pos)) {
+	while ((fr = bufferTableCursor.next(pos))) {
 		if (fr->pincount_ == 0) {
 			PartitionId pId1 = fr->pId_;
 			int64_t offset1 = fr->key_; 

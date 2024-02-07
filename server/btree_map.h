@@ -232,6 +232,11 @@ public:
 	};
 
 public:
+	class TermConditionUpdator;
+
+	template <typename P, typename K, typename V, typename R>
+	class TermConditionRewriter;
+
 	/*!
 		@brief Information related to a search
 	*/
@@ -239,36 +244,49 @@ public:
 	private:
 		bool isEqual_;		  
 		bool isCaseSensitive_;
+		TermConditionUpdator *condUpdator_;
 
 	public:
-		SearchContext(util::StackAllocator &alloc, util::Vector<ColumnId> &columnIds)
-			: BaseIndex::SearchContext(alloc, columnIds),
-			  isEqual_(false),
-			  isCaseSensitive_(true)
-		{
-		}
-		SearchContext(util::StackAllocator &alloc, ColumnId columnId)
-			: BaseIndex::SearchContext(alloc, columnId),
-			  isEqual_(false),
-			  isCaseSensitive_(true)
-		{
+		SearchContext(
+				util::StackAllocator &alloc,
+				const util::Vector<ColumnId> &columnIds) :
+				BaseIndex::SearchContext(alloc, columnIds),
+				isEqual_(false),
+				isCaseSensitive_(true),
+				condUpdator_(NULL) {
 		}
 
-		SearchContext(util::StackAllocator &alloc, TermCondition &startCond,
-			TermCondition &endCond,
-			ResultSize limit)
-			: BaseIndex::SearchContext(
-				  alloc, startCond, endCond, limit),
-			  isEqual_(false),
-			  isCaseSensitive_(true)
-		{}
-		SearchContext(util::StackAllocator &alloc, TermCondition &cond,
-			ResultSize limit)
-			: BaseIndex::SearchContext(
-				  alloc, cond, limit),
-			  isEqual_(true),
-			  isCaseSensitive_(true)
-		{}
+		SearchContext(util::StackAllocator &alloc, ColumnId columnId) :
+				BaseIndex::SearchContext(alloc, columnId),
+				isEqual_(false),
+				isCaseSensitive_(true),
+				condUpdator_(NULL) {
+		}
+
+		SearchContext(
+				util::StackAllocator &alloc, TermCondition &startCond,
+				TermCondition &endCond, ResultSize limit) :
+				BaseIndex::SearchContext(alloc, startCond, endCond, limit),
+				isEqual_(false),
+				isCaseSensitive_(true),
+				condUpdator_(NULL) {
+		}
+
+		SearchContext(
+				util::StackAllocator &alloc, TermCondition &cond,
+				ResultSize limit) :
+				BaseIndex::SearchContext(alloc, cond, limit),
+				isEqual_(true),
+				isCaseSensitive_(true),
+				condUpdator_(NULL) {
+		}
+
+		void clear() {
+			BaseIndex::SearchContext::clear();
+			isEqual_ = false;
+			isCaseSensitive_ = true;
+			condUpdator_ = NULL;
+		}
 
 		void setCaseSensitive(bool isCaseSensitive) {
 			isCaseSensitive_ = isCaseSensitive;
@@ -338,6 +356,15 @@ public:
 
 			return strstrm.str();
 		}
+
+		void setTermConditionUpdator(TermConditionUpdator *condUpdator) {
+			condUpdator_ = condUpdator;
+		}
+
+		TermConditionUpdator* getTermConditionUpdator() {
+			return condUpdator_;
+		}
+
 	};
 
 	/*!
@@ -378,9 +405,8 @@ public:
 
 
 	template <typename S>
-	inline bool compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	bool compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		const S *e, BaseIndex::Setting &setting);
-
 
 	int32_t initialize(TransactionContext &txn, ColumnType columnType,
 		bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize = DEFAULT_ELEM_SIZE);
@@ -1177,6 +1203,8 @@ private:
 		typedef K TYPE;
 	};
 
+	struct SearchBulkFunc;
+
 	template<typename Action>
 	void switchToBasicType(ColumnType type, Action &action);
 
@@ -1411,7 +1439,7 @@ private:
 		BNode<K, V> &dirtyNode2, KeyValue<K, V> &val) {
 		val = dirtyNode1.getKeyValue(nodeMinSize_);
 		OId node2Id;
-		dirtyNode2.allocateNeighbor<BNodeImage<K, V> >(
+		dirtyNode2.template allocateNeighbor<BNodeImage<K, V> >(
 			getNormalNodeSize<K, V>(getElemSize<K, V>()), node2Id,
 			dirtyNode1.getSelfOId(), OBJECT_TYPE_BTREE_MAP);
 
@@ -1830,6 +1858,50 @@ private:
 	V getMaxValue();
 	template <typename V>
 	V getMinValue();
+
+
+	int32_t searchBulk(
+			TransactionContext &txn, SearchContext &sc, util::XArray<OId> &idList,
+			OutputOrder outputOrder);
+
+	template <typename P, typename K, typename V, typename R, CompareComponent C>
+	int32_t findBulk(
+			TransactionContext &txn, SearchContext &sc, util::XArray<R> &idList,
+			OutputOrder outputOrder);
+
+	template <typename P, typename K, typename V, CompareComponent C>
+	int32_t findNext(
+			TransactionContext &txn, P &key, KeyValue<K, V> &keyValue,
+			Setting &setting, BNode<K, V> &node, int32_t &loc);
+	template <typename P, typename K, typename V, typename R, CompareComponent C>
+	bool findNext(
+			TransactionContext &txn, SearchContext &sc, util::XArray<R> &idList,
+			Setting &setting, BNode<K, V> &node, int32_t &loc);
+
+	template <typename P, typename K, typename V, typename R, CompareComponent C>
+	bool findGreaterNext(
+			TransactionContext &txn, KeyValue<P, V> &keyValue,
+			int32_t isIncluded, ResultSize limit, util::XArray<R> &result,
+			ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+			Setting &setting, BNode<K, V> &node, int32_t &loc);
+	template <typename P, typename K, typename V, typename R, CompareComponent C>
+	bool findRangeNext(
+			TransactionContext &txn, KeyValue<P, V> &startKeyValue,
+			int32_t isStartIncluded, KeyValue<P, V> &endKeyValue,
+			int32_t isEndIncluded, ResultSize limit, util::XArray<R> &result,
+			ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+			Setting &setting, BNode<K, V> &node, int32_t &loc);
+
+	template <typename P, typename K, typename V, CompareComponent C>
+	bool findNodeNext(
+			TransactionContext &txn, KeyValue<P, V> &val, BNode<K, V> &node,
+			int32_t &loc, CmpFunctor<P, K, V, C> &cmp, Setting &setting);
+	template <typename P, typename K, typename V, CompareComponent C>
+	bool findTopNodeNext(
+			TransactionContext &txn, KeyValue<P, V> &val, BNode<K, V> &node,
+			int32_t &loc, CmpFunctor<P, K, V, C> &cmp, Setting &setting);
+
+	static void errorInvalidSearchCondition();
 };
 
 template <typename K, typename V>
@@ -1846,7 +1918,7 @@ void BtreeMap::split(TransactionContext &txn, BNode<K, V> &dirtyNode1,
 		BNode<K, V> dirtyParentNode(
 			txn, *getObjectManager(), allocateStrategy_);
 		if (dirtyNode1.isRoot()) {
-			dirtyParentNode.allocateNeighbor<BNodeImage<K, V> >(
+			dirtyParentNode.template allocateNeighbor<BNodeImage<K, V> >(
 				getNormalNodeSize<K, V>(getElemSize<K, V>()), parentOId,
 				dirtyNode1.getSelfOId(), OBJECT_TYPE_BTREE_MAP);
 			dirtyParentNode.initialize(
@@ -2112,7 +2184,7 @@ bool BtreeMap::insertInternal(
 			BNode<K, V> dirtyNewNode(
 				txn, *getObjectManager(), allocateStrategy_);
 			OId newNodeOId;
-			dirtyNewNode.allocate<BNodeImage<K, V> >(getNormalNodeSize<K, V>(getElemSize<K, V>()),
+			dirtyNewNode.template allocate<BNodeImage<K, V> >(getNormalNodeSize<K, V>(getElemSize<K, V>()),
 				newNodeOId, OBJECT_TYPE_BTREE_MAP);
 			dirtyNewNode.initialize(
 				txn, newNodeOId, true, nodeMaxSize_, elemSize_);
@@ -2253,7 +2325,7 @@ bool BtreeMap::removeInternal(
 			BNode<K, V> dirtyNewNode(
 				txn, *getObjectManager(), allocateStrategy_);
 			OId newNodeOId;
-			dirtyNewNode.allocate<BNodeImage<K, V> >(getInitialNodeSize<K, V>(getElemSize<K, V>()),
+			dirtyNewNode.template allocate<BNodeImage<K, V> >(getInitialNodeSize<K, V>(getElemSize<K, V>()),
 				newNodeOId, OBJECT_TYPE_BTREE_MAP);
 			dirtyNewNode.initialize(txn, dirtyNewNode.getBaseOId(), true,
 				getInitialItemSizeThreshold<K, V>(), elemSize_);
@@ -3367,7 +3439,7 @@ inline int32_t BtreeMap::keyCmp(TransactionContext &, ObjectManagerV4 &, Allocat
 
 
 template <typename S>
-inline bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
+bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 	const S *e, BaseIndex::Setting &setting) {
 	UNUSED_VARIABLE(txn);
 	UNUSED_VARIABLE(objectManager);
@@ -3383,7 +3455,7 @@ inline int32_t BtreeMap::keyCmp(TransactionContext &txn, ObjectManagerV4 &object
 }
 
 	template <>
-	inline bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		const CompositeInfoObject *e, BaseIndex::Setting &setting);
 
 

@@ -29,7 +29,6 @@
 #include "uuid_utils.h"
 
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
-UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 
 #define TEST_PRINT(s)
@@ -44,8 +43,11 @@ ClusterManager::ClusterManager(
 	pt_(partitionTable),
 	versionId_(versionId),
 	isSignalBeforeRecovery_(false),
-	ee_(NULL),
-	clsSvc_(NULL)
+	autoShutdown_(false),
+	ee_(NULL)
+	,
+	clsSvc_(NULL),
+	expectedCheckTime_(0)
 {
 	statUpdator_.manager_ = this;
 	try {
@@ -662,11 +664,18 @@ void ClusterManager::getHeartbeatCheckInfo(
 
 	try {
 		int64_t currentTime = getMonotonicTime();
+		if (expectedCheckTime_ != 0) {
+			int64_t diff = currentTime - expectedCheckTime_;
+//			if (diff >= ClusterService::CLUSTER_TIMER_EVENT_DIFF_TRACE_LIMIT_INTERVAL) {
+//				GS_TRACE_WARNING(
+//					CLUSTER_DUMP, GS_TRACE_CM_LONG_EVENT, "Heartbeat timer is delayed (" << diff << ")");
+//			}
+		}
+		expectedCheckTime_ = currentTime + getConfig().getHeartbeatInterval();
 		ClusterStatusTransition nextTransition = KEEP;
 		bool isAddNewNode = false;
 		NodeIdList& activeNodeList = heartbeatCheckInfo.getActiveNodeList();
 		util::StackAllocator& alloc = heartbeatCheckInfo.getAllocator();
-
 		int32_t periodicCount
 			= getConfig().getCheckLoadBalanceInterval()
 			/ getConfig().getHeartbeatInterval();
@@ -674,9 +683,19 @@ void ClusterManager::getHeartbeatCheckInfo(
 			% getConfig().getBlockClearInterval()) == 0) {
 			pt_->resetBlockQueue();
 		}
+//		GS_TRACE_INFO(
+//			CLUSTER_DUMP, GS_TRACE_CS_CLUSTER_STATUS,
+//			"CURRENT " << CommonUtility::getTimeStr(currentTime));
 		if (!pt_->isFollower()) {
+			for (NodeId nodeId = 0; nodeId < pt_->getNodeNum(); nodeId++) {
+				int64_t timeout = pt_->getHeartbeatTimeout(nodeId);
+//				GS_TRACE_INFO(
+//					CLUSTER_DUMP, GS_TRACE_CS_CLUSTER_STATUS,
+//					pt_->dumpNodeAddress(nodeId) << " " << CommonUtility::getTimeStr(timeout).c_str());
+			}
 			pt_->setHeartbeatTimeout(
 				SELF_NODEID, nextHeartbeatTime(currentTime));
+
 			util::Set<NodeId> downNodeSet(alloc);
 			pt_->getActiveNodeList(
 				activeNodeList, downNodeSet, currentTime);
@@ -759,6 +778,11 @@ void ClusterManager::getHeartbeatCheckInfo(
 			setActiveNodeList(activeNodeList);
 		}
 		else {
+			int64_t timeout = pt_->getHeartbeatTimeout(0);
+//			GS_TRACE_INFO(
+//				CLUSTER_DUMP, GS_TRACE_CS_CLUSTER_STATUS,
+//				pt_->dumpNodeAddress(0) << " " << CommonUtility::getTimeStr(timeout).c_str());
+
 			if (pt_->getHeartbeatTimeout(0) < currentTime) {
 				TRACE_CLUSTER_EXCEPTION_FORCE(
 					GS_ERROR_CLM_DETECT_HEARTBEAT_TO_MASTER,
@@ -1054,10 +1078,11 @@ bool ClusterManager::setNotifyClusterInfo(
 			TRACE_CLUSTER_EXCEPTION_FORCE(
 				GS_ERROR_CLM_STATUS_TO_FOLLOWER,
 				"Cluster status change to FOLLOWER");
+/*
 			GS_TRACE_CLUSTER_INFO(
 				"Cluster status change to FOLLOWER, MASTER="
 				<< pt_->dumpNodeAddress(senderNodeId));
-
+*/
 			setInitialClusterNum(notifyClusterInfo.getReserveNum());
 			int64_t baseTime = getMonotonicTime();
 			pt_->changeClusterStatus(PartitionTable::FOLLOWER,
@@ -1948,6 +1973,8 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable& stat) {
 	STAT_ADD(STAT_TABLE_CS_CLUSTER_REVISION_NO);
 	STAT_ADD(STAT_TABLE_CS_AUTO_GOAL);
 	STAT_ADD(STAT_TABLE_CS_RACKZONE_ID);
+	STAT_ADD(STAT_TABLE_CS_PARTITION_REPLICATION_PROGRESS);
+	STAT_ADD(STAT_TABLE_CS_PARTITION_GOAL_PROGRESS);
 
 	stat.resolveGroup(parentId, STAT_TABLE_CS_ERROR, "errorInfo");
 
@@ -2210,6 +2237,17 @@ bool ClusterManager::StatUpdator::operator()(StatTable& stat) {
 		stat.set(STAT_TABLE_PERF_TOTAL_CLUSTER_OTHER_LSN,
 			clusterTotalOtherLsn);
 	}
+
+	if (isMaster) {
+		if (isDetail) {
+			double goalProgress = 0;
+			double replicaProgress = 0;
+			pt.progress(goalProgress, replicaProgress);
+			stat.set(STAT_TABLE_CS_PARTITION_REPLICATION_PROGRESS, replicaProgress);
+			stat.set(STAT_TABLE_CS_PARTITION_GOAL_PROGRESS, goalProgress);
+		}
+	}
+
 	return true;
 }
 

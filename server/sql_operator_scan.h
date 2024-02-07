@@ -50,12 +50,16 @@ struct SQLScanOps {
 
 	typedef SQLContainerUtils::ScanCursor ScanCursor;
 	typedef SQLContainerUtils::ScanCursorAccessor ScanCursorAccessor;
+	typedef SQLContainerUtils::IndexScanInfo IndexScanInfo;
 
 	class Registrar;
 
 	class BaseScanContainerOperator;
 
 	class Scan;
+	class ScanSemiFiltering;
+	class ScanUnique;
+	class ScanNoIndex;
 	class ScanContainerFull;
 	class ScanContainerRange;
 	class ScanContainerIndex;
@@ -104,12 +108,92 @@ class SQLScanOps::Scan :
 public:
 	virtual void compile(OpContext &cxt) const;
 
-private:
-	bool tryCompileIndexJoin(OpContext &cxt, OpPlan &plan) const;
-	bool tryCompileEmpty(OpContext &cxt, OpPlan &plan) const;
+	static bool generateMainScanPlan(
+			OpContext &cxt, ScanCursorAccessor &accessor,
+			const OpCode &baseCode);
 
-	TupleList::Info getInputInfo(
-			OpContext &cxt, SQLOps::ColumnTypeList &typeList) const;
+	static void generateEmptyPlan(OpContext &cxt);
+
+	static void generateNoIndexedScanPlan(
+			OpContext &cxt, const OpCode &baseCode);
+
+private:
+	enum {
+		INPUT_JOIN_SCAN = 0,
+		INPUT_JOIN_DRIVING = 1
+	};
+
+	struct ProjectionSet {
+		ProjectionSet();
+
+		OpCode arrangedCode_;
+		SQLOpUtils::ProjectionPair projections_;
+		const Projection *distinctProj_;
+		const Projection *midInProj_;
+	};
+
+	static bool generateCheckedScanPlan(
+			OpContext &cxt, ScanCursorAccessor &accessor,
+			const OpCode &baseCode);
+
+	static void generateIndexJoinPlan(OpContext &cxt, const OpCode &baseCode);
+
+	static void generateIndexJoinDrivingNode(
+			OpCodeBuilder &builder, const OpCode &baseCode,
+			const SQLValues::CompColumnList *keyColumnList,
+			const SQLExprs::Expression *baseSemiPred,
+			SQLExprs::Expression *&semiPred, const OpNode *&drivingNode,
+			OpPlan &plan);
+
+	static bool generateIndexScanNodes(
+			OpCodeBuilder &builder, ScanCursorAccessor &accessor,
+			const OpCode &baseCode, const SQLExprs::IndexSelector &selector,
+			const ProjectionSet &projSet, OpPlan &plan);
+	static void generateNoIndexedScanNodes(
+			bool indexPlanned, const OpCode &baseCode,
+			const ProjectionSet &projSet, OpPlan &plan);
+
+	static void setUpMainScanPlanBuilder(
+			OpCodeBuilder &builder, const SQLExprs::IndexSelector *selector,
+			bool indexPlanned, const OpCode &baseCode, ProjectionSet &projSet);
+	static const SQLExprs::IndexSelector* selectIndex(
+			OpContext &cxt, ScanCursorAccessor &accessor, const OpCode &baseCode,
+			const OpPlan &plan, bool &indexPlanned);
+
+	static bool isForMetaScan(const SQLOps::ContainerLocation &location);
+	static bool isDrivingInputFound(const OpCode &baseCode);
+
+	static TupleList::Info getInputInfo(
+			OpContext &cxt, SQLOps::ColumnTypeList &typeList);
+};
+
+class SQLScanOps::ScanSemiFiltering :
+		public SQLScanOps::BaseScanContainerOperator {
+public:
+	virtual void compile(OpContext &cxt) const;
+};
+
+class SQLScanOps::ScanUnique :
+		public SQLScanOps::BaseScanContainerOperator {
+public:
+	virtual void compile(OpContext &cxt) const;
+
+	static bool generateUniqueScanPlan(
+			OpContext &cxt, ScanCursorAccessor &accessor,
+			const OpCode &baseCode);
+
+private:
+	static bool detectRowDuplicatable(
+			ScanCursorAccessor &accessor, bool &duplicatable);
+};
+
+class SQLScanOps::ScanNoIndex :
+		public SQLScanOps::BaseScanContainerOperator {
+public:
+	virtual void compile(OpContext &cxt) const;
+
+private:
+	static bool detectIndexLoss(ScanCursorAccessor &accessor, bool &indexLost);
 };
 
 class SQLScanOps::ScanContainerFull :

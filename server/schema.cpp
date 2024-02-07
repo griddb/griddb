@@ -399,6 +399,15 @@ std::string ColumnSchema::dump(TransactionContext &txn, ObjectManagerV4 &objectM
 	return ss.str();
 }
 
+void IndexAutoPtr::clear() throw() {
+	if (index_ != NULL) {
+		assert(storage_ != NULL && index_ != NULL);
+		DataStoreV4::releaseIndex(**storage_);
+	}
+	index_ = NULL;
+	storage_ = NULL;
+}
+
 /*!
 	@brief Allocate IndexSchema Object
 */
@@ -534,15 +543,15 @@ void IndexSchema::dropIndexData(TransactionContext &txn, util::Vector<ColumnId> 
 		IndexData indexData(txn.getDefaultAllocator());
 		if (getIndexData(txn, columnIds, mapType, withUncommitted,
 			withPartialMatch, indexData)) {
-			StackAllocAutoPtr<BaseIndex> mainMap(txn.getDefaultAllocator(),
-				getIndex(txn, indexData, false, container));
+			IndexAutoPtr mainMap;
+			getIndex(txn, indexData, false, container, mainMap);
 			if (mainMap.get() != NULL) {
 				container->getDataStore()->finalizeMap
 					(txn, container->getMapAllocateStrategy(), mainMap.get(), 
 						container->getContainerExpirationTime());
 			}
-			StackAllocAutoPtr<BaseIndex> nullMap(txn.getDefaultAllocator(),
-				getIndex(txn, indexData, true, container));
+			IndexAutoPtr nullMap;
+			getIndex(txn, indexData, true, container, nullMap);
 			if (nullMap.get() != NULL) {
 				container->getDataStore()->finalizeMap
 					(txn, container->getMapAllocateStrategy(), nullMap.get(), 
@@ -892,8 +901,9 @@ void IndexSchema::finalize(TransactionContext &txn) {
 /*!
 	@brief Get Index Object
 */
-BaseIndex *IndexSchema::getIndex(TransactionContext &txn, const IndexData &indexData,
-	bool forNull, BaseContainer *container) const {
+void IndexSchema::getIndex(
+		TransactionContext &txn, const IndexData &indexData, bool forNull,
+		BaseContainer *container, IndexAutoPtr &indexPtr) const {
 	AllocateStrategy& strategy = container->getMapAllocateStrategy();
 
 	OId mapOId;
@@ -906,12 +916,22 @@ BaseIndex *IndexSchema::getIndex(TransactionContext &txn, const IndexData &index
 		mapType = indexData.mapType_;
 	}
 	if (mapOId == UNDEF_OID) {
-		return NULL;
+		indexPtr.clear();
+		return;
 	}
-	TreeFuncInfo *funcInfo = container->createTreeFuncInfo(txn, *(indexData.columnIds_));
-	BaseIndex *map = DataStoreV4::getIndex(txn, *getObjectManager(), mapType, 
-		mapOId, strategy, container, funcInfo);
-	return map;
+
+	IndexStorageSet *storageSet = indexData.storageSet_;
+	assert(storageSet != NULL);
+
+	TreeFuncInfo *&funcInfo =
+			(forNull ? storageSet->nullFuncInfo_ : storageSet->funcInfo_);
+	funcInfo = container->createTreeFuncInfo(txn, *(indexData.columnIds_));
+
+	BaseIndexStorage *&indexStorage =
+			(forNull ? storageSet->nullIndexStorage_ : storageSet->indexStorage_);
+	indexPtr.initialize(indexStorage, DataStoreV4::getIndex(
+			txn, *getObjectManager(), mapType, mapOId, strategy, container,
+			funcInfo, indexStorage));
 }
 
 void IndexSchema::expand(TransactionContext &txn) {

@@ -1,0 +1,129 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import log
+import json
+import os
+from optparse import OptionParser
+
+import util_server
+util_server.install_sigint_handler()
+(homedir,logdir) = util_server.get_required_env()
+
+parser = OptionParser(usage="%prog " + util_server.CLIENT_OPTIONS_USAGE,
+            description="Configure the periodic checkpoint of the GridDB node.",
+            version="%prog [V5.0.00]")
+util_server.add_client_options(parser)
+parser.add_option("--on", dest="on",
+                  action="store_true", default=False,
+                  help="Enable the periodic checkpoint.")
+parser.add_option("--off", dest="off",
+                  action="store_true", default=False,
+                  help="Disable the periodic checkpoint.")
+parser.add_option("--manual", dest="manual",
+                  action="store_true", default=False,
+                  help="Perform the manual checkpoint.")
+parser.add_option("-w", "--wait", action='callback', callback=\
+                  util_server.optional_arg(0), dest="wait_time",default=None,
+                  help="Wait for the manual checkpoint to complete.")
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_server.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("B60001: Specify a user name and a password.(-u USER/PASS)")
+    sys.exit(1)
+if options.wait_time is not None:
+    try:
+        wait_time = int(options.wait_time)
+    except ValueError:
+        print("A70002: Specify seconds to wait.(-w "+options.wait_time+")")
+        sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+
+# Perform manual checkpoint
+if options.manual:
+    c = util_server.is_active_cluster(options, log)
+    if c is None:
+        sys.exit(1)
+    elif not c:
+        print("B60101: The checkpoint cannot be performed when the GridDB cluster does not start.")
+        log.error("B60101: The checkpoint cannot be performed when the GridDB cluster does not start.")
+        sys.exit(3)
+    log.info("checkpoint info (node="+options.server+":"+str(options.port)+")")
+
+    # Get current stats to wait
+    end_time = 0
+    cp_count = 0
+    cp_type = "requestedCheckpointOperation"
+    if options.wait_time is not None:
+        cp_stats = util_server.get_cp_stats(options, log)
+        if cp_stats is None:
+            sys.exit(1)
+        cp_count = cp_stats.get(cp_type)
+        log.info("stats before execution (requestedCheckpointOperation="+str(cp_count)+")")
+
+    # Perform manual checkpoint
+    method = "POST"
+    path = "/node/checkpoint"
+    data = {}
+    (res, code) = util_server.request_rest(method, path, data, options, log)
+    clustered = util_server.is_active_cluster(options, log)
+    
+    # Wait for manual checkpoint to complete
+    if options.wait_time is not None:
+        sleep_time = 0
+        e = 0
+        completed = False
+        while not completed:
+            util_server.wait_one_sec()
+            sleep_time += 1
+            completed = util_server.is_cp_completed(options, log, cp_type, cp_count)
+            if completed is None:
+                e = 1
+                break
+            if sleep_time == wait_time:
+                e = 2
+                break
+        util_server.wait_error_case(e,log,"\nThe manual checkpoint has been completed.")
+        log.info("%s end." % (__file__))
+        sys.exit(e)
+    if code != 200:
+        sys.exit(1)
+    print("The GridDB node checkpoint has been started.")
+    log.info("%s end." % (__file__))
+    sys.exit(0)
+
+# Get periodic checkpoint status
+if not (options.off or options.on):
+    method = "GET"
+    path = "/node/stat"
+    data = None
+
+    (res, code) = util_server.request_rest(method, path, data, options, log)
+    if code != 200:
+        sys.exit(1)
+    nodestat = json.loads(res)
+    cpstat = nodestat.get("checkpoint").get("periodicCheckpoint")
+    print(cpstat)
+    log.info("%s end." % (__file__))
+    sys.exit(0)
+
+# Configure periodic checkpoint
+method = "POST"
+path = "/node/periodicCheckpoint"
+data = {}
+
+if options.off:
+    data["enable"] = "false"
+
+(res, code) = util_server.request_rest(method, path, data, options, log)
+if code != 200:
+    sys.exit(1)
+
+log.info("%s end." % (__file__))
+
+

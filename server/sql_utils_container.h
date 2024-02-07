@@ -35,21 +35,11 @@ struct SQLContainerUtils {
 
 	typedef SQLOps::ExtOpContext ExtOpContext;
 
-	struct ScanMergeMode;
 	class ScanCursor;
 	class ScanCursorAccessor;
 
+	struct IndexScanInfo;
 	struct ContainerUtils;
-};
-
-struct SQLContainerUtils::ScanMergeMode {
-	enum Type {
-		MODE_ROW_ARRAY,
-		MODE_MIXED,
-		MODE_MIXED_MERGING,
-
-		END_MODE
-	};
 };
 
 class SQLContainerUtils::ScanCursor {
@@ -60,12 +50,9 @@ public:
 
 	virtual bool scanFull(OpContext &cxt, const Projection &proj) = 0;
 	virtual bool scanRange(OpContext &cxt, const Projection &proj) = 0;
-	virtual bool scanIndex(
-			OpContext &cxt, const SQLExprs::IndexConditionList &condList) = 0;
+	virtual bool scanIndex(OpContext &cxt, const IndexScanInfo &info) = 0;
 	virtual bool scanMeta(
 			OpContext &cxt, const Projection &proj, const Expression *pred) = 0;
-
-	virtual void finishIndexScan(OpContext &cxt) = 0;
 
 	virtual uint32_t getOutputIndex() = 0;
 	virtual void setOutputIndex(uint32_t index) = 0;
@@ -112,14 +99,14 @@ public:
 			ExtOpContext &cxt, const TupleColumnList &inColumnList,
 			SQLExprs::IndexSelector &selector) = 0;
 	virtual bool isIndexLost() = 0;
+	virtual bool isRowDuplicatable() = 0;
+	virtual bool isRangeScanFinished() = 0;
 
 	virtual void setIndexSelection(const SQLExprs::IndexSelector &selector) = 0;
 	virtual const SQLExprs::IndexSelector& getIndexSelection() = 0;
 
 	virtual void setRowIdFiltering() = 0;
 	virtual bool isRowIdFiltering() = 0;
-
-	virtual void setMergeMode(ScanMergeMode::Type mode) = 0;
 
 protected:
 	ScanCursorAccessor();
@@ -143,6 +130,15 @@ struct SQLContainerUtils::ScanCursorAccessor::Source {
 	int64_t memLimit_;
 	std::pair<uint64_t, uint64_t> partialExecSizeRange_;
 	OpContext::Source cxtSrc_;
+};
+
+struct SQLContainerUtils::IndexScanInfo {
+	IndexScanInfo(
+			const SQLExprs::IndexConditionList &condList,
+			const uint32_t *inputIndex);
+
+	const SQLExprs::IndexConditionList *condList_;
+	const uint32_t *inputIndex_;
 };
 
 struct SQLContainerUtils::ContainerUtils {

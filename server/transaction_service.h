@@ -42,7 +42,6 @@
 #include "message_schema.h"
 #include "key_data_store.h"
 
-
 const int LDAP_STATUS_INIT         = 0;
 const int LDAP_STATUS_BIND_ROOT    = 1;
 const int LDAP_STATUS_SEARCH_USER  = 2;
@@ -157,7 +156,7 @@ public:
 	static const size_t DATABASE_NAME_SIZE_MAX = 64;  
 
 	static const size_t USER_NUM_MAX = 1000;  
-	static const size_t DATABASE_NUM_MAX = 128;  
+	static const size_t DATABASE_NUM_MAX = 1000;  
 
 	enum QueryResponseType {
 		ROW_SET					= 0,
@@ -905,6 +904,8 @@ public:
 						util::StdAllocator<char8_t, void> > *name);
 		void getApplicationName(std::ostream &os);
 
+		void getDbApplicationName(util::String& dbName, util::String &applicationName);
+
 		bool isPublicConnection() {
 			return (connectionRoute_ == StatementHandler::CONNECTION_ROUTE_PUBLIC);
 		}
@@ -921,6 +922,7 @@ public:
 		bool isImmediateConsistency_;
 
 		PartitionId handlingPartitionId_;
+		ClientId handlingClientId_;
 		bool connected_;
 		DatabaseId dbId_;
 		bool isAdminAndPublicDB_;
@@ -949,7 +951,6 @@ public:
 	private:
 		util::Mutex mutex_;
 		std::string applicationName_;
-		ClientId handlingClientId_;
 		std::set<SessionId> statementList_;
 		std::map<uint32_t, std::string> envMap_;
 
@@ -1351,6 +1352,8 @@ public:
 		const ClientId& clientId,
 		const TransactionManager::ContextSource& cxtSrc, StatementId stmtId,
 		StoreType storeType, DataStoreLogV4* dsMes);
+
+	bool checkConstraint(Event& ev, ConnectionOption& connOption);
 
 protected:
 	const KeyConstraint& getKeyConstraint(
@@ -3572,6 +3575,11 @@ public:
 		int8_t bval;
 	};
 
+	static void makeDatabaseInfoList(const DataStoreConfig& dsConfig,
+		TransactionContext& txn, util::StackAllocator& alloc,
+		BaseContainer& container, ResultSet& rs,
+		util::XArray<DatabaseInfo*>& dbInfoList, util::Vector<DatabaseId> *dbIdList = NULL);
+
 protected:
 	struct DUGetInOut {
 		enum DUGetType {
@@ -3776,16 +3784,13 @@ private:
 		KeyDataStoreValue &keyStoreValue, const RowKeyData &rowKey,
 		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
 	
-	bool checkPrivilege(TransactionContext &txn, util::StackAllocator &alloc, 
+	bool checkPrivilege(const DataStoreConfig& dsConfig, TransactionContext &txn, util::StackAllocator &alloc,
 		BaseContainer *container, ResultSet *rs, DatabaseInfo &dbInfo);
 	void makeUserInfoList(
 		TransactionContext &txn, util::StackAllocator &alloc,
 		BaseContainer &container, ResultSet &rs,
 		util::XArray<UserInfo*> &userInfoList);
-	void makeDatabaseInfoList(
-		TransactionContext &txn, util::StackAllocator &alloc,
-		BaseContainer &container, ResultSet &rs,
-		util::XArray<DatabaseInfo*> &dbInfoList);
+
 	void removeRowWithRS(TransactionContext &txn, util::StackAllocator &alloc, 
 		const TransactionManager::ContextSource &cxtSrc,
 		KeyDataStoreValue &keyStoreValue,
@@ -5076,7 +5081,9 @@ public:
 	void requestUpdateDataStoreStatus(const Event::Source &eventSource, Timestamp time, bool force);
 
 	UserCache *userCache_;
-	
+	OpenLDAPFactory* olFactory_;
+
+
 private:
 	static class StatSetUpHandler : public StatTable::SetUpHandler {
 		virtual void operator()(StatTable &stat);

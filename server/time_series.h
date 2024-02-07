@@ -137,23 +137,15 @@ public:
 			TransactionContext& txn, const OId *begin, const OId *end,
 			bool onMvcc, ContainerRowScanner &scanner);
 	RowId getMaxRowId(TransactionContext &txn);
-	void searchColumnIdIndex(TransactionContext &txn,
-		BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
-		util::XArray<OId> &resultList, OutputOrder order,
-		bool neverOrdering = false);
-	void searchColumnIdIndex(TransactionContext &txn,
-		BtreeMap::SearchContext &sc, util::XArray<OId> &resultList,
-		OutputOrder order) {
-		searchColumnIdIndex(txn, sc, sc, resultList, order);
-	}
-	void searchColumnIdIndex(TransactionContext &txn,
-		BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
-		util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList);
-	void searchColumnIdIndex(TransactionContext &txn,
-		BtreeMap::SearchContext &sc, util::XArray<OId> &normalRowList,
-		util::XArray<OId> &mvccRowList) {
-		searchColumnIdIndex(txn, sc, sc, normalRowList, mvccRowList);
-	}
+
+	void searchColumnIdIndex(
+			TransactionContext &txn, BtreeMap::SearchContext &sc,
+			util::XArray<OId> &resultList, OutputOrder order,
+			bool neverOrdering = false);
+	void searchColumnIdIndex(
+			TransactionContext &txn, BtreeMap::SearchContext &sc,
+			util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList);
+
 	void aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		uint32_t columnId, AggregationType type, ResultSize &resultNum,
 		Value &value);  

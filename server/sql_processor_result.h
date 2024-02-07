@@ -29,13 +29,13 @@ struct SQLDetailProfs {
 			SQLVariableSizeGlobalAllocator &globalVarAlloc,
 			int32_t limitInterval, int32_t queryLimitSize);
 	~SQLDetailProfs();
+	SQLDetailProfs(SQLVariableSizeGlobalAllocator& globalVarAlloc, const SQLDetailProfs& another);
 
-	void set(
-			const char *dbName,
-			const char *applicationName, 
-			const char *query);
+	void set(const char *dbName,const char *applicationName, const char *query);
 
 	void complete(int32_t executionTime = INT32_MAX);
+
+	bool check(int64_t &startTIme, uint32_t &elapsedMills);
 
 	std::string dump();
 	std::string dumpQuery();
@@ -50,9 +50,14 @@ struct SQLDetailProfs {
 	bool isTrace_;
 
 	util::Stopwatch watch_;
-	int32_t execTime_;
+	int64_t execTime_;
 	int32_t traceLimitInterval_;
 	int32_t queryLimitSize_;
+	int64_t swapReadSize_;
+	int64_t swapWriteSize_;
+	int64_t sqlSwapReadSize_;
+	int64_t sqlSwapWriteSize_;
+	int32_t taskNum_;
 
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_MEMBERS(startTimeStr_,
@@ -129,5 +134,4 @@ private:
 	SQLDetailProfs profs_;
 	static const Registrar registrar_;
 };
-
 #endif

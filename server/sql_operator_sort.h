@@ -162,6 +162,7 @@ private:
 	bool isGrouping(bool merging, bool forFinal) const;
 	bool isDuplicateGroupMerging() const;
 	bool isUnique() const;
+	bool isOrderedUnique() const;
 	bool isKeyFiltering() const;
 
 	bool isKeyEmpty(TupleSorter &sorter) const;

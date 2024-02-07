@@ -28,7 +28,7 @@
 #include "time_series.h"
 #include "cluster_service.h"
 #include "key_data_store.h"
-
+#include "database_manager.h"
 #include "picojson.h"
 #include <fstream>
 
@@ -63,16 +63,34 @@ std::string DataStoreV4::getClientAddress(const Event *ev) {
 #define AUDIT_TRACE_ERROR_EXECUTE()  { \
 }
 
+UTIL_TRACER_DECLARE(IO_MONITOR);
 
 class TransactionContextScope {
 public:
 
-	TransactionContextScope(TransactionContext& txn) :
-		txn_(txn), containerNameStr_(txn.getDefaultAllocator()) {
+	static const int32_t TRACE_TIME = 5 * 1000;
+	TransactionContextScope(TransactionContext& txn, DSInputMes *input) :
+		txn_(txn), containerNameStr_(txn.getDefaultAllocator()), input_(input) {
 		txn_.setContainerNameStr(&containerNameStr_);
+		watch_.start();
 	}
 
 	~TransactionContextScope() {
+		uint32_t lap = watch_.elapsedMillis();
+		if (lap >= TRACE_TIME) {
+			const char* dsType = DataStoreV4::AuditEventType(input_);
+			util::String* containerNameStr = txn_.getContainerNameStr();
+			if (!containerNameStr) {
+				GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,
+					"DsEvent=" << DataStoreV4::AuditEventType(input_) << ", container=" << containerNameStr->c_str()
+					<< ", pId=" << txn_.getPartitionId() << ", elapsedMillis=" << lap);
+			}
+			else {
+				GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,
+					"DsEvent=" << DataStoreV4::AuditEventType(input_) 
+					<< ", pId=" << txn_.getPartitionId() << ", elapsedMillis=" << lap);
+			}
+		}
 		txn_.setContainerNameStr(NULL);
 	}
 	
@@ -95,6 +113,8 @@ public:
 private:
 	TransactionContext& txn_;
 	util::String containerNameStr_;
+	util::Stopwatch watch_;
+	DSInputMes* input_;
 };
 const uint32_t DataStoreConfig::LIMIT_SMALL_SIZE_LIST[12] = {
 	15 * 1024, 31 * 1024, 63 * 1024, 127 * 1024, 128 * 1024, 128 * 1024,
@@ -359,12 +379,15 @@ DataStoreStats::PlainChunkGroupStats::PlainChunkGroupStats() :
 
 
 DataStoreV4::DataStoreV4(
-		util::StackAllocator* stAlloc,
-		util::FixedSizeAllocator<util::Mutex>* resultSetPool,
-		ConfigTable* configTable, TransactionManager* txnMgr,
-		ChunkManager* chunkmanager, LogManager<MutexLocker>* logmanager,
-		KeyDataStore* keyStore, const StatsSet &stats) :
-		DataStoreBase(stAlloc, resultSetPool, configTable, txnMgr, chunkmanager, logmanager, keyStore),
+		util::StackAllocator *stAlloc,
+		util::FixedSizeAllocator<util::Mutex> *resultSetPool,
+		ConfigTable *configTable, TransactionManager *txnMgr,
+		ChunkManager *chunkManager, LogManager<MutexLocker> *logManager,
+		KeyDataStore *keyStore, ResultSetManager &rsManager,
+		const StatsSet &stats) :
+		DataStoreBase(
+				stAlloc, resultSetPool, configTable, txnMgr, chunkManager,
+				logManager, keyStore),
 		config_(NULL),
 		allocateStrategy_(),
 		dsStats_(stats.dsStats_),
@@ -373,32 +396,25 @@ DataStoreV4::DataStoreV4(
 		keyStore_(keyStore),
 		latch_(NULL),
 		headerOId_(UNDEF_OID),
-		rsManager_(NULL),
+		rsManager_(rsManager),
 		activeBackgroundCount_(0),
-		blockSize_(0)
-{
+		blockSize_(0) {
 	try {
 		affinityGroupSize_ =
 			configTable->get<int32_t>(CONFIG_TABLE_DS_AFFINITY_GROUP_SIZE);
 
 		objectManager_ = UTIL_NEW ObjectManagerV4(
-				*configTable, chunkmanager, stats.objMgrStats_);
+				*configTable, chunkManager, stats.objMgrStats_);
 		allocateStrategy_.set(META_GROUP_ID, objectManager_);
 
 		uint32_t chunkExpSize = util::nextPowerBitsOf2(static_cast<uint32_t>(
 			configTable->getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE)));
 		blockSize_ = 1 << chunkExpSize;
 
-		const uint32_t rsCacheSize =
-			configTable->getUInt32(CONFIG_TABLE_DS_RESULT_SET_CACHE_MEMORY);
-		rsManager_ = UTIL_NEW ResultSetManager(stAlloc, resultSetPool, 
-			objectManager_, rsCacheSize);
-
 
 		clearTimeStats();
 	}
 	catch (std::exception& e) {
-		delete rsManager_;
 		delete objectManager_;
 
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -406,7 +422,6 @@ DataStoreV4::DataStoreV4(
 }
 
 DataStoreV4::~DataStoreV4() {
-	delete rsManager_;
 
 	delete objectManager_;
 }
@@ -419,6 +434,16 @@ void DataStoreV4::initialize(ManagerSet& resourceSet) {
 	clusterService_ = resourceSet.clsSvc_;
 }
 
+void DataStoreV4::createResultSetManager(
+		util::FixedSizeAllocator<util::Mutex> &resultSetPool,
+		ConfigTable &configTable, ChunkBuffer &chunkBuffer,
+		UTIL_UNIQUE_PTR<ResultSetManager> &rsManager) {
+	const uint32_t rsCacheSize =
+			configTable.getUInt32(CONFIG_TABLE_DS_RESULT_SET_CACHE_MEMORY);
+
+	rsManager.reset(UTIL_NEW ResultSetManager(
+			resultSetPool, chunkBuffer, rsCacheSize));
+}
 
 /*!
 	@brief Creates or Updates Container
@@ -760,9 +785,11 @@ bool DataStoreV4::executeBGTaskInternal(TransactionContext &txn, BackgroundId bg
 			}
 			else {
 				AllocateStrategy strategy(groupId, getObjectManager());
-				StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-					getIndex(txn, *getObjectManager(), mapType, mapOId,
-						strategy, NULL, NULL));
+				BaseIndexStorage *indexStorage = NULL;
+				IndexAutoPtr map;
+				map.initialize(indexStorage, getIndex(
+						txn, *getObjectManager(), mapType, mapOId,
+						strategy, NULL, NULL, indexStorage));
 				return map.get()->finalize(txn);
 			}
 		}
@@ -780,26 +807,38 @@ bool DataStoreV4::executeBGTaskInternal(TransactionContext &txn, BackgroundId bg
 	}
 }
 
-BaseIndex *DataStoreV4::getIndex(TransactionContext &txn, 
-	ObjectManagerV4 &objectManager, MapType mapType, OId mapOId, 
-	AllocateStrategy &strategy, BaseContainer *container,
-	TreeFuncInfo *funcInfo) {
-	BaseIndex *map = NULL;
+BaseIndex* DataStoreV4::getIndex(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		MapType mapType, OId mapOId, AllocateStrategy &strategy,
+		BaseContainer *container, TreeFuncInfo *funcInfo,
+		BaseIndexStorage *&indexStorage) {
 	switch (mapType) {
 	case MAP_TYPE_BTREE:
-		map = ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(
-			txn, objectManager, mapOId, strategy, container, funcInfo);
-		break;
+		return BaseIndexStorage::create<BtreeMap>(
+				txn, objectManager, mapType, mapOId, strategy, container,
+				funcInfo, &indexStorage);
 	case MAP_TYPE_SPATIAL:
-		map = ALLOC_NEW(txn.getDefaultAllocator()) RtreeMap(
-			txn, objectManager, mapOId, strategy, container, funcInfo);
-		break;
+		return BaseIndexStorage::create<RtreeMap>(
+				txn, objectManager, mapType, mapOId, strategy, container,
+				funcInfo, &indexStorage);
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 	}
-	return map;
 }
 
+void DataStoreV4::releaseIndex(BaseIndexStorage &indexStorage) throw() {
+	switch (indexStorage.getMapType()) {
+	case MAP_TYPE_BTREE:
+		indexStorage.clear<BtreeMap>();
+		break;
+	case MAP_TYPE_SPATIAL:
+		indexStorage.clear<RtreeMap>();
+		break;
+	default:
+		assert(false);
+		break;
+	}
+}
 
 
 template <>
@@ -1422,6 +1461,7 @@ void DataStoreV4::restoreGroupId(
 			}
 			else {
 				groupKeyMap_.insert(std::make_pair(GroupKey(dbId, groupId, affinityId, chunkKey), 1));
+				txnMgr_->getDatabaseManager().put(getPId(), dbId, groupId);
 			}
 
 			nextContainerId = container->getContainerId() + 1;
@@ -1631,7 +1671,7 @@ uint64_t DataStoreV4::scanChunkGroup(TransactionContext& txn, Timestamp timestam
 		const GroupKey groupKey(0, 0, 0, chunkKeyLowerLimit);
 
 		uint64_t estimateBatchFreeNum = 0;
-
+		DatabaseManager::DatabaseStatScope scope(txnMgr_->getDatabaseManager(), getPId());
 		for (std::map<GroupKey, int64_t>::iterator itr =
 				groupKeyMap_.upper_bound(groupKey);
 				itr != groupKeyMap_.end(); itr++) {
@@ -1647,7 +1687,7 @@ uint64_t DataStoreV4::scanChunkGroup(TransactionContext& txn, Timestamp timestam
 						chunkManager_->groupStats(groupId);
 
 				groupList[categoryId].subTable_.merge(subStats);
-
+				scope.set(groupId, subStats);
 				blockNum += subStats(
 						ChunkGroupStats::GROUP_STAT_USE_BLOCK_COUNT).get();
 			}
@@ -2278,7 +2318,7 @@ void DataStoreV4::finalize() {}
 
 Serializable* DataStoreV4::exec(TransactionContext* txn, KeyDataStoreValue* storeValue, Serializable* message) {
 	DSInputMes* input = static_cast<DSInputMes*>(message);
-	TransactionContextScope scope(*txn);
+	TransactionContextScope scope(*txn, input);
 	try {
 		util::StackAllocator& alloc = txn->getDefaultAllocator();
 		switch (input->type_) {
@@ -3659,6 +3699,7 @@ DSGroupId DataStoreV4::getGroupId(DatabaseId dbId, const util::String& affinityS
 	if (strcmp(affinityStr.c_str(), UNIQUE_GROUP_ID_KEY) == 0) {
 		DSGroupId groupId = keyStore_->allocateGroupId(groupNum);
 		groupKeyMap_.insert(std::make_pair(GroupKey(dbId, groupId, affinityId, chunkKey), 1));
+		txnMgr_->getDatabaseManager().put(getPId(), dbId, groupId);
 		return groupId;
 	}
 
@@ -3672,6 +3713,7 @@ DSGroupId DataStoreV4::getGroupId(DatabaseId dbId, const util::String& affinityS
 	else {
 		DSGroupId groupId = keyStore_->allocateGroupId(groupNum);
 		groupKeyMap_.insert(std::make_pair(GroupKey(dbId, groupId, affinityId, chunkKey), 1));
+		txnMgr_->getDatabaseManager().put(getPId(), dbId, groupId);
 		return groupId;
 	}
 }
@@ -3705,7 +3747,7 @@ const char* DataStoreV4::AuditEventType(DSInputMes *input)
 	case DS_PUT_CONTAINER:
 		return "PUT_CONTAINER";
 	case DS_UPDATE_TABLE_PARTITIONING_ID:
-		return "";
+		return "UPDATE_TABLE_PARTITIONING_ID";
 	case DS_DROP_CONTAINER:
 		return "DROP_CONTAINER";
 	case DS_GET_CONTAINER:
@@ -3715,8 +3757,9 @@ const char* DataStoreV4::AuditEventType(DSInputMes *input)
 	case DS_DROP_INDEX:
 		return "DROP_INDEX";
 	case DS_CONTINUE_CREATE_INDEX:
+		return "CONTINUE_CREATE_INDEX";
 	case DS_CONTINUE_ALTER_CONTAINER:
-		return "";
+		return "CONTINUE_ALTER_CONTAINER";
 	case DS_PUT_ROW:
 		return "PUT_ROW";
 	case DS_APPEND_ROW:
@@ -3748,15 +3791,19 @@ const char* DataStoreV4::AuditEventType(DSInputMes *input)
 	case DS_QUERY_SAMPLE:
 		return "QUERY_SAMPLE";
 	case DS_QUERY_FETCH_RESULT_SET:
+		return "QUERY_FETCH_RESULT_SET";
 	case DS_QUERY_CLOSE_RESULT_SET:
-		return "";
+		return "QUERY_CLOSE_RESULT_SET";
 	case DS_GET_CONTAINER_OBJECT:
 		return "GET_CONTAINER_OBJECT";
 	case DS_SCAN_CHUNK_GROUP:
+		return "SCAN_CHUNK_GROUP";
 	case DS_SEARCH_BACKGROUND_TASK:
+		return "SEARCH_BACKGROUND_TASK";
 	case DS_EXECUTE_BACKGROUND_TASK:
+		return "EXECUTE_BACKGROUND_TASK";
 	case DS_CHECK_TIMEOUT_RESULT_SET:
-		return "";
+		return "CHECK_TIMEOUT_RESULT_SET";
 	}
 	return "";
 }

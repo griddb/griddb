@@ -31,9 +31,9 @@ const double InterchangeableStoreMemory::CALC_EMA_HALF_LIFE_CONSTANT = 2.8854;
 InterchangeableStoreMemory::InterchangeableStoreMemory(
 		const ConfigTable &config, uint32_t chunkExpSize,
 		int64_t storeMemoryLimit, int64_t walMemoryLimit, int64_t affinityMemoryLimit)
-: config_(config), pgConfig_(config),
+: config_(config),
   partitionNum_(config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
-  partitionGroupNum_(pgConfig_.getPartitionGroupCount()),
+  partitionGroupNum_(PartitionGroupConfig(config).getPartitionGroupCount()),
   chunkExpSize_(chunkExpSize),
   storeMemoryLimit_(storeMemoryLimit), walMemoryLimit_(walMemoryLimit),
   affinityMemoryLimit_(affinityMemoryLimit),

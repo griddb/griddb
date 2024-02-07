@@ -14,7 +14,8 @@
 	You should have received a copy of the GNU Affero General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "sql_compiler.h"
+#include "sql_compiler_internal.h"
+
 #include "sql_processor.h" 
 #include "sql_execution.h" 
 #include "meta_type.h"
@@ -22,26 +23,6 @@
 #include "json.h"
 #include "picojson.h"
 #include "sql_utils.h"
-
-UTIL_TRACER_DECLARE(SQL_HINT);
-
-#define SQL_COMPILER_THROW_ERROR(errorCode, exprPtr, message) \
-	do { \
-		/* TODO */ \
-		static_cast<void>(static_cast<const SyntaxTree::Expr*>(exprPtr)); \
-		GS_THROW_USER_ERROR(errorCode, message); \
-	} \
-	while (false)
-
-#define SQL_COMPILER_RETHROW_ERROR(cause, exprPtr, message) \
-	do { \
-		/* TODO */ \
-		static_cast<void>(static_cast<const SyntaxTree::Expr*>(exprPtr)); \
-		GS_RETHROW_USER_ERROR(cause, message); \
-	} \
-	while (false)
-
-
 
 SQLTableInfo::SQLTableInfo(util::StackAllocator &alloc) :
 		dbName_(alloc),
@@ -52,12 +33,11 @@ SQLTableInfo::SQLTableInfo(util::StackAllocator &alloc) :
 		isExpirable_(false),
 		columnInfoList_(alloc),
 		partitioning_(NULL),
-		indexInfoList_(alloc),
+		indexInfoList_(NULL),
+		basicIndexInfoList_(NULL),
 		nosqlColumnInfoList_(alloc),
 		nosqlColumnOptionList_(alloc),
-		compositeIndexInfoList_(alloc),
-		sqlString_(alloc),  
-		approxSize_(0),
+		sqlString_(alloc),
 		cardinalityList_(alloc),
 		nullsStats_(alloc) {
 }
@@ -71,7 +51,8 @@ SQLTableInfo::IdInfo::IdInfo() :
 		schemaVersionId_(0),
 		subContainerId_(-1),
 		partitioningVersionId_(-1),
-		isNodeExpansion_(false) {
+		isNodeExpansion_(false),
+		approxSize_(-1) {
 }
 
 bool SQLTableInfo::IdInfo::isEmpty() const {
@@ -86,15 +67,16 @@ bool SQLTableInfo::IdInfo::operator==(const IdInfo &another) const {
 			containerId_ == another.containerId_ &&
 			schemaVersionId_ == another.schemaVersionId_ &&
 			subContainerId_ == another.subContainerId_ &&
-			partitioningVersionId_ == another.partitioningVersionId_;
+			partitioningVersionId_ == another.partitioningVersionId_ &&
+			approxSize_ == another.approxSize_;
 }
 
 SQLTableInfo::SubInfo::SubInfo() :
 		partitionId_(0),
 		containerId_(0),
 		schemaVersionId_(0),
-		indexInfoList_(NULL),
-		nodeAffinity_(-1) {
+		nodeAffinity_(-1),
+		approxSize_(-1) {
 }
 
 SQLTableInfo::PartitioningInfo::PartitioningInfo(util::StackAllocator &alloc) :
@@ -112,7 +94,8 @@ SQLTableInfo::PartitioningInfo::PartitioningInfo(util::StackAllocator &alloc) :
 		availableList_(alloc) {
 }
 
-void SQLTableInfo::PartitioningInfo::copy(SQLTableInfo::PartitioningInfo &partitioningInfo) {
+void SQLTableInfo::PartitioningInfo::copy(
+		const SQLTableInfo::PartitioningInfo &partitioningInfo) {
 	partitioningType_ = partitioningInfo.partitioningType_;
 	partitioningColumnId_ = partitioningInfo.partitioningColumnId_;
 	subPartitioningColumnId_ = partitioningInfo.subPartitioningColumnId_;
@@ -126,6 +109,39 @@ void SQLTableInfo::PartitioningInfo::copy(SQLTableInfo::PartitioningInfo &partit
 	intervalValue_ = partitioningInfo.intervalValue_;
 }
 
+SQLTableInfo::SQLIndexInfo::SQLIndexInfo(util::StackAllocator &alloc) :
+		columns_(alloc) {
+}
+
+SQLTableInfo::BasicIndexInfoList::BasicIndexInfoList(
+		util::StackAllocator &alloc) :
+		columns_(alloc) {
+}
+
+void SQLTableInfo::BasicIndexInfoList::assign(
+		util::StackAllocator &alloc, const IndexInfoList &src) {
+	util::Set<ColumnId> columnSet(alloc);
+	for (IndexInfoList::const_iterator it = src.begin(); it != src.end(); ++it) {
+		if (it->columns_.empty()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
+		}
+		columnSet.insert(it->columns_.front());
+	}
+	columns_.assign(columnSet.begin(), columnSet.end());
+}
+
+const util::Vector<ColumnId>&
+SQLTableInfo::BasicIndexInfoList::getFirstColumns() const {
+	return columns_;
+}
+
+bool SQLTableInfo::BasicIndexInfoList::isIndexed(
+		ColumnId firstColumnId) const {
+	return std::binary_search(
+			columns_.begin(), columns_.end(), firstColumnId);
+}
+
 SQLTableInfoList::SQLTableInfoList(util::StackAllocator &alloc) :
 		list_(alloc),
 		defaultDBName_(NULL) {
@@ -135,6 +151,15 @@ const SQLTableInfo& SQLTableInfoList::add(const SQLTableInfo &info) {
 	const SQLTableInfo::Id id = static_cast<SQLTableInfo::Id>(list_.size());
 	list_.push_back(info);
 	list_.back().idInfo_.id_ = id;
+
+	if (info.indexInfoList_ != NULL) {
+		util::StackAllocator &alloc = getAllocator();
+		BasicIndexInfoList *basicIndexInfoList =
+				ALLOC_NEW(alloc) BasicIndexInfoList(alloc);
+		basicIndexInfoList->assign(alloc, *info.indexInfoList_);
+		list_.back().basicIndexInfoList_ = basicIndexInfoList;
+	}
+
 	return list_.back();
 }
 
@@ -194,17 +219,23 @@ const SQLTableInfo* SQLTableInfoList::prepareMeta(
 		const bool forCore = true;
 		SQLCompiler::Meta::getMetaColumnInfo(
 				alloc, coreIdInfo, forCore, info.columnInfoList_, -1);
-		info.partitioning_ =
-				ALLOC_NEW(alloc) SQLTableInfo::PartitioningInfo(alloc);
-		info.partitioning_->partitioningCount_ = partitionCount;
-		info.partitioning_->clusterPartitionCount_ = partitionCount;
 
-		SQLTableInfo::SubInfoList &subInfoList = info.partitioning_->subInfoList_;
-		subInfoList.resize(partitionCount);
-		for (uint32_t i = 0; i < partitionCount; i++) {
-			subInfoList[i].partitionId_ = i;
-			subInfoList[i].containerId_ = coreIdInfo.containerId_;
-			subInfoList[i].nodeAffinity_ = i;
+		{
+			SQLTableInfo::PartitioningInfo *partitioning =
+					ALLOC_NEW(alloc) SQLTableInfo::PartitioningInfo(alloc);
+
+			partitioning->partitioningCount_ = partitionCount;
+			partitioning->clusterPartitionCount_ = partitionCount;
+
+			SQLTableInfo::SubInfoList &subInfoList = partitioning->subInfoList_;
+			subInfoList.resize(partitionCount);
+			for (uint32_t i = 0; i < partitionCount; i++) {
+				subInfoList[i].partitionId_ = i;
+				subInfoList[i].containerId_ = coreIdInfo.containerId_;
+				subInfoList[i].nodeAffinity_ = i;
+			}
+
+			info.partitioning_ = partitioning;
 		}
 
 		return &add(info);
@@ -303,40 +334,24 @@ const SQLTableInfo* SQLTableInfoList::find(
 	return NULL;
 }
 
-util::StackAllocator& SQLTableInfoList::getAllocator() {
-	return *list_.get_allocator().base();
-}
-
-void SQLTableInfoList::applyStatisticalHint(SQLHintInfo &hintInfo) {
-	for (List::iterator it = list_.begin(); it != list_.end(); ++it) {
-		hintInfo.applyStatisticalHint(*it); 
-	}
-}
-
-const SQLTableInfo::IndexInfoList& SQLTableInfoList::getIndexInfoList(
+const SQLTableInfo::BasicIndexInfoList* SQLTableInfoList::getIndexInfoList(
 		const SQLTableInfo::IdInfo &idInfo) const {
 	const SQLTableInfo &tableInfo = resolve(idInfo.id_);
-	if (idInfo.subContainerId_ >= 0 && tableInfo.partitioning_ != NULL) {
-		const SQLTableInfo::SubInfo &subInfo =
-				tableInfo.partitioning_->subInfoList_[idInfo.subContainerId_];
-		if (subInfo.indexInfoList_ != NULL) {
-			return *subInfo.indexInfoList_;
-		}
-	}
+	return tableInfo.basicIndexInfoList_;
+}
 
-	return tableInfo.indexInfoList_;
+util::StackAllocator& SQLTableInfoList::getAllocator() {
+	return *list_.get_allocator().base();
 }
 
 SQLPreparedPlan::SQLPreparedPlan(util::StackAllocator &alloc) :
 		nodeList_(alloc),
 		parameterList_(alloc),
 		currentTimeRequired_(false),
-		bindList_(NULL),
 		hintInfo_(NULL) {
 }
 
 SQLPreparedPlan::~SQLPreparedPlan() {
-	ALLOC_DELETE(getAllocator(), hintInfo_);
 }
 
 util::StackAllocator& SQLPreparedPlan::getAllocator() const {
@@ -365,6 +380,22 @@ const SQLPreparedPlan::Node& SQLPreparedPlan::back() const {
 	return nodeList_.back();
 }
 
+bool SQLPreparedPlan::isDisabledNode(const Node &node) {
+	return (node.type_ == getDisabledNodeType());
+}
+
+bool SQLPreparedPlan::isDisabledExpr(const SyntaxTree::Expr &expr) {
+	return (expr.op_ == getDisabledExprType());
+}
+
+SQLType::Id SQLPreparedPlan::getDisabledNodeType() {
+	return SQLType::START_EXEC;
+}
+
+SQLType::Id SQLPreparedPlan::getDisabledExprType() {
+	return SQLType::START_EXPR;
+}
+
 void SQLPreparedPlan::removeEmptyNodes() {
 	util::StackAllocator &alloc = getAllocator();
 
@@ -374,7 +405,7 @@ void SQLPreparedPlan::removeEmptyNodes() {
 			nodeIt != nodeList_.end(); ++nodeIt) {
 		Node &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			idMap.push_back(SyntaxTree::UNDEF_INPUTID);
 		}
 		else {
@@ -392,7 +423,7 @@ void SQLPreparedPlan::removeEmptyNodes() {
 			nodeIt != nodeList_.end(); ++nodeIt) {
 		Node &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			continue;
 		}
 
@@ -421,7 +452,7 @@ void SQLPreparedPlan::removeEmptyColumns() {
 			nodeIt != nodeList_.end(); ++nodeIt) {
 		Node &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			allColumnMap.push_back(NULL);
 			continue;
 		}
@@ -432,7 +463,7 @@ void SQLPreparedPlan::removeEmptyColumns() {
 		ColumnId nextId = 0;
 		for (Node::ExprList::iterator it = node.outputList_.begin();
 				it != node.outputList_.end(); ++it) {
-			if (it->op_ == SQLType::START_EXPR) {
+			if (isDisabledExpr(*it)) {
 				columnMap->push_back(std::numeric_limits<ColumnId>::max());
 				found = true;
 			}
@@ -453,7 +484,7 @@ void SQLPreparedPlan::removeEmptyColumns() {
 			nodeIt != nodeList_.end(); ++nodeIt) {
 		Node &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			continue;
 		}
 
@@ -468,7 +499,7 @@ void SQLPreparedPlan::removeEmptyColumns() {
 
 		for (Node::ExprList::iterator it = node.outputList_.begin();
 				it != node.outputList_.end();) {
-			if (it->op_ == SQLType::START_EXPR) {
+			if (isDisabledExpr(*it)) {
 				it = node.outputList_.erase(it);
 			}
 			else {
@@ -486,7 +517,7 @@ void SQLPreparedPlan::validateReference(
 			nodeIt != nodeList_.end(); ++nodeIt) {
 		const Node &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			continue;
 		}
 
@@ -560,7 +591,7 @@ void SQLPreparedPlan::validateReference(
 					static_cast<Node::Id>(nodeIt - nodeList_.begin());
 			const bool visited = visitedList[nodeId];
 
-			if ((node.type_ == SQLType::START_EXEC) == !!visited) {
+			if (!isDisabledNode(node) == !visited) {
 				assert(false);
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
 			}
@@ -571,10 +602,14 @@ void SQLPreparedPlan::validateReference(
 
 void SQLPreparedPlan::setUpHintInfo(
 		const SyntaxTree::ExprList* hintList, SQLTableInfoList &tableInfoList) {
+	static_cast<void>(tableInfoList); 
+
 	assert(hintInfo_ == NULL);
 	if (hintList) {
-		hintInfo_ = ALLOC_NEW(getAllocator()) SQLHintInfo(getAllocator());
-		hintInfo_->makeHintMap(hintList, tableInfoList);
+		util::StackAllocator &alloc = getAllocator();
+		SQLHintInfo *info =  ALLOC_NEW(alloc) SQLHintInfo(alloc);
+		info->makeHintMap(hintList);
+		hintInfo_ = info;
 	}
 }
 
@@ -633,6 +668,11 @@ const SQLPreparedPlan::Node::CommandOptionFlag
 const SQLPreparedPlan::Node::CommandOptionFlag
 		SQLPreparedPlan::Node::Config::CMD_OPT_GROUP_RANGE = 1 << 8;
 
+const SQLPreparedPlan::Node::CommandOptionFlag
+		SQLPreparedPlan::Node::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT = 1 << 9;
+const SQLPreparedPlan::Node::CommandOptionFlag
+		SQLPreparedPlan::Node::Config::CMD_OPT_JOIN_DRIVING_SOME = 1 << 10;
+
 SQLPreparedPlan::Node::Node(util::StackAllocator &alloc) :
 		id_(0),
 		type_(Type()),
@@ -652,7 +692,6 @@ SQLPreparedPlan::Node::Node(util::StackAllocator &alloc) :
 		updateSetList_(NULL),
 		createTableOpt_(NULL),
 		createIndexOpt_(NULL),
-		tqlPred_(NULL),
 		partitioningInfo_(NULL),
 		commandType_(SyntaxTree::CMD_NONE),
 		cmdOptionList_(NULL),
@@ -660,7 +699,8 @@ SQLPreparedPlan::Node::Node(util::StackAllocator &alloc) :
 		insertSetList_(NULL),
 		nosqlTypeList_(NULL),
 		nosqlColumnOptionList_(NULL),
-		optionParam_(NULL) {
+		profile_(NULL),
+		profileKey_(-1) {
 }
 
 util::StackAllocator& SQLPreparedPlan::Node::getAllocator() const {
@@ -681,13 +721,14 @@ void SQLPreparedPlan::Node::setName(
 		const util::String &table, const util::String *db, int64_t nsId) {
 	util::StackAllocator &alloc = getAllocator();
 
-	qName_ = ALLOC_NEW(alloc) SyntaxTree::QualifiedName(alloc);
-	qName_->table_ = ALLOC_NEW(alloc) util::String(table);
-	qName_->nsId_ = nsId;
-
+	QualifiedName *name = ALLOC_NEW(alloc) SyntaxTree::QualifiedName(alloc);
+	name->table_ = ALLOC_NEW(alloc) util::String(table);
+	name->nsId_ = nsId;
 	if (db != NULL) {
-		qName_->db_ = ALLOC_NEW(alloc) util::String(*db);
+		name->db_ = ALLOC_NEW(alloc) util::String(*db);
 	}
+
+	qName_ = name;
 }
 
 void SQLPreparedPlan::Node::getColumnNameList(
@@ -718,7 +759,7 @@ void SQLPreparedPlan::Node::remapColumnId(
 	for (ExprList::iterator it = exprList.begin(); it != exprList.end(); ++it) {
 		Expr *expr = &(*it);
 
-		if (expr->op_ == SQLType::START_EXPR) {
+		if (isDisabledExpr(*expr)) {
 			continue;
 		}
 
@@ -734,7 +775,7 @@ void SQLPreparedPlan::Node::remapColumnId(
 		const util::Vector<const util::Vector<ColumnId>*> &allColumnMap,
 		Expr *&expr) {
 	assert(expr != NULL);
-	assert(expr->op_ != SQLType::START_EXPR);
+	assert(!isDisabledExpr(*expr));
 	assert(tableIdInfo_.isEmpty());
 
 	if (expr->op_ != SQLType::EXPR_COLUMN &&
@@ -832,9 +873,9 @@ void SQLPreparedPlan::Node::validateReference(
 					it != outputList_.end(); ++it) {
 				if ((type_ == SQLType::EXEC_LIMIT || type_ == SQLType::EXEC_UNION) &&
 						inNode != NULL) {
-					if (it->op_ == SQLType::START_EXPR) {
-						if (inNode->outputList_[it - outputList_.begin()].op_ !=
-								SQLType::START_EXPR) {
+					if (isDisabledExpr(*it)) {
+						if (!isDisabledExpr(
+								inNode->outputList_[it - outputList_.begin()])) {
 							assert(false);
 							GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
 						}
@@ -848,7 +889,7 @@ void SQLPreparedPlan::Node::validateReference(
 					}
 				}
 
-				if (it->op_ == SQLType::START_EXPR) {
+				if (isDisabledExpr(*it)) {
 					continue;
 				}
 				validateReference(plan, tableInfoList, idRef, *it);
@@ -883,7 +924,7 @@ void SQLPreparedPlan::Node::validateReference(
 		const SQLPreparedPlan &plan, const SQLTableInfoList *tableInfoList,
 		const Id *idRef, const Expr &expr) const {
 
-	if (expr.op_ == SQLType::START_EXPR) {
+	if (isDisabledExpr(expr)) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
 	}
@@ -915,7 +956,7 @@ void SQLPreparedPlan::Node::validateReference(
 
 		const Id id = (idRef == NULL ? inputList_[pos] : *idRef);
 		if (id >= plan.nodeList_.size() ||
-				plan.nodeList_[id].type_ == SQLType::START_EXEC) {
+				isDisabledNode(plan.nodeList_[id])) {
 			assert(false);
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
 		}
@@ -926,7 +967,7 @@ void SQLPreparedPlan::Node::validateReference(
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
 		}
 
-		if (node.outputList_[expr.columnId_].op_ == SQLType::START_EXPR) {
+		if (isDisabledExpr(node.outputList_[expr.columnId_])) {
 			assert(false);
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
 		}
@@ -957,6 +998,105 @@ const char8_t SQLCompiler::Meta::DRIVER_CLUSTER_INFO_NAME[] =
 	"#_driver_cluster_info";
 const char8_t SQLCompiler::Meta::DRIVER_TABLE_TYPES_NAME[] =
 	"#_driver_table_types";
+
+const util::NameCoderEntry<SQLPreparedPlan::Constants::StringConstant>
+SQLPreparedPlan::Constants::CONSTANT_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(STR_REORDER_JOIN),
+	UTIL_NAME_CODER_ENTRY(STR_REVERSED_COST),
+
+	UTIL_NAME_CODER_ENTRY(STR_TREE_WEIGHT),
+	UTIL_NAME_CODER_ENTRY(STR_FILTERED_TREE_WEIGHT),
+	UTIL_NAME_CODER_ENTRY(STR_NODE_DEGREE),
+
+	UTIL_NAME_CODER_ENTRY(STR_FILTER),
+	UTIL_NAME_CODER_ENTRY(STR_FILTER_LEVEL),
+	UTIL_NAME_CODER_ENTRY(STR_FILTER_DEGREE),
+	UTIL_NAME_CODER_ENTRY(STR_FILTER_WEAKNESS),
+
+	UTIL_NAME_CODER_ENTRY(STR_EDGE),
+	UTIL_NAME_CODER_ENTRY(STR_EDGE_LEVEL),
+	UTIL_NAME_CODER_ENTRY(STR_EDGE_DEGREE),
+	UTIL_NAME_CODER_ENTRY(STR_EDGE_WEAKNESS),
+
+	UTIL_NAME_CODER_ENTRY(STR_HINT)
+};
+
+const util::NameCoder<
+		SQLPreparedPlan::Constants::StringConstant,
+		SQLPreparedPlan::Constants::END_STR>
+		SQLPreparedPlan::Constants::CONSTANT_CODER(CONSTANT_LIST, 1);
+
+SQLPreparedPlan::TotalProfile::TotalProfile() :
+		plan_(NULL) {
+}
+
+bool SQLPreparedPlan::TotalProfile::clearIfEmpty(TotalProfile *&profile) {
+	if (profile != NULL && Profile::clearIfEmpty(profile->plan_)) {
+		profile = NULL;
+	}
+	return (profile == NULL);
+}
+
+SQLPreparedPlan::Profile::Profile() :
+		optimization_(NULL) {
+}
+
+bool SQLPreparedPlan::Profile::clearIfEmpty(Profile *&profile) {
+	if (profile != NULL && OptProfile::clearIfEmpty(profile->optimization_)) {
+		profile = NULL;
+	}
+	return (profile == NULL);
+}
+
+SQLPreparedPlan::OptProfile::OptProfile() :
+		joinReordering_(NULL) {
+}
+
+bool SQLPreparedPlan::OptProfile::clearIfEmpty(OptProfile *&profile) {
+	if (profile != NULL && (
+			profile->joinReordering_ == NULL ||
+			profile->joinReordering_->empty())) {
+		profile = NULL;
+	}
+	return (profile == NULL);
+}
+
+SQLPreparedPlan::OptProfile::Join::Join() :
+		nodes_(NULL),
+		tree_(NULL),
+		candidates_(NULL),
+		reordered_(false),
+		tableCostAffected_(false),
+		costBased_(true),
+		profileKey_(-1) {
+}
+
+SQLPreparedPlan::OptProfile::JoinNode::JoinNode() :
+		ordinal_(-1),
+		qName_(NULL),
+		approxSize_(-1) {
+}
+
+SQLPreparedPlan::OptProfile::JoinTree::JoinTree() :
+		ordinal_(-1),
+		left_(NULL),
+		right_(NULL),
+		criterion_(Constants::END_STR),
+		cost_(NULL),
+		best_(NULL),
+		other_(NULL),
+		target_(NULL) {
+}
+
+SQLPreparedPlan::OptProfile::JoinCost::JoinCost() :
+		filterLevel_(0),
+		filterDegree_(0),
+		filterWeakness_(0),
+		edgeLevel_(0),
+		edgeDegree_(0),
+		edgeWeakness_(0),
+		approxSize_(-1) {
+}
 
 const util::NameCoderEntry<SQLCompiler::Meta::StringConstant>
 SQLCompiler::Meta::CONSTANT_LIST[] = {
@@ -1136,42 +1276,61 @@ const uint64_t SQLCompiler::JOIN_SCORE_MAX = UINT64_C(1) << 10;
 const uint64_t SQLCompiler::DEFAULT_MAX_INPUT_COUNT =
 		std::numeric_limits<uint64_t>::max();
 const uint64_t SQLCompiler::DEFAULT_MAX_EXPANSION_COUNT = 100;
+const SQLPlanningVersion SQLCompiler::LEGACY_JOIN_REORDERING_VERSION(5, 4);
 
 SQLCompiler::SQLCompiler(
 		TupleValue::VarContext &varCxt, const CompileOption *option) :
 		alloc_(varContextToAllocator(varCxt)),
 		varCxt_(varCxt),
-		tableInfoList_(NULL),
-		subqueryStack_(ALLOC_NEW(alloc_) SubqueryStack(alloc_)),
-		lastSrcId_(0),
-		pendingColumnList_(alloc_),
-		metaTableInfoIdList_(alloc_),
-		parameterTypeList_(NULL),
-		inputSql_(NULL),
-		subqueryLevel_(0),
-		planSizeLimitRatio_(5 * 100),
-		generatedScanCount_(std::numeric_limits<uint64_t>::max()),
-		expandedJoinCount_(0),
-		tableNarrowingList_(NULL),
-		compileOption_(option),
-		optimizationFlags_(ProfilerManager::getInstance().getOptimizationFlags()),
-		currentTimeRequired_(false),
-		isMetaDataQuery_(false),
-		indexScanEnabled_(false),
-		multiIndexScanEnabled_(true),
-		expansionLimitReached_(false),
-		predicatePushDownApplied_(false),
-		substrCompatible_(false),
-		varianceCompatible_(false),
-		experimentalFuncEnabled_(false),
-		recompileOnBindRequired_(false),
-		neverReduceExpr_(false),
-		profiler_(ProfilerManager::getInstance().tryCreateProfiler(alloc_)) {
-	indexScanEnabled_ = true;
+		init_(option),
+		tableInfoList_(init_ ?
+				init_->tableInfoList_ : emptyPtr<TableInfoList>()),
+		subqueryStack_(makeSubqueryStack(alloc_)),
+		lastSrcId_(init_ ? init_->lastSrcId_ : 0),
+		pendingColumnList_(init_ ?
+				init_->pendingColumnList_ : PendingColumnList(alloc_)),
+		metaTableInfoIdList_(init_ ?
+				init_->metaTableInfoIdList_ : TableInfoIdList(alloc_)),
+		parameterTypeList_(init_ ?
+				init_->parameterTypeList_ : emptyPtr<Plan::ValueTypeList>()),
+		inputSql_(init_ ? init_->inputSql_ : emptyPtr<const char8_t>()),
+		subqueryLevel_(init_ ? init_->subqueryLevel_ : 0),
+		explainType_(init_ ? init_->explainType_ : SyntaxTree::EXPLAIN_NONE),
+		queryStartTime_(init_ ? init_->queryStartTime_ : util::DateTime()),
+		planSizeLimitRatio_(init_ ? init_->planSizeLimitRatio_ : 5 * 100),
+		generatedScanCount_(init_ ?
+				init_->generatedScanCount_ :
+				std::numeric_limits<uint64_t>::max()),
+		expandedJoinCount_(init_ ? init_->expandedJoinCount_ : 0),
+		tableNarrowingList_(init_ ?
+				SQLCompiler::TableNarrowingList::tryDuplicate(
+						init_->tableNarrowingList_) :
+				emptyPtr<TableNarrowingList>()),
+		compileOption_(init_ ? init_->compileOption_ : option),
+		optimizationOption_(makeOptimizationOption(
+				alloc_, (init_ ?
+						*init_->optimizationOption_ :
+						OptimizationOption(&init_.profilerManager())))),
+		currentTimeRequired_(init_ ? init_->currentTimeRequired_ : false),
+		isMetaDataQuery_(init_ ? init_->isMetaDataQuery_ : false),
+		indexScanEnabled_(init_ ?
+				init_->indexScanEnabled_ : isIndexScanEnabledDefault()),
+		multiIndexScanEnabled_(init_ ? init_->multiIndexScanEnabled_ : true),
+		expansionLimitReached_(init_ ? init_->expansionLimitReached_ : false),
+		predicatePushDownApplied_(init_ ? init_->predicatePushDownApplied_ : false),
+		substrCompatible_(init_ ? init_->substrCompatible_ : false),
+		varianceCompatible_(init_ ? init_->varianceCompatible_ : false),
+		experimentalFuncEnabled_(init_ ? init_->experimentalFuncEnabled_ : false),
+		recompileOnBindRequired_(init_ ? init_->recompileOnBindRequired_ : false),
+		neverReduceExpr_(init_ ? init_->neverReduceExpr_ : false),
+		profiler_(init_ ?
+				SQLCompiler::Profiler::tryDuplicate(init_->profiler_) :
+				init_.profilerManager().tryCreateProfiler(alloc_)),
+		nextProfileKey_(init_ ? init_->nextProfileKey_ : -1),
+		initEnd_(init_) {
 }
 
 SQLCompiler::~SQLCompiler() {
-	ALLOC_DELETE(alloc_, subqueryStack_);
 }
 
 void SQLCompiler::setTableInfoList(const TableInfoList *infoList) {
@@ -1251,6 +1410,8 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 		}
 	}
 
+	applyPlanningOption(plan);
+
 	switch (in.cmdType_) {
 	case SyntaxTree::CMD_SELECT:
 		{
@@ -1310,7 +1471,8 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 
 	plan.validateReference(tableInfoList_);
 
-	if (optimizationFlags_ != 0) {
+	bool tableCostAffected = false;
+	if (optimizationOption_->isSomeEnabled()) {
 		OptimizationContext cxt(*this, plan);
 
 		{
@@ -1321,8 +1483,13 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 		makeJoinHintMap(plan);
 
 		{
+			OptimizationUnit unit(cxt, OPT_MAKE_SCAN_COST_HINTS);
+			unit(unit() && makeScanCostHints(plan));
+		}
+
+		{
 			OptimizationUnit unit(cxt, OPT_REORDER_JOIN);
-			unit(unit() && reorderJoin(plan));
+			unit(unit() && reorderJoin(plan, tableCostAffected));
 		}
 
 		applyJoinOption(plan);
@@ -1334,7 +1501,10 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 	}
 
 
-	genDistributedPlan(plan);
+	const bool costCheckOnly = false;
+	genDistributedPlan(plan, costCheckOnly);
+
+	finalizeScanCostHints(plan, tableCostAffected);
 
 	applyScanOption(plan);
 
@@ -1353,7 +1523,7 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 		profiler_->setTableInfoList(getTableInfoList());
 		ProfilerManager::getInstance().addProfiler(*profiler_);
 	}
-
+	relocateOptimizationProfile(plan);
 }
 
 bool SQLCompiler::isRecompileOnBindRequired() const {
@@ -1434,10 +1604,9 @@ int32_t SQLCompiler::compareStringWithCase(
 	}
 }
 
-void SQLCompiler::genDistributedPlan(Plan &plan) {
+void SQLCompiler::genDistributedPlan(Plan &plan, bool costCheckOnly) {
 	util::Vector<PlanNodeId> largeScanNodeIdList(alloc_);
 	SQLPreparedPlan::NodeList::iterator itr = plan.nodeList_.begin();
-
 	for (; itr != plan.nodeList_.end(); ++itr) {
 		if (itr->type_ == SQLType::EXEC_SCAN) {
 			SQLTableInfo::IdInfo &idInfo = itr->tableIdInfo_;
@@ -1456,6 +1625,9 @@ void SQLCompiler::genDistributedPlan(Plan &plan) {
 						}
 					}
 					if (found) {
+						if (costCheckOnly) {
+							continue;
+						}
 						int64_t subContainerId = static_cast<int64_t>(metaIdInfoItr->partitionId_);
 						itr->tableIdInfo_ = *metaIdInfoItr;
 						itr->outputList_[0] = genConstExpr(
@@ -1481,6 +1653,7 @@ void SQLCompiler::genDistributedPlan(Plan &plan) {
 		const SQLTableInfo::SubInfoList &subInfoList =
 				tableInfo.partitioning_->subInfoList_;
 
+		const SQLTableInfo::BasicIndexInfoList *indexInfoList;
 		bool uncovered;
 		util::Vector<uint32_t> subList(alloc_);
 		{
@@ -1500,21 +1673,33 @@ void SQLCompiler::genDistributedPlan(Plan &plan) {
 					&subList, parameterList, placeholderAffected);
 
 			recompileOnBindRequired_ |= placeholderAffected;
+			indexInfoList = orgNode.indexInfoList_;
 		}
 
 		if (subList.empty()) {
 			subList.push_back(0);
 		}
 
+		int64_t subApproxSize = -1;
 		util::Vector<PlanNodeId> subScanIdList(alloc_);
 		for (util::Vector<uint32_t>::iterator it = subList.begin();
 				it != subList.end(); ++it) {
 			const SQLTableInfo::SubInfo &subInfo = subInfoList[*it];
+			if (costCheckOnly) {
+				if (subInfo.approxSize_ >= 0) {
+					subApproxSize =
+							std::max<int64_t>(subApproxSize, 0) +
+							subInfo.approxSize_;
+				}
+				continue;
+			}
+
 			const int32_t subContainerId = static_cast<int32_t>(*it);
 
 			PlanNode &subScan = plan.append(SQLType::EXEC_SCAN);
 			const PlanNode &orgNode = *orgNodeRef; 
 			subScanIdList.push_back(subScan.id_);
+
 			SQLTableInfo::IdInfo subIdInfo = idInfo;
 			subIdInfo.partitionId_ = subInfo.partitionId_;
 			subIdInfo.containerId_ = subInfo.containerId_;
@@ -1523,14 +1708,9 @@ void SQLCompiler::genDistributedPlan(Plan &plan) {
 				subIdInfo.partitioningVersionId_ = idInfo.partitioningVersionId_;
 			}
 			subIdInfo.subContainerId_ = subContainerId;
+
 			subScan.tableIdInfo_ = subIdInfo;
-			if (subInfo.indexInfoList_ != NULL) {
-				subScan.indexInfoList_ = ALLOC_NEW(alloc_)
-						SQLTableInfo::IndexInfoList(
-								subInfo.indexInfoList_->begin(),
-								subInfo.indexInfoList_->end(),
-								alloc_);
-			}
+			subScan.indexInfoList_ = indexInfoList;
 			subScan.outputList_ = tableInfoToOutput(
 					plan, tableInfo, MODE_NORMAL_SELECT, subContainerId);
 			subScan.predList_.assign(
@@ -1538,6 +1718,13 @@ void SQLCompiler::genDistributedPlan(Plan &plan) {
 			if (containerExpirable) {
 				subScan.cmdOptionFlag_ |= PlanNode::Config::CMD_OPT_SCAN_EXPIRABLE;
 			}
+		}
+
+		if (costCheckOnly) {
+			if (subApproxSize >= 0) {
+				orgNodeRef->tableIdInfo_.approxSize_ = subApproxSize;
+			}
+			continue;
 		}
 
 		if (subList.size() == 1) {
@@ -1937,7 +2124,7 @@ void SQLCompiler::genUpdate(const Select &select, Plan &plan) {
 	}
 
 	Select updateSelect(alloc_);
-	SyntaxTree::ExprList *exprList = select.updateSetList_;
+	const ExprList *exprList = select.updateSetList_;
 	updateSelect.selectList_ = ALLOC_NEW(alloc_) SyntaxTree::ExprList(alloc_);
 
 	util::Map<util::String, Expr *> updateColumnMap(alloc_);
@@ -2118,9 +2305,10 @@ void SQLCompiler::genDelete(const Select &select, Plan &plan) {
 			select.targetName_->tableCaseSensitive_, tableInfo, deleteNode);
 }
 
-void SQLCompiler::validateCreateTableOption(SyntaxTree::CreateTableOption &option) {
+void SQLCompiler::validateCreateTableOption(
+		const SyntaxTree::CreateTableOption &option) {
 	if (option.columnInfoList_) {
-		SyntaxTree::ColumnInfoList::iterator itr = option.columnInfoList_->begin();
+		SyntaxTree::ColumnInfoList::const_iterator itr = option.columnInfoList_->begin();
 		for (; itr != option.columnInfoList_->end(); ++itr) {
 			if ((*itr)->isVirtual()) {
 				SQL_COMPILER_THROW_ERROR(
@@ -2363,6 +2551,7 @@ void SQLCompiler::setTargetTableInfo(const char *tableName, bool isCaseSensitive
 	node.tableIdInfo_.schemaVersionId_ = tableInfo.idInfo_.schemaVersionId_;
 	node.tableIdInfo_.partitionId_ = tableInfo.idInfo_.partitionId_;
 	node.tableIdInfo_.id_ = tableInfo.idInfo_.id_;
+	node.tableIdInfo_.approxSize_ = tableInfo.idInfo_.approxSize_;
 
 	PlanNode::PartitioningInfo *destPartitioning =
 			ALLOC_NEW(alloc_) SQLTableInfo::PartitioningInfo(alloc_);
@@ -2388,6 +2577,8 @@ void SQLCompiler::setTargetTableInfo(const char *tableName, bool isCaseSensitive
 		subInfo.containerId_ = tableInfo.idInfo_.containerId_;
 		subInfo.partitionId_ = tableInfo.idInfo_.partitionId_;
 		subInfo.schemaVersionId_ = tableInfo.idInfo_.schemaVersionId_;
+		subInfo.approxSize_ = tableInfo.idInfo_.approxSize_;
+
 		destPartitioning->subInfoList_.push_back(subInfo);
 		destPartitioning->partitioningCount_ = 1;
 	}
@@ -4921,9 +5112,7 @@ void SQLCompiler::genTable(const Expr &table, const Expr* &whereExpr, Plan &plan
 			node.setName(*table.aliasName_, NULL, nsId);
 		}
 		node.tableIdInfo_ = tableInfo.idInfo_;
-		node.indexInfoList_ = ALLOC_NEW(alloc_) SQLTableInfo::IndexInfoList(
-				tableInfo.indexInfoList_.begin(), tableInfo.indexInfoList_.end(),
-				alloc_);
+		node.indexInfoList_ = tableInfo.basicIndexInfoList_;
 		node.outputList_ =
 				tableInfoToOutput(plan, tableInfo, MODE_NORMAL_SELECT);
 		if (table.next_ != NULL) {
@@ -8700,6 +8889,50 @@ bool SQLCompiler::isForInsertOrUpdate(const PlanNode &node) {
 			node.type_ == SQLType::EXEC_UPDATE);
 }
 
+void SQLCompiler::finalizeScanCostHints(Plan &plan, bool tableCostAffected) {
+	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
+			nodeIt != plan.nodeList_.end(); ++nodeIt) {
+		SQLTableInfo::IdInfo &idInfo = nodeIt->tableIdInfo_;
+		int64_t &approxSize = idInfo.approxSize_;
+
+		if (tableCostAffected && nodeIt->type_ == SQLType::EXEC_SCAN) {
+			const SQLTableInfo &info = getTableInfoList().resolve(idInfo.id_);
+			if (info.partitioning_ == NULL) {
+				approxSize = info.idInfo_.approxSize_;
+			}
+			else {
+				assert(idInfo.subContainerId_ >= 0);
+				approxSize = info.partitioning_->subInfoList_[
+						idInfo.subContainerId_].approxSize_;
+			}
+
+			if (approxSize < 0) {
+				approxSize = 0;
+			}
+		}
+		else {
+			approxSize = -1;
+		}
+	}
+}
+
+void SQLCompiler::applyPlanningOption(Plan &plan) {
+	const CompileOption &option = getCompileOption();
+
+	applyPlanningVersion(option.getPlanningVersion(), plan.planningVersion_);
+
+	const SQLHintInfo *hintInfo = plan.hintInfo_;
+	applyPlanningVersion(
+			getPlanningVersionHint(hintInfo), plan.planningVersion_);
+}
+
+void SQLCompiler::applyPlanningVersion(
+		const SQLPlanningVersion &src, SQLPlanningVersion &dest) {
+	if (!src.isEmpty()) {
+		dest = src;
+	}
+}
+
 void SQLCompiler::applyScanOption(Plan &plan) {
 	const SQLHintInfo *hint = plan.hintInfo_;
 	if (hint == NULL && !indexScanEnabled_) {
@@ -8830,25 +9063,186 @@ void SQLCompiler::applyJoinOption(
 	}
 }
 
+void SQLCompiler::relocateOptimizationProfile(Plan &plan) {
+	if (nextProfileKey_ < 0) {
+		return;
+	}
+	KeyToNodeIdList keyToNodeIdList(alloc_);
+
+	SQLPreparedPlan::TotalProfile **totalProfile = NULL;
+	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
+			nodeIt != plan.nodeList_.end(); ++nodeIt) {
+		const KeyToNodeId entry(
+				nodeIt->profileKey_,
+				static_cast<PlanNodeId>(nodeIt - plan.nodeList_.begin()));
+
+		if (entry.first >= 0) {
+			keyToNodeIdList.push_back(entry);
+		}
+		if (nodeIt->type_ == SQLType::EXEC_RESULT) {
+			totalProfile = &nodeIt->profile_;
+			if (*totalProfile == NULL) {
+				break;
+			}
+		}
+	}
+
+	if (keyToNodeIdList.empty() ||
+			totalProfile == NULL ||
+			*totalProfile == NULL ||
+			(*totalProfile)->plan_ == NULL ||
+			(*totalProfile)->plan_->optimization_ == NULL) {
+		return;
+	}
+
+	std::sort(keyToNodeIdList.begin(), keyToNodeIdList.end());
+
+	SQLPreparedPlan::OptProfile &optProfile =
+			*(*totalProfile)->plan_->optimization_;
+
+	bool relocatedFull = true;
+	relocatedFull &= relocateOptimizationProfile(
+			plan, keyToNodeIdList, optProfile.joinReordering_);
+
+	if (relocatedFull) {
+		SQLPreparedPlan::TotalProfile::clearIfEmpty(*totalProfile);
+	}
+}
+
+bool SQLCompiler::relocateOptimizationProfile(
+		Plan &plan, const KeyToNodeIdList &keyToNodeIdList,
+		util::Vector<SQLPreparedPlan::OptProfile::Join> *&joinList) {
+	if (joinList == NULL) {
+		return true;
+	}
+
+	for (util::Vector<SQLPreparedPlan::OptProfile::Join>::iterator it =
+			joinList->begin(); it != joinList->end();) {
+		KeyToNodeIdList::const_iterator nodeIt = std::lower_bound(
+				keyToNodeIdList.begin(), keyToNodeIdList.end(),
+				KeyToNodeId(it->profileKey_, 0));
+
+		if (nodeIt != keyToNodeIdList.end() &&
+				nodeIt->first == it->profileKey_) {
+			addOptimizationProfile(
+					NULL, &plan.nodeList_[nodeIt->second], &(*it));
+			it = joinList->erase(it);
+		}
+		else {
+			++it;
+		}
+	}
+
+	if (joinList->empty()) {
+		joinList = NULL;
+		return true;
+	}
+	return false;
+}
+
+void SQLCompiler::addOptimizationProfile(
+		Plan *plan, PlanNode *node,
+		SQLPreparedPlan::OptProfile::Join *profile) {
+	if (profile == NULL) {
+		return;
+	}
+
+	PlanNode *nodeForAdd = (plan == NULL ? node : NULL);
+	SQLPreparedPlan::OptProfile &optProfile =
+			prepareOptimizationProfile(plan, nodeForAdd);
+	if (optProfile.joinReordering_ == NULL) {
+		optProfile.joinReordering_ = ALLOC_NEW(alloc_) util::Vector<
+				SQLPreparedPlan::OptProfile::Join>(alloc_);
+	}
+
+	profile->profileKey_ = prepareProfileKey(*node);
+	optProfile.joinReordering_->push_back(*profile);
+}
+
+SQLPreparedPlan::OptProfile&
+SQLCompiler::prepareOptimizationProfile(Plan *plan, PlanNode *node) {
+	if (node == NULL) {
+		assert(plan != NULL);
+		for (PlanNodeList::iterator nodeIt = plan->nodeList_.begin();
+				nodeIt != plan->nodeList_.end(); ++nodeIt) {
+			if (nodeIt->type_ == SQLType::EXEC_RESULT) {
+				return prepareOptimizationProfile(NULL, &(*nodeIt));
+			}
+		}
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	SQLPreparedPlan::TotalProfile *&profile = node->profile_;
+	if (profile == NULL) {
+		profile = ALLOC_NEW(alloc_) SQLPreparedPlan::TotalProfile();
+	}
+
+	SQLPreparedPlan::Profile *&planProfile = profile->plan_;
+	if (planProfile == NULL) {
+		planProfile = ALLOC_NEW(alloc_) SQLPreparedPlan::Profile();
+	}
+
+	SQLPreparedPlan::OptProfile *&optProfile = planProfile->optimization_;
+	if (optProfile == NULL) {
+		optProfile = ALLOC_NEW(alloc_) SQLPreparedPlan::OptProfile();
+	}
+
+	return *optProfile;
+}
+
+SQLPreparedPlan::ProfileKey SQLCompiler::prepareProfileKey(PlanNode &node) {
+	if (node.profileKey_ < 0) {
+		node.profileKey_ = ++nextProfileKey_;
+	}
+	return node.profileKey_;
+}
+
+void SQLCompiler::checkOptimizationUnitSupport(OptimizationUnitType type) {
+	if (!optimizationOption_->isSupported(type) &&
+			!optimizationOption_->isCheckOnly(type)) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
+	}
+}
+
 bool SQLCompiler::isOptimizationUnitEnabled(OptimizationUnitType type) {
-	return (optimizationFlags_ &
-			(static_cast<OptimizationFlags>(1) << type)) != 0;
+	return optimizationOption_->isEnabled(type);
+}
+
+bool SQLCompiler::isOptimizationUnitCheckOnly(OptimizationUnitType type) {
+	return optimizationOption_->isCheckOnly(type);
 }
 
 SQLCompiler::OptimizationFlags SQLCompiler::getDefaultOptimizationFlags() {
-	UTIL_STATIC_ASSERT(OPT_END < sizeof(OptimizationFlags) * CHAR_BIT);
-
-	OptimizationFlags flags =
-			(static_cast<OptimizationFlags>(1) << OPT_END) - 1;
+	OptimizationOption option(NULL);
+	option.supportFull();
 
 
 
 
-	return flags;
+	return option.getEnablementFlags();
+}
+
+SQLCompiler::OptimizationOption SQLCompiler::makeJoinPushDownHintsOption() {
+	OptimizationOption option(NULL);
+	option.support(OPT_SIMPLIFY_SUBQUERY, false);
+	option.support(OPT_MERGE_SUB_PLAN, false);
+	option.support(OPT_MINIMIZE_PROJECTION, false);
+	option.support(OPT_PUSH_DOWN_PREDICATE, false);
+	option.support(OPT_PUSH_DOWN_AGGREGATE, false);
+	option.support(OPT_MAKE_JOIN_PUSH_DOWN_HINTS, false);
+	option.support(OPT_PUSH_DOWN_JOIN, false);
+	option.support(OPT_PUSH_DOWN_LIMIT, true);
+	option.support(OPT_REMOVE_REDUNDANCY, true);
+	option.support(OPT_REMOVE_INPUT_REDUNDANCY, true);
+	option.support(OPT_MAKE_INDEX_JOIN, true);
+	option.setCheckOnly(OPT_MAKE_INDEX_JOIN);
+	return option;
 }
 
 void SQLCompiler::optimize(Plan &plan) {
-	if (optimizationFlags_ == 0) {
+	if (!optimizationOption_->isSomeEnabled()) {
 		return;
 	}
 
@@ -8859,14 +9253,14 @@ void SQLCompiler::optimize(Plan &plan) {
 		{
 			OptimizationUnit unit(cxt, OPT_MINIMIZE_PROJECTION);
 			if (unit(unit() && minimizeProjection(plan, true))) {
-				plan.removeEmptyColumns();
+				removeEmptyColumns(cxt, plan);
 			}
 		}
 
 		{
 			OptimizationUnit unit(cxt, OPT_SIMPLIFY_SUBQUERY);
 			if (unit(unit() && simplifySubquery(plan))) {
-				plan.removeEmptyColumns();
+				removeEmptyColumns(cxt, plan);
 			}
 			else {
 				minimizedLast = true;
@@ -8890,6 +9284,11 @@ void SQLCompiler::optimize(Plan &plan) {
 		{
 			OptimizationUnit unit(cxt, OPT_PUSH_DOWN_AGGREGATE);
 			found |= unit(unit() && pushDownAggregate(plan));
+		}
+
+		if (first) {
+			OptimizationUnit unit(cxt, OPT_MAKE_JOIN_PUSH_DOWN_HINTS);
+			found |= unit(unit() && makeJoinPushDownHints(plan));
 		}
 
 		{
@@ -8916,8 +9315,8 @@ void SQLCompiler::optimize(Plan &plan) {
 			break;
 		}
 
-		plan.removeEmptyNodes();
-		plan.removeEmptyColumns();
+		removeEmptyNodes(cxt, plan);
+		removeEmptyColumns(cxt, plan);
 	}
 
 	do {
@@ -8926,15 +9325,18 @@ void SQLCompiler::optimize(Plan &plan) {
 			break;
 		}
 
-		plan.removeEmptyNodes();
-		plan.removeEmptyColumns();
+		removeEmptyNodes(cxt, plan);
+		removeEmptyColumns(cxt, plan);
 	}
 	while (false);
 
 	{
 		OptimizationUnit unit(cxt, OPT_MAKE_INDEX_JOIN);
-		if (unit(unit() && makeIndexJoin(plan))) {
-			plan.removeEmptyNodes();
+		if (unit(unit() && makeIndexJoin(plan, unit.isCheckOnly()))) {
+			removeEmptyNodes(cxt, plan);
+		}
+		if (unit.isCheckOnly()) {
+			return;
 		}
 	}
 
@@ -8967,8 +9369,8 @@ void SQLCompiler::optimize(Plan &plan) {
 				break;
 			}
 
-			plan.removeEmptyNodes();
-			plan.removeEmptyColumns();
+			removeEmptyNodes(cxt, plan);
+			removeEmptyColumns(cxt, plan);
 		}
 	}
 	while (false);
@@ -9029,7 +9431,7 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 					++nodeIt;
 				}
 
-				if (node->type_ == SQLType::START_EXEC) {
+				if (isDisabledNode(*node)) {
 					continue;
 				}
 
@@ -9067,7 +9469,7 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 			for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
 					nodeIt != plan.nodeList_.end(); ++nodeIt) {
 				PlanNode &node = *nodeIt;
-				if (node.type_ == SQLType::START_EXEC) {
+				if (isDisabledNode(node)) {
 					continue;
 				}
 
@@ -9087,7 +9489,7 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 			const PlanNodeId orgId = targetIt->first;
 			const PlanNodeId newId = targetIt->second;
 
-			if (plan.nodeList_[newId].type_ == SQLType::START_EXEC) {
+			if (isDisabledNode(plan.nodeList_[newId])) {
 				assert(false);
 				SQL_COMPILER_THROW_ERROR(
 						GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
@@ -9101,7 +9503,7 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 
 				PlanNode &destNode = plan.nodeList_[destId];
 
-				if (destNode.type_ == SQLType::START_EXEC ||
+				if (isDisabledNode(destNode) ||
 						destNode.inputList_[destInput] != orgId) {
 					assert(false);
 					SQL_COMPILER_THROW_ERROR(
@@ -9119,13 +9521,13 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 			}
 
 			PlanNode &orgNode = plan.nodeList_[orgId];
-			if (orgNode.type_ == SQLType::START_EXEC) {
+			if (isDisabledNode(orgNode)) {
 				assert(false);
 				SQL_COMPILER_THROW_ERROR(
 						GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
 			}
 
-			orgNode.type_ = SQLType::START_EXEC;
+			setDisabledNodeType(orgNode);
 
 			if (orgNode.inputList_ != plan.nodeList_[newId].inputList_) {
 				assert(false);
@@ -9163,7 +9565,7 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 			const NodeMap::value_type value(key, &node);
 			MapIt mapIt = std::find(range.first, range.second, value);
 			if (mapIt == range.second) {
-				if (plan.nodeList_[*it].type_ != SQLType::START_EXEC) {
+				if (!isDisabledNode(plan.nodeList_[*it])) {
 					assert(false);
 					SQL_COMPILER_THROW_ERROR(
 							GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
@@ -10018,7 +10420,7 @@ bool SQLCompiler::removeInputRedundancy(Plan &plan) {
 			*inIt = inNode.inputList_.front();
 
 			if (nodeRefList[inNodeId] <= 1) {
-				inNode.type_ = SQLType::START_EXEC;
+				setDisabledNodeType(inNode);
 			}
 
 			for (size_t i = 0; i < 2; i++) {
@@ -10179,9 +10581,11 @@ bool SQLCompiler::assignJoinPrimaryCond(Plan &plan, bool &complexFound) {
 	return found;
 }
 
-bool SQLCompiler::makeIndexJoin(Plan &plan) {
+bool SQLCompiler::makeIndexJoin(Plan &plan, bool checkOnly) {
 	const size_t joinCount = 2;
 	util::Vector<uint32_t> nodeRefList(alloc_);
+
+	const PlanNode::CommandOptionFlag drivingMask = getJoinDrivingOptionMask();
 
 	bool found = false;
 	bool foundLocal = false;
@@ -10203,8 +10607,14 @@ bool SQLCompiler::makeIndexJoin(Plan &plan) {
 			continue;
 		}
 
+		if (checkOnly && (node.cmdOptionFlag_ & drivingMask) != 0) {
+			continue;
+		}
+
 		if (plan.hintInfo_) {
 			if ((node.cmdOptionFlag_ & PlanNode::Config::CMD_OPT_JOIN_NO_INDEX) != 0) {
+				node.cmdOptionFlag_ |=
+						PlanNode::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT;
 				continue;
 			}
 		}
@@ -10219,6 +10629,7 @@ bool SQLCompiler::makeIndexJoin(Plan &plan) {
 		const bool aggressiveList[] = { leadingList[0], leadingList[1] };
 
 		const uint32_t start = (!leadingList[0] && leadingList[1] ? 1 : 0);
+		PlanNode::CommandOptionFlag drivingFlags = 0;
 
 		for (uint32_t i = 0; i < joinCount; i++) {
 			const uint32_t smaller = (i + start) % joinCount;
@@ -10226,13 +10637,23 @@ bool SQLCompiler::makeIndexJoin(Plan &plan) {
 			PlanNode &smallerNode = node.getInput(plan, smaller);
 
 			const uint32_t larger = (smaller == 0 ? 1 : 0);
-			if (!findIndexedPredicate(plan, node, larger)) {
+			if (!findIndexedPredicate(plan, node, larger, checkOnly)) {
 				continue;
 			}
 
 			if (!aggressiveList[smaller] &&
-					!isNallowingJoinInput(plan, node, smaller)) {
+					!isNarrowingJoinInput(plan, node, smaller)) {
 				continue;
+			}
+
+			if (checkOnly) {
+				drivingFlags = PlanNode::Config::CMD_OPT_JOIN_DRIVING_SOME;
+				if (i == 0) {
+					drivingFlags |=
+							PlanNode::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT;
+				}
+				foundLocal = true;
+				break;
 			}
 
 			util::Map<uint32_t, uint32_t> inputIdMap(alloc_);
@@ -10290,22 +10711,62 @@ bool SQLCompiler::makeIndexJoin(Plan &plan) {
 			refreshColumnTypes(plan, node, node.outputList_, true, false);
 
 			if (nodeRefList[largerId] <= 1) {
-				largerNode.type_ = SQLType::START_EXEC;
+				setDisabledNodeType(largerNode);
 			}
 
 			foundLocal = true;
 			break;
+		}
+
+		if (checkOnly) {
+			if (drivingFlags == 0) {
+				drivingFlags |=
+						PlanNode::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT;
+			}
+			node.cmdOptionFlag_ |= drivingFlags;
 		}
 	}
 
 	return found;
 }
 
+bool SQLCompiler::makeScanCostHints(Plan &plan) {
+	util::StackAllocator::Scope scope(alloc_);
+	Plan modPlan(alloc_);
+	copyPlan(plan, modPlan);
+
+	CompilerSource src(this);
+	CompileOption option(&src);
+	SQLCompiler subCompiler(getVarContext(), &option);
+	subCompiler.assignReducedScanCostHints(modPlan);
+
+	return applyScanCostHints(modPlan, plan);
+}
+
+bool SQLCompiler::makeJoinPushDownHints(Plan &plan) {
+	if (!findJoinPushDownHintingTarget(plan)) {
+		return false;
+	}
+
+	util::StackAllocator::Scope scope(alloc_);
+	Plan modPlan(alloc_);
+	copyPlan(plan, modPlan);
+
+	CompilerSource src(this);
+	CompileOption option(&src);
+	SQLCompiler subCompiler(getVarContext(), &option);
+
+	*subCompiler.optimizationOption_ = makeJoinPushDownHintsOption();
+	subCompiler.optimize(modPlan);
+
+	return applyJoinPushDownHints(modPlan, plan);
+}
+
 bool SQLCompiler::factorizePredicate(Plan &plan) {
 	bool found = false;
 	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
 			nodeIt != plan.nodeList_.end(); ++nodeIt) {
-		if (nodeIt->type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(*nodeIt)) {
 			continue;
 		}
 
@@ -10354,7 +10815,9 @@ void SQLCompiler::makeNodeNameList(
 	}
 }
 
-bool SQLCompiler::reorderJoin(Plan &plan) {
+bool SQLCompiler::reorderJoin(Plan &plan, bool &tableCostAffected) {
+	tableCostAffected = false;
+
 	util::Vector<bool> acceptedRefList(plan.nodeList_.size(), false, alloc_);
 	util::Vector<PlanNodeId> nodeIdList(alloc_);
 	util::Vector<PlanNodeId> joinIdList(alloc_);
@@ -10363,26 +10826,43 @@ bool SQLCompiler::reorderJoin(Plan &plan) {
 	util::Vector<JoinOperation> srcJoinOpList(alloc_);
 	util::Vector<JoinOperation> destJoinOpList(alloc_);
 
+	const bool legacy = isLegacyJoinReordering(plan);
+	const bool profiling = (explainType_ != SyntaxTree::EXPLAIN_NONE);
+
 	bool found = false;
 	PlanNodeId tailNodeId = static_cast<PlanNodeId>(plan.nodeList_.size());
 	while (makeJoinGraph(
 			plan, tailNodeId, acceptedRefList, nodeIdList, joinIdList,
-			joinNodeList, joinEdgeList, srcJoinOpList)) {
+			joinNodeList, joinEdgeList, srcJoinOpList, legacy)) {
 
 		util::Vector<SQLHintInfo::ParsedHint> hintList(alloc_);
 		if (plan.hintInfo_) {
 			util::Vector<const util::String*> nodeNameList(alloc_);
 			makeNodeNameList(plan, nodeIdList, nodeNameList);
 			plan.hintInfo_->findJoinHintList(nodeNameList, SQLHint::LEADING, hintList);
+			if (!legacy) {
+				const util::Vector<SQLHintInfo::ParsedHint> &symbolHints =
+						plan.hintInfo_->getSymbolHintList();
+				hintList.insert(
+						hintList.end(), symbolHints.begin(), symbolHints.end());
+			}
 		}
 
 		if (reorderJoinSub(
 				alloc_, joinNodeList, joinEdgeList,
-				srcJoinOpList, hintList, destJoinOpList)) {
+				srcJoinOpList, hintList, destJoinOpList, legacy, profiling)) {
 			applyJoinOrder(
 					plan, nodeIdList, joinIdList, joinNodeList, destJoinOpList);
 			found = true;
 		}
+
+		addJoinReorderingProfile(
+				plan, nodeIdList, joinIdList, joinNodeList, destJoinOpList);
+
+		if (!destJoinOpList.empty()) {
+			tableCostAffected |= destJoinOpList.back().tableCostAffected_;
+		}
+
 
 	}
 
@@ -10393,11 +10873,65 @@ bool SQLCompiler::reorderJoin(Plan &plan) {
 	return found;
 }
 
-void SQLCompiler::dumpJoinGraph(
+void SQLCompiler::addJoinReorderingProfile(
+		Plan &plan, const util::Vector<PlanNodeId> &nodeIdList,
+		const util::Vector<PlanNodeId> &joinIdList,
+		const util::Vector<JoinNode> &joinNodeList,
+		const util::Vector<JoinOperation> &joinOpList) {
+	if (joinOpList.empty() || joinIdList.empty()) {
+		return;
+	}
+
+	SQLPreparedPlan::OptProfile::Join *profile = joinOpList.back().profile_;
+	if (profile == NULL) {
+		return;
+	}
+
+	profileJoinTables(plan, nodeIdList, joinNodeList, *profile);
+	addOptimizationProfile(
+			&plan, &plan.nodeList_[joinIdList.back()], profile);
+}
+
+void SQLCompiler::profileJoinTables(
+		const Plan &plan, const util::Vector<PlanNodeId> &nodeIdList,
+		const util::Vector<JoinNode> &joinNodeList,
+		SQLPreparedPlan::OptProfile::Join &profile) const {
+	SQLPreparedPlan::OptProfile::JoinOrdinal ordinal = 0;
+	util::Vector<SQLPreparedPlan::OptProfile::JoinNode> *nodeList =
+			ALLOC_NEW(alloc_) util::Vector<
+					SQLPreparedPlan::OptProfile::JoinNode>(alloc_);
+
+	util::Vector<JoinNode>::const_iterator noinNodeIt = joinNodeList.begin();
+	for (util::Vector<PlanNodeId>::const_iterator it = nodeIdList.begin();
+			it != nodeIdList.end(); ++it) {
+		const PlanNode &node = plan.nodeList_[*it];
+
+		nodeList->push_back(SQLPreparedPlan::OptProfile::JoinNode());
+		SQLPreparedPlan::OptProfile::JoinNode &nodeProfile = nodeList->back();
+
+		QualifiedName *qName = NULL;
+		const char8_t *tableName = getJoinTableName(node);
+		if (tableName != NULL) {
+			qName = ALLOC_NEW(alloc_) QualifiedName(alloc_);
+			qName->table_ = ALLOC_NEW(alloc_) util::String(tableName, alloc_);
+		}
+
+		nodeProfile.ordinal_ = ordinal;
+		nodeProfile.qName_ = qName;
+
+		if (noinNodeIt != joinNodeList.end()) {
+			nodeProfile.approxSize_ = noinNodeIt->approxSize_;
+			++noinNodeIt;
+		}
+		++ordinal;
+	}
+
+	profile.nodes_ = nodeList;
+}
+
+void SQLCompiler::dumpJoinTables(
 		std::ostream &os, const Plan &plan,
-		const util::Vector<PlanNodeId> &nodeIdList,
-		const util::Vector<JoinEdge> &joinEdgeList,
-		const util::Vector<JoinOperation> &joinOpList) const {
+		const util::Vector<PlanNodeId> &nodeIdList) const {
 	for (util::Vector<PlanNodeId>::const_iterator it = nodeIdList.begin();
 			it != nodeIdList.end(); ++it) {
 		const PlanNode &node = plan.nodeList_[*it];
@@ -10406,15 +10940,19 @@ void SQLCompiler::dumpJoinGraph(
 			os << ", ";
 		}
 		os << it - nodeIdList.begin() << ":";
-		if (node.qName_ != NULL && node.qName_->table_ != NULL) {
-			os << *node.qName_->table_;
-		}
-		else if (node.type_ == SQLType::EXEC_SCAN) {
-			os << getTableInfoList().resolve(node.tableIdInfo_.id_).tableName_;
+
+		const char8_t *tableName = getJoinTableName(node);
+		if (tableName != NULL) {
+			os << tableName;
 		}
 	}
 	os << std::endl;
+}
 
+void SQLCompiler::dumpJoinGraph(
+		std::ostream &os,
+		const util::Vector<JoinEdge> &joinEdgeList,
+		const util::Vector<JoinOperation> &joinOpList) const {
 	for (util::Vector<JoinEdge>::const_iterator it = joinEdgeList.begin();
 			it != joinEdgeList.end(); ++it) {
 		it->dump(os);
@@ -10428,6 +10966,19 @@ void SQLCompiler::dumpJoinGraph(
 	}
 }
 
+const char8_t* SQLCompiler::getJoinTableName(const PlanNode &node) const {
+	if (node.qName_ != NULL && node.qName_->table_ != NULL) {
+		return node.qName_->table_->c_str();
+	}
+	else if (node.type_ == SQLType::EXEC_SCAN) {
+		return getTableInfoList().resolve(
+				node.tableIdInfo_.id_).tableName_.c_str();
+	}
+	else {
+		return NULL;
+	}
+}
+
 bool SQLCompiler::makeJoinGraph(
 		const Plan &plan, PlanNodeId &tailNodeId,
 		util::Vector<bool> &acceptedRefList,
@@ -10435,7 +10986,7 @@ bool SQLCompiler::makeJoinGraph(
 		util::Vector<PlanNodeId> &joinIdList,
 		util::Vector<JoinNode> &joinNodeList,
 		util::Vector<JoinEdge> &joinEdgeList,
-		util::Vector<JoinOperation> &joinOpList) {
+		util::Vector<JoinOperation> &joinOpList, bool legacy) {
 	assert(acceptedRefList.size() == plan.nodeList_.size());
 
 	nodeIdList.clear();
@@ -10451,6 +11002,8 @@ bool SQLCompiler::makeJoinGraph(
 
 	typedef util::Map<PlanNodeId, JoinNodeId> NodeIdMap;
 	NodeIdMap nodeIdMap(alloc_);
+
+	util::Vector<int64_t> approxSizeList(alloc_);
 
 	if (tailNodeId <= 0) {
 		return false;
@@ -10482,17 +11035,19 @@ bool SQLCompiler::makeJoinGraph(
 				break;
 			}
 
+			if (!legacy) {
+				makeJoinNodesCost(plan, node, approxSizeList);
+			}
+
 			for (util::Vector<PlanNodeId>::const_iterator it = nodeIdList.begin();
 					it != nodeIdList.end(); ++it) {
-				 const PlanNode &node = plan.nodeList_[*it];
-				 if (node.type_ == SQLType::EXEC_SCAN) {
-					 const SQLTableInfo &tableInfo =
-							tableInfoList_->resolve(node.tableIdInfo_.id_);
-					 JoinNodeId joinNodeId =
-							static_cast<JoinNodeId>(it - nodeIdList.begin());
-					 joinNodeList[joinNodeId].approxSize_ = tableInfo.approxSize_;
 
+				 const JoinNodeId joinNodeId =
+						static_cast<JoinNodeId>(it - nodeIdList.begin());
+				 if (!approxSizeList.empty()) {
+					joinNodeList[joinNodeId].approxSize_ = approxSizeList[*it];
 				 }
+
 			 }
 			for (util::Vector<PlanNodeId>::iterator joinIt = joinIdList.begin();
 					joinIt != joinIdList.end(); ++joinIt) {
@@ -10517,7 +11072,7 @@ bool SQLCompiler::makeJoinGraph(
 							nodeIdMap, joinNodeList, joinEdgeList);
 				}
 			}
-			if (joinEdgeList.empty()) {
+			if (joinEdgeList.empty() && legacy) {
 				break;
 			}
 
@@ -10644,6 +11199,108 @@ void SQLCompiler::makeJoinEdges(
 
 		 ++it;
 	}
+}
+
+void SQLCompiler::makeJoinNodesCost(
+		const Plan &plan, const PlanNode &node,
+		util::Vector<int64_t> &approxSizeList) {
+	assert(approxSizeList.empty());
+	const PlanNodeId nodeId =
+			static_cast<PlanNodeId>(&node - &plan.nodeList_[0]);
+
+	util::Vector< std::pair<int64_t, bool> > nodeLimitList(alloc_);
+	makeNodeLimitList(plan, nodeLimitList);
+
+	typedef std::pair<PlanNodeId, uint32_t> NodePathEntry;
+	typedef util::Vector<NodePathEntry> NodePath;
+	NodePath nodePath(alloc_);
+	util::Vector<bool> visitedList(alloc_);
+	nodePath.push_back(NodePathEntry(nodeId, 0));
+
+	while (!nodePath.empty()) {
+		const NodePathEntry &entry = nodePath.back();
+		const uint32_t inputId = entry.second;
+		nodePath.pop_back();
+
+		const PlanNodeId nodeId = entry.first;
+		const PlanNode &node = plan.nodeList_[nodeId];
+
+		if (inputId < node.inputList_.size()) {
+			nodePath.push_back(NodePathEntry(nodeId, inputId + 1));
+
+			const PlanNodeId inId = node.inputList_[inputId];
+			nodePath.push_back(NodePathEntry(inId, 0));
+			continue;
+		}
+
+		if (nodeId >= visitedList.size()) {
+			visitedList.resize(nodeId + 1, false);
+		}
+		if (visitedList[nodeId]) {
+			continue;
+		}
+		visitedList[nodeId] = true;
+
+		if (nodeId >= approxSizeList.size()) {
+			approxSizeList.resize(nodeId + 1, -1);
+		}
+		int64_t &approxSize = approxSizeList[nodeId];
+
+		approxSize = resolveJoinNodeApproxSize(node, plan.hintInfo_);
+
+		if (approxSize < 0) {
+			for (PlanNode::IdList::const_iterator it =
+					node.inputList_.begin();
+					it != node.inputList_.end(); ++it) {
+				const int64_t sub = approxSizeList[*it];
+				if (approxSize < 0) {
+					approxSize = sub;
+				}
+				else if (sub >= 0) {
+					if (node.type_ == SQLType::EXEC_UNION) {
+						approxSize += sub;
+					}
+					else {
+						approxSize = std::max(approxSize, sub);
+					}
+				}
+			}
+		}
+
+		const int64_t limit = nodeLimitList[nodeId].first;
+		if (limit >= 0 && (approxSize < 0 || approxSize >= limit)) {
+			approxSize = limit;
+		}
+	}
+}
+
+int64_t SQLCompiler::resolveJoinNodeApproxSize(
+		const PlanNode &node, const SQLHintInfo *hintInfo) {
+	do {
+		if (hintInfo == NULL) {
+			break;
+		}
+
+		const char8_t *tableName = getJoinTableName(node);
+		if (tableName == NULL) {
+			break;
+		}
+
+		const SQLHintValue *value = hintInfo->findStatisticalHint(
+				SQLHint::TABLE_ROW_COUNT, tableName);
+		if (value == NULL) {
+			break;
+		}
+
+		return value->getInt64();
+	}
+	while (false);
+
+	if (node.type_ == SQLType::EXEC_SCAN) {
+		return node.tableIdInfo_.approxSize_;
+	}
+
+	return -1;
 }
 
 void SQLCompiler::makeJoinEdgesSub(
@@ -11118,7 +11775,7 @@ void SQLCompiler::applyJoinOrder(
 
 	for (util::Vector<PlanNodeId>::iterator it = restJoinIdList.begin();
 			it != restJoinIdList.end(); ++it) {
-		plan.nodeList_[*it].type_ = SQLType::START_EXEC;
+		setDisabledNodeType(plan.nodeList_[*it]);
 	}
 
 	{
@@ -11487,55 +12144,124 @@ int64_t SQLCompiler::getMaxGeneratedRows(const Plan &plan) {
 	return static_cast<int64_t>(count);
 }
 
+bool SQLCompiler::isLegacyJoinReordering(const Plan &plan) {
+	if (plan.hintInfo_ != NULL) {
+		if (plan.hintInfo_->hasHint(SQLHint::COST_BASED_JOIN)) {
+			return false;
+		}
+		if (plan.hintInfo_->hasHint(SQLHint::NO_COST_BASED_JOIN)) {
+			return true;
+		}
+	}
+
+	if (isLegacyPlanning(plan, LEGACY_JOIN_REORDERING_VERSION)) {
+		return true;
+	}
+
+	if (compileOption_->isCostBasedJoin()) {
+		return false;
+	}
+	return true;
+}
+
+bool SQLCompiler::isLegacyPlanning(
+		const Plan &plan, const SQLPlanningVersion &legacyVersion) {
+	return plan.planningVersion_.compareTo(legacyVersion) <= 0;
+}
+
+SQLPlanningVersion SQLCompiler::getPlanningVersionHint(
+		const SQLHintInfo *hintInfo) {
+	const size_t valueCount = 3;
+	const size_t minValueCount = 2;
+
+	const SQLHint::Id hintId = SQLHint::LEGACY_PLAN;
+
+	uint64_t valueList[valueCount] = { 0 };
+	const bool found = (getMultipleHintValues(
+			hintInfo, hintId, valueList, valueCount, minValueCount) > 0);
+
+	SQLPlanningVersion version;
+	if (found) {
+		version = SQLPlanningVersion(
+				static_cast<int32_t>(valueList[0]),
+				static_cast<int32_t>(valueList[1]));
+	}
+
+	return version;
+}
+
 bool SQLCompiler::getSingleHintValue(
 		const SQLHintInfo *hintInfo, SQLHint::Id hint, uint64_t defaultValue,
 		uint64_t &value) {
+	const size_t valueCount = 1;
+	const size_t minValueCount = valueCount;
 
-	value = defaultValue;
-	bool hintFound = false;
+	uint64_t valueList[valueCount] = { defaultValue };
+	const bool found = (getMultipleHintValues(
+			hintInfo, hint, valueList, valueCount, minValueCount) > 0);
+	value = valueList[0];
 
-	if (hintInfo != NULL) {
-		int64_t srcValue = -1;
-		do {
-			util::StackAllocator::Scope scope(alloc_);
+	return found;
+}
 
-			if (hintInfo->getHintList(hint) == NULL) {
+size_t SQLCompiler::getMultipleHintValues(
+		const SQLHintInfo *hintInfo, SQLHint::Id hint, uint64_t *valueList,
+		size_t valueCount, size_t minValueCount) {
+	size_t resultValueCount = 0;
+	bool valid = true;
+
+	do {
+		if (hintInfo == NULL) {
+			break;
+		}
+
+		util::StackAllocator::Scope scope(alloc_);
+
+		if (hintInfo->getHintList(hint) == NULL) {
+			break;
+		}
+
+		valid = false;
+
+		util::Vector<TupleValue> hintValueList(alloc_);
+		hintInfo->getHintValueList(hint, hintValueList);
+
+		if (hintValueList.size() < minValueCount) {
+			break;
+		}
+
+		for (size_t i = 0;; i++) {
+			if (!(i < valueCount && i < hintValueList.size())) {
+				valid = true;
 				break;
 			}
 
-			hintFound = true;
-
-			util::Vector<TupleValue> hintValueList(alloc_);
-			hintInfo->getHintValueList(hint, hintValueList);
-
-			if (hintValueList.size() != 1) {
+			const TupleValue &hintValue = hintValueList[i];
+			if (hintValue.getType() != TupleList::TYPE_LONG) {
 				break;
 			}
 
-			if (hintValueList[0].getType() != TupleList::TYPE_LONG) {
-				break;
-			}
-
-			srcValue = hintValueList[0].get<int64_t>();
+			const int64_t srcValue = hintValue.get<int64_t>();
 			if (srcValue < 0) {
 				break;
 			}
 
-			value = static_cast<uint64_t>(srcValue);
-		}
-		while (false);
-
-		if (hintFound && srcValue < 0) {
-			const char8_t *hintName = SQLHint::Coder()(hint);
-			hintName = (hintName == NULL ? "" : hintName);
-
-			SQL_COMPILER_THROW_ERROR(
-					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
-					"Invalid value for Hint(" << hintName << ")");
+			valueList[i] = static_cast<uint64_t>(srcValue);
+			resultValueCount++;
 		}
 	}
+	while (false);
 
-	return hintFound;
+	if (!valid) {
+		const char8_t *hintName = SQLHint::Coder()(hint);
+		hintName = (hintName == NULL ? "" : hintName);
+
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+				"Invalid value for Hint(" << hintName << ")");
+	}
+
+	return resultValueCount;
 }
 
 
@@ -11556,7 +12282,7 @@ void SQLCompiler::initializeMinimizingTargets(
 			nodeIt != plan.nodeList_.end(); ++nodeIt) {
 		const PlanNode &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			continue;
 		}
 
@@ -12034,7 +12760,7 @@ void SQLCompiler::makeJoinExpansionMetaInput(
 
 		bool metaOnly;
 		if (!isJoinExpansionMetaInputRequired(
-				i, joinType, joinInputList, expansionInfo, metaOnly)) {
+				i, joinType, joinInputList, metaOnly)) {
 			continue;
 		}
 
@@ -12320,14 +13046,12 @@ bool SQLCompiler::findJoinExpansion(
 
 	util::StackAllocator::Scope scope(alloc_);
 
-	const uint32_t expansionLimit = getAcceptableJoinExpansionCount(plan);
-
 	const NarrowingKeyTable emptyKeyTable(alloc_);
 	JoinKeyTableList keyTableList = { emptyKeyTable, emptyKeyTable };
 	bool joinCondNarrowable;
 	if (!makeJoinNarrowingKeyTables(
-			plan, node, joinInputList, expansionLimit, tableNarrowingList,
-			keyTableList, joinCondNarrowable)) {
+			plan, node, joinInputList, tableNarrowingList, keyTableList,
+			joinCondNarrowable)) {
 		return joinCondNarrowable;
 	}
 
@@ -12342,13 +13066,12 @@ bool SQLCompiler::findJoinExpansion(
 			keyTableList, joinKeyIdList, unifyingUnitList, inputUsageList,
 			singleUnitList);
 
-	if (!splitted && expansionLimit <= 0) {
-		return false;
-	}
+	const uint32_t expansionLimit = getAcceptableJoinExpansionCount(plan);
 
 	if (!tryMakeJoinAllUnitDividableExpansion(
-			node.joinType_, joinInputList, keyTableList, joinKeyIdList,
-			unifyingUnitList, singleUnitList, expansionLimit, expansionInfo)) {
+			node.joinType_, node.cmdOptionFlag_, joinInputList, keyTableList,
+			joinKeyIdList, unifyingUnitList, singleUnitList, expansionLimit,
+			&expansionInfo)) {
 		if (!splitted) {
 			return false;
 		}
@@ -12364,7 +13087,7 @@ bool SQLCompiler::findJoinExpansion(
 
 bool SQLCompiler::makeJoinNarrowingKeyTables(
 		const Plan &plan, const PlanNode &node,
-		const JoinNodeIdList &joinInputList, uint32_t expansionLimit,
+		const JoinNodeIdList &joinInputList,
 		const TableNarrowingList &tableNarrowingList,
 		JoinKeyTableList &keyTableList, bool &joinCondNarrowable) {
 	const uint32_t inCount = JOIN_INPUT_COUNT;
@@ -12421,7 +13144,7 @@ bool SQLCompiler::makeJoinNarrowingKeyTables(
 	const bool single =
 			(keyTableList[left].getSize() == 1 &&
 			keyTableList[right].getSize() == 1);
-	if (!resolved && (single || expansionLimit <= 0)) {
+	if (!resolved && single) {
 		joinCondNarrowable = false;
 		return false;
 	}
@@ -12506,17 +13229,36 @@ bool SQLCompiler::splitJoinByReachableUnit(
 }
 
 bool SQLCompiler::tryMakeJoinAllUnitDividableExpansion(
-		SQLType::JoinType joinType, const JoinNodeIdList &joinInputList,
-		JoinKeyTableList &keyTableList, const JoinKeyIdList &joinKeyIdList,
+		SQLType::JoinType joinType, PlanNode::CommandOptionFlag cmdOptionFlag,
+		const JoinNodeIdList &joinInputList, JoinKeyTableList &keyTableList,
+		const JoinKeyIdList &joinKeyIdList,
 		const JoinUnifyingUnitList &unifyingUnitList,
 		const JoinBoolList &singleUnitList, uint32_t expansionLimit,
-		JoinExpansionInfo &expansionInfo) {
-	if (expansionLimit <= 0) {
-		return false;
+		JoinExpansionInfo *expansionInfo) {
+	const bool checkOnly = (expansionInfo == NULL);
+	if (!checkOnly) {
+		util::StackAllocator::Scope scope(alloc_);
+		JoinExpansionInfo *infoForCheckOnly = NULL;
+
+		const bool dividable = tryMakeJoinAllUnitDividableExpansion(
+				joinType, cmdOptionFlag, joinInputList, keyTableList,
+				joinKeyIdList, unifyingUnitList, singleUnitList,
+				expansionLimit, infoForCheckOnly);
+		if (!dividable) {
+			return false;
+		}
 	}
 
 	JoinBoolList dividableList;
 	if (!checkJoinUnitDividable(joinType, singleUnitList, dividableList)) {
+		return false;
+	}
+
+	JoinBoolList baseJoinOptList;
+	const JoinBoolList *drivingOptList = getJoinUnitDrivingOptionList(
+			cmdOptionFlag, dividableList, baseJoinOptList);
+
+	if (drivingOptList == NULL && expansionLimit <= 0) {
 		return false;
 	}
 
@@ -12532,27 +13274,34 @@ bool SQLCompiler::tryMakeJoinAllUnitDividableExpansion(
 	JoinMatchCountList matchCountList(alloc_);
 	util::Vector<uint32_t> subLimitList(alloc_);
 
-	JoinExpansionBuildInfo buildInfo(alloc_, expansionInfo);
+	util::LocalUniquePtr<JoinExpansionBuildInfo> buildInfo;
+	if (!checkOnly) {
+		buildInfo = UTIL_MAKE_LOCAL_UNIQUE(
+				buildInfo, JoinExpansionBuildInfo, alloc_, *expansionInfo);
+	}
 
+	bool dividable = false;
 	for (util::Vector<uint32_t>::iterator it = limitList.begin();
 			it != limitList.end(); ++it) {
 		const uint32_t unitIndex =
 				static_cast<uint32_t>(it - limitList.begin());
 		const uint32_t unitLimit = *it;
 
-		makeJoinUnitDividableExpansion(
+		dividable |= makeJoinUnitDividableExpansion(
 				dividableList, joinInputList, keyTableList, joinKeyIdList,
-				unifyingUnitList, unitIndex, unitLimit,
+				unifyingUnitList, drivingOptList, unitIndex, unitLimit,
 				fullMatchList[unitIndex], joinSubKeyIdList, matchCountList,
-				subLimitList, buildInfo);
+				subLimitList, buildInfo.get());
 	}
 
-	expansionInfo.extraCount_ = static_cast<uint32_t>(
-			expansionInfo.expansionCount_ - limitList.size());
-	expansionInfo.limitReached_ =
-			(expansionInfo.extraCount_ >= expansionLimit);
+	if (!checkOnly) {
+		expansionInfo->extraCount_ = static_cast<uint32_t>(
+				expansionInfo->expansionCount_ - limitList.size());
+		expansionInfo->limitReached_ =
+				(expansionInfo->extraCount_ >= expansionLimit);
+	}
 
-	return true;
+	return dividable;
 }
 
 void SQLCompiler::makeJoinAllUnitNonDividableExpansion(
@@ -12615,32 +13364,18 @@ void SQLCompiler::removeJoinExpansionMatchedInput(
 	}
 }
 
-void SQLCompiler::makeJoinUnitDividableExpansion(
+bool SQLCompiler::makeJoinUnitDividableExpansion(
 		const JoinBoolList &dividableList, const JoinNodeIdList &joinInputList,
 		JoinKeyTableList &keyTableList, const JoinKeyIdList &joinKeyIdList,
-		const JoinUnifyingUnitList &unifyingUnitList, uint32_t unitIndex,
-		uint32_t unitLimit, bool fullMatch, JoinKeyIdList &joinSubKeyIdList,
-		JoinMatchCountList &matchCountList,
+		const JoinUnifyingUnitList &unifyingUnitList,
+		const JoinBoolList *drivingOptList, uint32_t unitIndex,
+		uint32_t baseUnitLimit, bool fullMatch,
+		JoinKeyIdList &joinSubKeyIdList, JoinMatchCountList &matchCountList,
 		util::Vector<uint32_t> &subLimitList,
-		JoinExpansionBuildInfo &buildInfo) {
+		JoinExpansionBuildInfo *buildInfo) {
 	const uint32_t inCount = JOIN_INPUT_COUNT;
-	const uint32_t left = JOIN_LEFT_INPUT;
-	const uint32_t right = JOIN_RIGHT_INPUT;
 
 	typedef NarrowingKeyTable::KeyIdList KeyIdList;
-
-	if (unitLimit <= 1) {
-		JoinSizeList keyIdStartList;
-		JoinSizeList keyIdEndList;
-		for (uint32_t i = 0; i < inCount; i++) {
-			keyIdStartList[i] = unifyingUnitList[i][unitIndex];
-			keyIdEndList[i] = unifyingUnitList[i][unitIndex + 1];
-		}
-		makeJoinUnitExpansion(
-				joinInputList, joinKeyIdList, keyIdStartList, keyIdEndList,
-				buildInfo);
-		return;
-	}
 
 	KeyIdList::const_iterator unitBeginList[inCount];
 	KeyIdList::const_iterator unitEndList[inCount];
@@ -12655,9 +13390,28 @@ void SQLCompiler::makeJoinUnitDividableExpansion(
 
 	uint32_t dividingSide;
 	uint64_t sideLimit;
-	getJoinUnitDividableExpansionLimit(
-			unitSizeList, unitLimit, fullMatch, dividableList, dividingSide,
-			sideLimit);
+	uint64_t unitLimit;
+	const bool dividable = getJoinUnitDividableExpansionLimit(
+			unitSizeList, baseUnitLimit, fullMatch, dividableList,
+			drivingOptList, dividingSide, sideLimit, unitLimit);
+
+	const bool checkOnly = (buildInfo == NULL);
+	if (checkOnly) {
+		return dividable;
+	}
+
+	if (!dividable) {
+		JoinSizeList keyIdStartList;
+		JoinSizeList keyIdEndList;
+		for (uint32_t i = 0; i < inCount; i++) {
+			keyIdStartList[i] = unifyingUnitList[i][unitIndex];
+			keyIdEndList[i] = unifyingUnitList[i][unitIndex + 1];
+		}
+		makeJoinUnitExpansion(
+				joinInputList, joinKeyIdList, keyIdStartList, keyIdEndList,
+				*buildInfo);
+		return false;
+	}
 
 	const uint32_t anotherSide = getJoinAnotherSide(dividingSide);
 
@@ -12709,9 +13463,9 @@ void SQLCompiler::makeJoinUnitDividableExpansion(
 					sideKeyTable, 0, sideSubList, anotherSubList, shallow);
 		}
 
-		const uint64_t subLimit = subLimitList.empty() ?
+		const uint64_t subLimit = std::max<uint64_t>(subLimitList.empty() ?
 				limitPartitioner.popGroup() :
-				subLimitList[sideSubIdIt - unitBeginList[dividingSide]];
+				subLimitList[sideSubIdIt - unitBeginList[dividingSide]], 1);
 		assert(subLimitList.empty() || sideCount == 1);
 
 		IntegralPartitioner anotherPartitioner(
@@ -12730,18 +13484,23 @@ void SQLCompiler::makeJoinUnitDividableExpansion(
 
 			makeJoinUnitExpansion(
 					joinInputList, joinSubKeyIdList,
-					keyIdStartList, keyIdEndList, buildInfo);
+					keyIdStartList, keyIdEndList, *buildInfo);
 
 			anotherSubIdIt += anotherCount;
 		}
 		sideSubIdIt += sideCount;
 	}
+
+	return true;
 }
 
-void SQLCompiler::getJoinUnitDividableExpansionLimit(
-		const JoinSizeList &unitSizeList, uint64_t unitLimit,
+bool SQLCompiler::getJoinUnitDividableExpansionLimit(
+		const JoinSizeList &unitSizeList, uint64_t baseUnitLimit,
 		bool fullMatch, const JoinBoolList &dividableList,
-		uint32_t &dividingSide, uint64_t &sideLimit) {
+		const JoinBoolList *drivingOptList, uint32_t &dividingSide,
+		uint64_t &sideLimit, uint64_t &unitLimit) {
+	unitLimit = baseUnitLimit;
+
 	const uint32_t left = JOIN_LEFT_INPUT;
 	const uint32_t right = JOIN_RIGHT_INPUT;
 
@@ -12751,17 +13510,25 @@ void SQLCompiler::getJoinUnitDividableExpansionLimit(
 	const bool leftDividable = dividableList[left];
 	const bool rightDividable = dividableList[right];
 
-	if (unitLimit <= 1 || (!leftDividable && !rightDividable)) {
+	if (drivingOptList != NULL) {
+		dividingSide = ((*drivingOptList)[left] ? right : left);
+		sideLimit = unitSizeList[dividingSide];
+		unitLimit = std::max<uint32_t>(baseUnitLimit, 1U);
+	}
+	else if (baseUnitLimit <= 1 || (!leftDividable && !rightDividable)) {
 		dividingSide = (leftSize <= rightSize ? left : right);
 		sideLimit = 1;
+		if (baseUnitLimit <= 1) {
+			return false;
+		}
 	}
 	else if (!leftDividable || !rightDividable) {
 		dividingSide = (leftDividable ? left : right);
-		sideLimit = unitLimit;
+		sideLimit = baseUnitLimit;
 	}
 	else if (fullMatch) {
 		const uint64_t squareLimit =
-				static_cast<uint64_t>(sqrt(static_cast<double>(unitLimit)));
+				static_cast<uint64_t>(sqrt(static_cast<double>(baseUnitLimit)));
 		if (squareLimit > leftSize) {
 			dividingSide = left;
 			sideLimit = leftSize;
@@ -12779,13 +13546,14 @@ void SQLCompiler::getJoinUnitDividableExpansionLimit(
 		dividingSide = (leftSize <= rightSize ? left : right);
 
 		const uint64_t minSize = std::min<uint64_t>(leftSize, rightSize);
-		if (unitLimit <= minSize) {
-			sideLimit = unitLimit;
+		if (baseUnitLimit <= minSize) {
+			sideLimit = baseUnitLimit;
 		}
 		else {
 			sideLimit = minSize;
 		}
 	}
+	return (sideLimit > 1 || unitLimit > 1);
 }
 
 void SQLCompiler::makeJoinUnitExpansion(
@@ -12862,9 +13630,6 @@ void SQLCompiler::makeJoinAllUnitLimitList(
 		const JoinUnifyingUnitList &unifyingUnitList,
 		uint32_t expansionLimit, util::Vector<uint32_t> &limitList,
 		util::Vector<bool> &fullMatchList) {
-	const uint32_t left = JOIN_LEFT_INPUT;
-	const uint32_t right = JOIN_RIGHT_INPUT;
-
 	typedef NarrowingKeyTable::KeyIdList KeyIdList;
 
 	limitList.clear();
@@ -12923,7 +13688,7 @@ void SQLCompiler::makeJoinAllUnitLimitList(
 
 void SQLCompiler::arrangeJoinExpansionLimit(
 		JoinMatchCountList &matchCountList,
-		util::Vector<uint32_t> &unitLimitList, uint32_t totalLimit) {
+		util::Vector<uint32_t> &unitLimitList, uint64_t totalLimit) {
 	const size_t unitCount = matchCountList.size();
 
 	std::sort(matchCountList.begin(), matchCountList.end());
@@ -12975,6 +13740,32 @@ bool SQLCompiler::getJoinDividableList(
 
 	const bool dividable = (dividableList[left] || dividableList[right]);
 	return dividable;
+}
+
+const SQLCompiler::JoinBoolList* SQLCompiler::getJoinUnitDrivingOptionList(
+		PlanNode::CommandOptionFlag cmdOptionFlag,
+		const JoinBoolList &dividableList, JoinBoolList &baseJoinOptList) {
+	const uint32_t left = JOIN_LEFT_INPUT;
+	const uint32_t right = JOIN_RIGHT_INPUT;
+
+	baseJoinOptList[left] = false;
+	baseJoinOptList[right] = false;
+
+	if ((cmdOptionFlag & PlanNode::Config::CMD_OPT_JOIN_DRIVING_SOME) == 0) {
+		return NULL;
+	}
+
+	const uint32_t drivingSide = ((cmdOptionFlag &
+			PlanNode::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT) == 0 ?
+					right : left);
+	const uint32_t innerSide = getJoinAnotherSide(drivingSide);
+
+	if (!dividableList[innerSide]) {
+		return NULL;
+	}
+
+	baseJoinOptList[drivingSide] = true;
+	return &baseJoinOptList;
 }
 
 uint32_t SQLCompiler::getJoinSmallerSide(const JoinNodeIdList &joinInputList) {
@@ -13294,9 +14085,7 @@ bool SQLCompiler::isJoinExpansionUnmatchInputRequired(
 
 bool SQLCompiler::isJoinExpansionMetaInputRequired(
 		uint32_t joinInputId, SQLType::JoinType joinType,
-		const JoinNodeIdList &joinInputList,
-		const JoinExpansionInfo &expansionInfo, bool &metaOnly) {
-	const uint32_t inCount = JOIN_INPUT_COUNT;
+		const JoinNodeIdList &joinInputList, bool &metaOnly) {
 	const uint32_t left = JOIN_LEFT_INPUT;
 	const uint32_t right = JOIN_RIGHT_INPUT;
 
@@ -13352,7 +14141,6 @@ size_t SQLCompiler::getJoinExpansionMetaUnificationCount(
 		uint32_t joinInputId, SQLType::JoinType joinType,
 		const JoinNodeIdList &joinInputList,
 		const JoinNodeIdList &metaInputList) {
-	const uint32_t inCount = JOIN_INPUT_COUNT;
 	const uint32_t left = JOIN_LEFT_INPUT;
 	const uint32_t right = JOIN_RIGHT_INPUT;
 
@@ -13561,7 +14349,7 @@ bool SQLCompiler::listRelatedSubqueries(
 		visitedNodeIdSet.insert(nodeId);
 
 		const PlanNode &node = plan.nodeList_[nodeId];
-		assert(node.type_ != SQLType::START_EXEC);
+		assert(!isDisabledNode(node));
 
 		pendingIdList.insert(
 				pendingIdList.end(),
@@ -15813,7 +16601,7 @@ bool SQLCompiler::pushDownSubquery(
 	ColumnId subqueryResultColumn = UNDEF_COLUMNID;
 	bool resultFiltering = false;
 	{
-		PlanNode &destNode = plan.append(SQLType::START_EXEC);
+		PlanNode &destNode = plan.append(getDisabledNodeType());
 		PlanNode &srcNode = plan.nodeList_[nodePath.front()];
 
 		const PlanNodeId destNodeId = destNode.id_;
@@ -16565,14 +17353,34 @@ void SQLCompiler::disableSubqueryLimitOffset(Plan &plan, PlanNodeId nodeId) {
 	orgNode.subOffset_ = 0;
 }
 
+void SQLCompiler::removeEmptyNodes(OptimizationContext &cxt, Plan &plan) {
+	static_cast<void>(cxt);
+
+	if (optimizationOption_->isSomeCheckOnly()) {
+		return;
+	}
+
+	plan.removeEmptyNodes();
+}
+
+void SQLCompiler::removeEmptyColumns(OptimizationContext &cxt, Plan &plan) {
+	static_cast<void>(cxt);
+
+	plan.removeEmptyColumns();
+}
+
 SQLCompiler::Expr SQLCompiler::genDisabledExpr() {
 	Expr expr(alloc_);
-	expr.op_ = SQLType::START_EXPR;
+	expr.op_ = getDisabledExprType();
 	return expr;
 }
 
 bool SQLCompiler::isDisabledExpr(const Expr &expr) {
-	return (expr.op_ == SQLType::START_EXPR);
+	return Plan::isDisabledExpr(expr);
+}
+
+SQLCompiler::Type SQLCompiler::getDisabledExprType() {
+	return Plan::getDisabledExprType();
 }
 
 uint64_t SQLCompiler::applyRatio(uint64_t denom, uint64_t ratio) {
@@ -16601,7 +17409,7 @@ void SQLCompiler::makeNodeRefList(
 	for (PlanNodeList::const_iterator nodeIt = plan.nodeList_.begin();
 			nodeIt != plan.nodeList_.end(); ++nodeIt) {
 		const PlanNode &node = *nodeIt;
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			continue;
 		}
 
@@ -16672,12 +17480,20 @@ void SQLCompiler::checkReference(
 	}
 
 	if (expr.op_ == SQLType::EXPR_COLUMN) {
-		assert(node.type_ != SQLType::START_EXEC);
+		assert(!isDisabledNode(node));
 
 		if (node.type_ == SQLType::EXEC_JOIN ||
-				node.type_ == SQLType::EXEC_SELECT) {
-			const PlanNodeId nodeId = node.inputList_[expr.inputId_];
-			(*checkList[nodeId])[expr.columnId_] = true;
+				node.type_ == SQLType::EXEC_SELECT ||
+				node.type_ == SQLType::EXEC_SCAN) {
+			const uint32_t tableCount = node.getInputTableCount();
+			if (expr.inputId_ >= tableCount) {
+				const uint32_t pos = expr.inputId_ - tableCount;
+				assert(pos < node.inputList_.size());
+
+				const PlanNodeId nodeId = node.inputList_[pos];
+				assert(expr.columnId_ < checkList[nodeId]->size());
+				(*checkList[nodeId])[expr.columnId_] = true;
+			}
 		}
 		else {
 			for (PlanNode::IdList::const_iterator it = node.inputList_.begin();
@@ -16736,13 +17552,13 @@ bool SQLCompiler::isSameOutputRequired(
 }
 
 void SQLCompiler::disableNode(Plan &plan, PlanNodeId nodeId) {
-	plan.nodeList_[nodeId].type_ = SQLType::START_EXEC;
+	setDisabledNodeType(plan.nodeList_[nodeId]);
 
 	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
 			nodeIt != plan.nodeList_.end(); ++nodeIt) {
 		PlanNode &node = *nodeIt;
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			continue;
 		}
 
@@ -16768,7 +17584,7 @@ void SQLCompiler::setNodeAndRefDisabled(
 		uint32_t &nodeRef = nodeRefList[curNodeId];
 		PlanNode &node = plan.nodeList_[curNodeId];
 
-		if (node.type_ == SQLType::START_EXEC) {
+		if (isDisabledNode(node)) {
 			assert(false);
 			SQL_COMPILER_THROW_ERROR(
 					GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
@@ -16785,13 +17601,25 @@ void SQLCompiler::setNodeAndRefDisabled(
 		}
 		else {
 			if (nodeRef == 0) {
-				node.type_ = SQLType::START_EXEC;
+				setDisabledNodeType(node);
 			}
 			inIt = node.inputList_.begin();
 			inEnd = node.inputList_.end();
 			forInputRef = true;
 		}
 	}
+}
+
+void SQLCompiler::setDisabledNodeType(PlanNode &node) {
+	node.type_ = getDisabledNodeType();
+}
+
+bool SQLCompiler::isDisabledNode(const PlanNode &node) {
+	return Plan::isDisabledNode(node);
+}
+
+SQLCompiler::Type SQLCompiler::getDisabledNodeType() {
+	return Plan::getDisabledNodeType();
 }
 
 bool SQLCompiler::factorizeExpr(
@@ -17106,17 +17934,115 @@ uint32_t SQLCompiler::getNodeAggregationLevel(const PlanExprList &exprList) {
 	return level;
 }
 
-bool SQLCompiler::isNallowingJoinInput(
+void SQLCompiler::assignReducedScanCostHints(Plan &plan) {
+	if (optimizationOption_->isSomeEnabled()) {
+		OptimizationContext cxt(*this, plan);
+
+		{
+			OptimizationUnit unit(cxt, OPT_PUSH_DOWN_PREDICATE);
+			unit(unit() && pushDownPredicate(plan, true));
+		}
+	}
+
+	const bool costCheckOnly = true;
+	genDistributedPlan(plan, costCheckOnly);
+}
+
+bool SQLCompiler::applyScanCostHints(const Plan &srcPlan, Plan &destPlan) {
+	if (srcPlan.nodeList_.size() != destPlan.nodeList_.size()) {
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	bool found = false;
+	for (PlanNodeList::const_iterator nodeIt = srcPlan.nodeList_.begin();
+			nodeIt != srcPlan.nodeList_.end(); ++nodeIt) {
+		const PlanNode &srcNode = *nodeIt;
+		PlanNode &destNode =
+				destPlan.nodeList_[nodeIt - srcPlan.nodeList_.begin()];
+
+		const int64_t srcSize = srcNode.tableIdInfo_.approxSize_;
+		if (!(srcNode.type_ == SQLType::EXEC_SCAN &&
+				destNode.type_ == SQLType::EXEC_SCAN &&
+				srcSize >= 0)) {
+			continue;
+		}
+
+		int64_t &destSize = destNode.tableIdInfo_.approxSize_;
+		const int64_t orgSize = destSize;
+
+		destSize = srcSize;
+		found |= (orgSize != destSize);
+	}
+
+	return found;
+}
+
+bool SQLCompiler::findJoinPushDownHintingTarget(const Plan &plan) {
+	const PlanNode::CommandOptionFlag mask = getJoinDrivingOptionMask();
+
+	for (PlanNodeList::const_iterator nodeIt = plan.nodeList_.begin();
+			nodeIt != plan.nodeList_.end(); ++nodeIt) {
+		if (nodeIt->type_ == SQLType::EXEC_JOIN &&
+				(nodeIt->cmdOptionFlag_ & mask) == 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool SQLCompiler::applyJoinPushDownHints(const Plan &srcPlan, Plan &destPlan) {
+	if (srcPlan.nodeList_.size() != destPlan.nodeList_.size()) {
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	const PlanNode::CommandOptionFlag mask = getJoinDrivingOptionMask();
+
+	bool found = false;
+	for (PlanNodeList::const_iterator nodeIt = srcPlan.nodeList_.begin();
+			nodeIt != srcPlan.nodeList_.end(); ++nodeIt) {
+		const PlanNode &srcNode = *nodeIt;
+		PlanNode &destNode =
+				destPlan.nodeList_[nodeIt - srcPlan.nodeList_.begin()];
+
+		if (!(srcNode.type_ == SQLType::EXEC_JOIN &&
+				destNode.type_ == SQLType::EXEC_JOIN &&
+				(srcNode.cmdOptionFlag_ & mask) != 0 &&
+				(destNode.cmdOptionFlag_ & mask) == 0)) {
+			continue;
+		}
+
+		PlanNode::CommandOptionFlag &destFlags = destNode.cmdOptionFlag_;
+		const PlanNode::CommandOptionFlag orgFlags = destFlags;
+
+		destFlags = (
+				(orgFlags & (~mask)) | (srcNode.cmdOptionFlag_ & mask));
+		found |= (orgFlags != destFlags);
+	}
+
+	return found;
+}
+
+SQLCompiler::PlanNode::CommandOptionFlag
+SQLCompiler::getJoinDrivingOptionMask() {
+	return (
+			PlanNode::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT |
+			PlanNode::Config::CMD_OPT_JOIN_DRIVING_SOME);
+}
+
+bool SQLCompiler::isNarrowingJoinInput(
 		const Plan &plan, const PlanNode &node, uint32_t inputId) {
 	assert(node.type_ == SQLType::EXEC_JOIN);
 	assert(node.joinType_ == SQLType::JOIN_INNER);
 
-	if (isNallowingNode(node.getInput(plan, inputId))) {
+	if (isNarrowingNode(node.getInput(plan, inputId))) {
 		return true;
 	}
 
 	if (node.predList_.size() > 1 &&
-			isNallowingPredicate(node.predList_[1], &inputId)) {
+			isNarrowingPredicate(node.predList_[1], &inputId)) {
 		return true;
 	}
 
@@ -17133,7 +18059,7 @@ bool SQLCompiler::isNallowingJoinInput(
 			continue;
 		}
 
-		if (isNallowingNode(inNode)) {
+		if (isNarrowingNode(inNode)) {
 			continue;
 		}
 		else if (inNode.inputList_.empty()) {
@@ -17159,7 +18085,7 @@ bool SQLCompiler::isNallowingJoinInput(
 	return true;
 }
 
-bool SQLCompiler::isNallowingNode(const PlanNode &node) {
+bool SQLCompiler::isNarrowingNode(const PlanNode &node) {
 	if (isNodeAggregated(node) || (node.limit_ >= 0 && node.limit_ <= 1)) {
 		return true;
 	}
@@ -17176,26 +18102,26 @@ bool SQLCompiler::isNallowingNode(const PlanNode &node) {
 	}
 
 	if (!node.predList_.empty() &&
-			isNallowingPredicate(node.predList_.front(), NULL)) {
+			isNarrowingPredicate(node.predList_.front(), NULL)) {
 		return true;
 	}
 
 	return false;
 }
 
-bool SQLCompiler::isNallowingPredicate(
+bool SQLCompiler::isNarrowingPredicate(
 		const Expr &expr, const uint32_t *inputId) {
 	if (expr.op_ == SQLType::EXPR_AND) {
-		return isNallowingPredicate(*expr.left_, inputId) ||
-				isNallowingPredicate(*expr.right_, inputId);
+		return isNarrowingPredicate(*expr.left_, inputId) ||
+				isNarrowingPredicate(*expr.right_, inputId);
 	}
 	else if (expr.op_ == SQLType::EXPR_OR) {
-		return isNallowingPredicate(*expr.left_, inputId) &&
-				isNallowingPredicate(*expr.right_, inputId);
+		return isNarrowingPredicate(*expr.left_, inputId) &&
+				isNarrowingPredicate(*expr.right_, inputId);
 	}
 	else if (expr.op_ == SQLType::OP_EQ) {
 		const Expr *columnExpr = expr.left_;
-		const Expr *constExpr =expr.right_;
+		const Expr *constExpr = expr.right_;
 
 		if (columnExpr->op_ != SQLType::EXPR_COLUMN) {
 			std::swap(columnExpr, constExpr);
@@ -17216,9 +18142,33 @@ bool SQLCompiler::isNallowingPredicate(
 }
 
 bool SQLCompiler::findIndexedPredicate(
-		const Plan &plan, const PlanNode &node, uint32_t inputId) {
+		const Plan &plan, const PlanNode &node, uint32_t inputId,
+		bool withUnionScan) {
+	const PlanNode &baseInNode = node.getInput(plan, inputId);
 
-	const PlanNode &inNode = node.getInput(plan, inputId);
+	if (!withUnionScan || baseInNode.type_ != SQLType::EXEC_UNION) {
+		return findIndexedPredicateSub(plan, node, inputId, NULL);
+	}
+
+	bool found = true;
+	for (PlanNode::IdList::const_iterator it = baseInNode.inputList_.begin();
+			it != baseInNode.inputList_.end(); ++it) {
+		const uint32_t unionInputId =
+				static_cast<uint32_t>(it - baseInNode.inputList_.begin());
+		if (!findIndexedPredicateSub(plan, node, inputId, &unionInputId)) {
+			return false;
+		}
+	}
+	return found;
+}
+
+bool SQLCompiler::findIndexedPredicateSub(
+		const Plan &plan, const PlanNode &node, uint32_t inputId,
+		const uint32_t *unionInputId) {
+
+	const PlanNode &baseInNode = node.getInput(plan, inputId);
+	const PlanNode &inNode = (unionInputId == NULL ?
+			baseInNode : baseInNode.getInput(plan, *unionInputId));
 	if (inNode.type_ != SQLType::EXEC_SCAN ||
 			!inNode.inputList_.empty() || inNode.limit_ >= 0 ||
 			inNode.aggPhase_ != SQLType::AGG_PHASE_ALL_PIPE ||
@@ -17227,10 +18177,10 @@ bool SQLCompiler::findIndexedPredicate(
 		return false;
 	}
 
-	const SQLTableInfo::IndexInfoList &indexInfoList =
+	const SQLTableInfo::BasicIndexInfoList *indexInfoList =
 			getTableInfoList().getIndexInfoList(inNode.tableIdInfo_);
 
-	if (indexInfoList.empty()) {
+	if (indexInfoList == NULL) {
 		return false;
 	}
 
@@ -17246,8 +18196,9 @@ bool SQLCompiler::findIndexedPredicate(
 			return false;
 		}
 
-		if (findIndexedPredicate(
-				plan, node, indexInfoList, inputId, *it, firstUnmatched)) {
+		if (findIndexedPredicateSub(
+				plan, node, *indexInfoList, inputId, unionInputId, *it,
+				firstUnmatched)) {
 			found = true;
 		}
 	}
@@ -17255,22 +18206,25 @@ bool SQLCompiler::findIndexedPredicate(
 	return found;
 }
 
-bool SQLCompiler::findIndexedPredicate(
+bool SQLCompiler::findIndexedPredicateSub(
 		const Plan &plan, const PlanNode &node,
-		const SQLTableInfo::IndexInfoList &indexInfoList,
-		uint32_t inputId, const Expr &expr, bool &firstUnmatched) {
+		const SQLTableInfo::BasicIndexInfoList &indexInfoList,
+		uint32_t inputId, const uint32_t *unionInputId, const Expr &expr,
+		bool &firstUnmatched) {
 	if (firstUnmatched) {
 		return false;
 	}
 
 	if (expr.op_ == SQLType::EXPR_AND) {
-		if (findIndexedPredicate(
-				plan, node, indexInfoList, inputId, *expr.left_, firstUnmatched)) {
+		if (findIndexedPredicateSub(
+				plan, node, indexInfoList, inputId, unionInputId, *expr.left_,
+				firstUnmatched)) {
 			return true;
 		}
 
-		if (findIndexedPredicate(
-				plan, node, indexInfoList, inputId, *expr.right_, firstUnmatched)) {
+		if (findIndexedPredicateSub(
+				plan, node, indexInfoList, inputId, unionInputId, *expr.right_,
+				firstUnmatched)) {
 			return true;
 		}
 
@@ -17295,26 +18249,24 @@ bool SQLCompiler::findIndexedPredicate(
 			return false;
 		}
 
-		const Expr &orgTableExpr = node.getInput(
-				plan, inputId).outputList_[tableExpr->columnId_];
-		if (orgTableExpr.op_ != SQLType::EXPR_COLUMN) {
+		const PlanNode &baseInNode = node.getInput(plan, inputId);
+		const Expr &baseTableExpr =
+				baseInNode.outputList_[tableExpr->columnId_];
+		if (baseTableExpr.op_ != SQLType::EXPR_COLUMN) {
 			return false;
 		}
 
-		const ColumnId orgColumnId = orgTableExpr.columnId_;
-		if (orgColumnId >= indexInfoList.size()) {
-			return false;
+		ColumnId orgColumnId = baseTableExpr.columnId_;
+		if (unionInputId != NULL) {
+			const Expr &orgTableExpr = baseInNode.getInput(
+					plan, inputId).outputList_[orgColumnId];
+			if (orgTableExpr.op_ != SQLType::EXPR_COLUMN) {
+				return false;
+			}
+			orgColumnId = orgTableExpr.columnId_;
 		}
 
-		const uint32_t flags = indexInfoList[orgColumnId];
-		if ((flags &
-				((1 << SQLType::INDEX_TREE_RANGE) |
-				(1 << SQLType::INDEX_TREE_EQ))) == 0) {
-			firstUnmatched = true;
-			return false;
-		}
-
-		return true;
+		return indexInfoList.isIndexed(orgColumnId);
 	}
 	else {
 		if (getJoinPrimaryCondScore(expr, NULL, false) > 0) {
@@ -17642,6 +18594,32 @@ void SQLCompiler::replaceExprInput(Expr &expr, uint32_t inputId) {
 	}
 }
 
+void SQLCompiler::copyPlan(const Plan &src, Plan &dest) {
+	dest = src;
+
+	for (PlanNodeList::const_iterator nodeIt = src.nodeList_.begin();
+			nodeIt != src.nodeList_.end(); ++nodeIt) {
+		const PlanNode &srcNode = *nodeIt;
+		PlanNode &destNode = dest.nodeList_[nodeIt - src.nodeList_.begin()];
+		copyNode(srcNode, destNode);
+	}
+}
+
+void SQLCompiler::copyNode(const PlanNode &src, PlanNode &dest) {
+	dest = src;
+
+	dest.predList_.clear();
+	copyExprList(src.predList_, dest.predList_, false);
+
+	dest.outputList_.clear();
+	copyExprList(src.outputList_, dest.outputList_, false);
+
+	if (src.updateSetList_ != NULL) {
+		dest.updateSetList_ = ALLOC_NEW(alloc_) PlanExprList(alloc_);
+		copyExprList(*src.updateSetList_, *dest.updateSetList_, false);
+	}
+}
+
 void SQLCompiler::copyExprList(
 		const PlanExprList &src, PlanExprList &dest, bool shallow) {
 	assert(&src != &dest);
@@ -17775,7 +18753,7 @@ void SQLCompiler::makeNodeLimitList(
 			const PlanNode &node = *nodeIt;
 
 			int64_t limit;
-			if (node.type_ == SQLType::START_EXEC) {
+			if (isDisabledNode(node)) {
 				limit = -1;
 			}
 			else if (getNodeAggregationLevel(node.outputList_) > 0 &&
@@ -18882,6 +19860,10 @@ const SQLCompiler::CompileOption& SQLCompiler::getCompileOption() {
 	return *compileOption_;
 }
 
+bool SQLCompiler::isIndexScanEnabledDefault() {
+	return true;
+}
+
 const SQLTableInfoList& SQLCompiler::getTableInfoList() const {
 	if (tableInfoList_ == NULL) {
 		assert(false);
@@ -18895,6 +19877,22 @@ SQLCompiler::SubqueryStack& SQLCompiler::getSubqueryStack() {
 	return *subqueryStack_;
 }
 
+util::AllocUniquePtr<SQLCompiler::SubqueryStack>::ReturnType
+SQLCompiler::makeSubqueryStack(
+		util::StackAllocator &alloc) {
+	util::AllocUniquePtr<SubqueryStack> stack;
+	stack = ALLOC_UNIQUE(alloc, SubqueryStack, alloc);
+	return stack;
+}
+
+util::AllocUniquePtr<SQLCompiler::OptimizationOption>::ReturnType
+SQLCompiler::makeOptimizationOption(
+		util::StackAllocator &alloc, const OptimizationOption &src) {
+	util::AllocUniquePtr<OptimizationOption> option;
+	option = ALLOC_UNIQUE(alloc, OptimizationOption, src);
+	return option;
+}
+
 util::StackAllocator& SQLCompiler::varContextToAllocator(
 		TupleValue::VarContext &varCxt) {
 	util::StackAllocator *alloc = varCxt.getStackAllocator();
@@ -18905,6 +19903,11 @@ util::StackAllocator& SQLCompiler::varContextToAllocator(
 	}
 
 	return *alloc;
+}
+
+template<typename T> T* SQLCompiler::emptyPtr() {
+	typedef T *Ptr;
+	return Ptr();
 }
 
 const char8_t SQLCompiler::Meta::SYSTEM_NAME_SEPARATOR[] = "#";
@@ -19529,7 +20532,7 @@ void SQLCompiler::Meta::SystemTableInfoList::addInfo(
 	info.columnCount_ = N;
 	info.metaId_ = UNDEF_CONTAINERID;
 	info.coreMetaId_ = (coreMetaType == MetaType::END_TYPE ?
-			UNDEF_CONTAINERID : coreMetaType);
+			UNDEF_CONTAINERID : static_cast<ContainerId>(coreMetaType));
 	info.tableGenFunc_ = tableGenFunc;
 	info.forDriver_ = forDriver;
 }
@@ -20056,7 +21059,6 @@ uint32_t SQLCompiler::SubPlanHasher::operator()(
 	hash = (*this)(value.aggPhase_, &hash);
 	hash = (*this)(value.joinType_, &hash);
 	hash = (*this)(value.unionType_, &hash);
-	hash = (*this)(value.tqlPred_, &hash);
 	return hash;
 }
 
@@ -20165,8 +21167,7 @@ bool SQLCompiler::SubPlanEq::operator()(
 			(*this)(value1.subLimit_, value2.subLimit_) &&
 			(*this)(value1.aggPhase_, value2.aggPhase_) &&
 			(*this)(value1.joinType_, value2.joinType_) &&
-			(*this)(value1.unionType_, value2.unionType_) &&
-			(*this)(value1.tqlPred_, value2.tqlPred_);
+			(*this)(value1.unionType_, value2.unionType_);
 }
 
 bool SQLCompiler::SubPlanEq::operator()(
@@ -20906,6 +21907,14 @@ SQLCompiler::TableNarrowingList::TableNarrowingList(
 		affinityRevList_(alloc) {
 }
 
+SQLCompiler::TableNarrowingList* SQLCompiler::TableNarrowingList::tryDuplicate(
+		const TableNarrowingList *src) {
+	if (src == NULL) {
+		return NULL;
+	}
+	return ALLOC_NEW(src->alloc_) TableNarrowingList(*src);
+}
+
 void SQLCompiler::TableNarrowingList::put(const TableInfo &tableInfo) {
 	const TableInfo::Id id = tableInfo.idInfo_.id_;
 	if (id >= entryList_.size()) {
@@ -21155,6 +22164,8 @@ const util::NameCoderEntry<SQLCompiler::OptimizationUnitType>
 	UTIL_NAME_CODER_ENTRY(OPT_REMOVE_REDUNDANCY),
 	UTIL_NAME_CODER_ENTRY(OPT_REMOVE_INPUT_REDUNDANCY),
 	UTIL_NAME_CODER_ENTRY(OPT_ASSIGN_JOIN_PRIMARY_COND),
+	UTIL_NAME_CODER_ENTRY(OPT_MAKE_SCAN_COST_HINTS),
+	UTIL_NAME_CODER_ENTRY(OPT_MAKE_JOIN_PUSH_DOWN_HINTS),
 	UTIL_NAME_CODER_ENTRY(OPT_MAKE_INDEX_JOIN),
 	UTIL_NAME_CODER_ENTRY(OPT_FACTORIZE_PREDICATE),
 	UTIL_NAME_CODER_ENTRY(OPT_REORDER_JOIN),
@@ -21176,6 +22187,8 @@ SQLCompiler::OptimizationUnit::~OptimizationUnit() {
 
 bool SQLCompiler::OptimizationUnit::operator()() {
 	SQLCompiler &compiler = cxt_.getCompiler();
+
+	compiler.checkOptimizationUnitSupport(type_);
 
 	if (!compiler.isOptimizationUnitEnabled(type_)) {
 		return false;
@@ -21203,9 +22216,93 @@ bool SQLCompiler::OptimizationUnit::operator()(bool optimized) {
 	return optimized;
 }
 
+bool SQLCompiler::OptimizationUnit::isCheckOnly() const {
+	SQLCompiler &compiler = cxt_.getCompiler();
+
+	if (!compiler.isOptimizationUnitCheckOnly(type_)) {
+		return false;
+	}
+
+	return true;
+}
+
+SQLCompiler::OptimizationOption::OptimizationOption(ProfilerManager *manager) :
+		supportFlags_(manager == NULL ? 0 : getFullFlags()),
+		enablementFlags_(manager == NULL ? 0 : manager->getOptimizationFlags()),
+		checkOnlyFlags_(0) {
+	UTIL_STATIC_ASSERT(OPT_END < sizeof(OptimizationFlags) * CHAR_BIT);
+}
+
+bool SQLCompiler::OptimizationOption::isEnabled(
+		OptimizationUnitType type) const {
+	return isFlagOn(enablementFlags_, type);
+}
+
+bool SQLCompiler::OptimizationOption::isSupported(
+		OptimizationUnitType type) const {
+	return isFlagOn(supportFlags_, type);
+}
+
+bool SQLCompiler::OptimizationOption::isCheckOnly(
+		OptimizationUnitType type) const {
+	return isFlagOn(checkOnlyFlags_, type);
+}
+
+bool SQLCompiler::OptimizationOption::isSomeEnabled() const {
+	return enablementFlags_ != 0;
+}
+
+SQLCompiler::OptimizationFlags
+SQLCompiler::OptimizationOption::getEnablementFlags() const {
+	return enablementFlags_;
+}
+
+bool SQLCompiler::OptimizationOption::isSomeCheckOnly() const {
+	return (checkOnlyFlags_ != 0);
+}
+
+void SQLCompiler::OptimizationOption::supportFull() {
+	supportFlags_ = getFullFlags();
+	enablementFlags_ = getFullFlags();
+}
+
+void SQLCompiler::OptimizationOption::support(
+		OptimizationUnitType type, bool enabled) {
+	setFlag(supportFlags_, type, true);
+	setFlag(enablementFlags_, type, enabled);
+}
+
+void SQLCompiler::OptimizationOption::setCheckOnly(OptimizationUnitType type) {
+	setFlag(checkOnlyFlags_, type, true);
+}
+
+SQLCompiler::OptimizationFlags SQLCompiler::OptimizationOption::getFullFlags() {
+	return ((static_cast<OptimizationFlags>(1) << OPT_END) - 1);
+}
+
+bool SQLCompiler::OptimizationOption::isFlagOn(
+		OptimizationFlags flags, OptimizationUnitType type) {
+	return (flags & (static_cast<OptimizationFlags>(1) << type)) != 0;
+}
+
+void SQLCompiler::OptimizationOption::setFlag(
+		OptimizationFlags &flags, OptimizationUnitType type, bool value) {
+	const OptimizationFlags mask = (static_cast<OptimizationFlags>(1) << type);
+	flags = (value ? (flags | mask) : (flags & (~mask)));
+}
+
 const SQLCompiler::CompileOption SQLCompiler::CompileOption::EMPTY_OPTION;
 
-SQLCompiler::CompileOption::CompileOption() {
+SQLCompiler::CompileOption::CompileOption(const CompilerSource *src) :
+		costBasedJoin_(false),
+		baseCompiler_(NULL) {
+	const SQLCompiler *baseCompiler = CompilerSource::findBaseCompiler(src);
+	if (baseCompiler != NULL) {
+		if (baseCompiler->compileOption_ != NULL) {
+			*this = *baseCompiler->compileOption_;
+		}
+		baseCompiler_ = baseCompiler;
+	}
 }
 
 void SQLCompiler::CompileOption::setTimeZone(const util::TimeZone &timeZone) {
@@ -21216,9 +22313,31 @@ const util::TimeZone& SQLCompiler::CompileOption::getTimeZone() const {
 	return timeZone_;
 }
 
+void SQLCompiler::CompileOption::setPlanningVersion(
+		const SQLPlanningVersion &version) {
+	planningVersion_ = version;
+}
+
+const SQLPlanningVersion& SQLCompiler::CompileOption::getPlanningVersion() const {
+	return planningVersion_;
+}
+
+void SQLCompiler::CompileOption::setCostBasedJoin(bool value) {
+	costBasedJoin_ = value;
+}
+
+bool SQLCompiler::CompileOption::isCostBasedJoin() const {
+	return costBasedJoin_;
+}
+
 const SQLCompiler::CompileOption&
 SQLCompiler::CompileOption::getEmptyOption() {
 	return EMPTY_OPTION;
+}
+
+const SQLCompiler* SQLCompiler::CompileOption::findBaseCompiler(
+		const CompileOption *option, CompilerInitializer&) {
+	return (option == NULL ? NULL : option->baseCompiler_);
 }
 
 SQLCompiler::Profiler::Profiler(util::StackAllocator &alloc) :
@@ -21227,6 +22346,19 @@ SQLCompiler::Profiler::Profiler(util::StackAllocator &alloc) :
 		tableInfoList_(alloc),
 		optimizationResult_(alloc),
 		target_(NULL) {
+}
+
+SQLCompiler::Profiler* SQLCompiler::Profiler::tryDuplicate(
+		const Profiler *src) {
+	if (src == NULL) {
+		return NULL;
+	}
+	Profiler *dest = ALLOC_NEW(src->alloc_) Profiler(src->alloc_);
+	dest->plan_ = src->plan_;
+	dest->tableInfoList_ = src->tableInfoList_;
+	dest->optimizationResult_ = src->optimizationResult_;
+	dest->target_ = src->target_;
+	return dest;
 }
 
 void SQLCompiler::Profiler::setPlan(const Plan &plan) {
@@ -21429,7 +22561,7 @@ void SQLCompiler::ProfilerManager::addProfiler(const Profiler &profiler) {
 }
 
 SQLCompiler::JoinNode::JoinNode(util::StackAllocator &alloc) :
-		edgeIdList_(alloc), approxSize_(0), cardinalityList_(alloc) {
+		edgeIdList_(alloc), approxSize_(-1), cardinalityList_(alloc) {
 }
 
 SQLCompiler::JoinEdge::JoinEdge() :
@@ -21477,7 +22609,10 @@ void SQLCompiler::JoinEdge::dump(std::ostream &os) const {
 }
 
 SQLCompiler::JoinOperation::JoinOperation() :
-		type_(SQLType::JOIN_INNER), hintType_(HINT_LEADING_NONE) {
+		type_(SQLType::JOIN_INNER),
+		hintType_(HINT_LEADING_NONE),
+		profile_(NULL),
+		tableCostAffected_(false) {
 	std::fill(
 			nodeIdList_ + 0, nodeIdList_ + JOIN_INPUT_COUNT,
 			std::numeric_limits<JoinNodeId>::max());
@@ -21644,13 +22779,13 @@ void SQLCompiler::JoinScore::dump(std::ostream &os) const {
 	dumpScore(os);
 }
 
-bool SQLCompiler::reorderJoinSub(
+bool SQLCompiler::reorderJoinSubLegacy(
 		util::StackAllocator &alloc,
 		const util::Vector<JoinNode> &joinNodeList,
 		const util::Vector<JoinEdge> &joinEdgeList,
 		const util::Vector<JoinOperation> &srcJoinOpList,
 		const util::Vector<SQLHintInfo::ParsedHint> &joinHintList,
-		util::Vector<JoinOperation> &destJoinOpList) {
+		util::Vector<JoinOperation> &destJoinOpList, bool profiling) {
 
 	destJoinOpList.clear();
 	if (joinNodeList.size() < 3 || joinEdgeList.size() == 0) {
@@ -21676,8 +22811,7 @@ bool SQLCompiler::reorderJoinSub(
 		JoinScoreKey key = std::make_pair(joinNodeId, UNDEF_JOIN_NODEID);
 		JoinScore joinScore(alloc, joinNodeId);
 
-		uint64_t approxSize = (joinNode.approxSize_ != 0) ?
-			joinNode.approxSize_ : JoinScore::DEFAULT_TABLE_ROW_APPROX_SIZE;
+		const uint64_t approxSize = JoinScore::DEFAULT_TABLE_ROW_APPROX_SIZE;
 		joinScore.setApproxTotalCount(approxSize);
 		joinScore.setApproxFilteredCount(approxSize);
 
@@ -22118,21 +23252,34 @@ bool SQLCompiler::reorderJoinSub(
 		}
 	}
 
+
+	bool reordered;
 	if (srcJoinOpList.size() == destJoinOpList.size()) {
+		reordered = false;
 		util::Vector<JoinOperation>::const_iterator srcItr = srcJoinOpList.begin();
 		util::Vector<JoinOperation>::const_iterator resultItr = destJoinOpList.begin();
 		for( ; srcItr != srcJoinOpList.end(); ++srcItr, ++resultItr) {
 			if (srcItr->nodeIdList_[0] != resultItr->nodeIdList_[0]
 					|| srcItr->nodeIdList_[1] != resultItr->nodeIdList_[1]
 					|| srcItr->type_ != resultItr->type_) {
-				return true;
+				reordered = true;
+				break;
 			}
 		}
-		return false;
 	}
 	else {
-		return true;
+		reordered = true;
 	}
+
+	if (profiling) {
+		SQLPreparedPlan::OptProfile::Join *profile =
+				ALLOC_NEW(alloc) SQLPreparedPlan::OptProfile::Join();
+		profile->reordered_ = reordered;
+		profile->costBased_ = false;
+		destJoinOpList.back().profile_ = profile;
+	}
+
+	return reordered;
 }
 
 void SQLCompiler::assignJoinGroupId(
@@ -22246,6 +23393,10 @@ SQLHint::Coder::NameTable::NameTable() : entryEnd_(entryList_) {
 	SQL_HINT_CODER_NAME_TABLE_ADD(INDEX_JOIN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(NO_INDEX_JOIN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(LEADING);
+	SQL_HINT_CODER_NAME_TABLE_ADD(LEGACY_PLAN);
+	SQL_HINT_CODER_NAME_TABLE_ADD(COST_BASED_JOIN);
+	SQL_HINT_CODER_NAME_TABLE_ADD(NO_COST_BASED_JOIN);
+	SQL_HINT_CODER_NAME_TABLE_ADD(OPTIMIZER_FAILURE_POINT);
 	SQL_HINT_CODER_NAME_TABLE_ADD(TABLE_ROW_COUNT);
 #undef SQL_HINT_CODER_NAME_TABLE_ADD
 
@@ -22333,12 +23484,17 @@ const SQLHintInfo::HintTableId SQLHintInfo::START_HINT_TABLEID = 0;
 const SQLHintInfo::HintTableId SQLHintInfo::UNDEF_HINT_TABLEID =
 		std::numeric_limits<SQLHintInfo::HintTableId>::max();
 
-SQLHintInfo::SQLHintInfo(util::StackAllocator &alloc)
-: alloc_(alloc), hintExprMap_(alloc), statisticalHintMap_(alloc),
-  hintTableIdMap_(alloc), joinHintMap_(alloc),
-  tableInfoIdMap_(alloc), scanHintMap_(alloc),
-  joinMethodHintMap_(alloc),
-  reportLevel_(REPORT_WARNING) { 
+SQLHintInfo::SQLHintInfo(util::StackAllocator &alloc) :
+		alloc_(alloc),
+		hintExprMap_(alloc),
+		statisticalHintMap_(alloc),
+		hintTableIdMap_(alloc),
+		joinHintMap_(alloc),
+		tableInfoIdMap_(alloc),
+		scanHintMap_(alloc),
+		joinMethodHintMap_(alloc),
+		symbolHintList_(alloc),
+		reportLevel_(REPORT_WARNING) { 
 }
 
 SQLHintInfo::~SQLHintInfo() {
@@ -22409,26 +23565,6 @@ void SQLHintInfo::parseStatisticalHint(SQLHint::Id hintId, const Expr &hintExpr)
 	}
 	else {
 		itr->second.push_back(hintValue);
-	}
-}
-
-void SQLHintInfo::applyStatisticalHint(SQLTableInfo &tableInfo) {
-	const util::String &tableName = tableInfo.tableName_;
-	StatisticalHintKey key = std::make_pair(tableName, util::String(alloc_));
-	StatisticalHintMap::iterator hintMapItr = statisticalHintMap_.find(key);
-	if (hintMapItr != statisticalHintMap_.end()) {
-		const util::Vector<SQLHintValue> &hintValueList = hintMapItr->second;
-		util::Vector<SQLHintValue>::const_iterator hintItr = hintValueList.begin();
-		for ( ; hintItr != hintValueList.end(); ++hintItr) {
-			SQLHint::Id hintId = hintItr->getId();
-			switch(hintId) {
-			case SQLHint::TABLE_ROW_COUNT:
-				tableInfo.approxSize_ = static_cast<uint64_t>(hintItr->getInt64());
-				break;
-			default:
-				;
-			}
-		}
 	}
 }
 
@@ -22510,6 +23646,36 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 			}
 		}
 		break;
+	case SQLHint::LEGACY_PLAN:
+		{
+			if (!checkArgCount(hintExpr, 2, true) ||
+					!checkArgSQLOpType(hintExpr, SQLType::EXPR_CONSTANT) ||
+					!checkAllArgsValueType(
+							hintExpr, TupleList::TYPE_LONG,
+							0, std::numeric_limits<int32_t>::max())) {
+				return false;
+			}
+		}
+		break;
+	case SQLHint::COST_BASED_JOIN:
+		if (!checkArgCount(hintExpr, 0, false)) {
+			return false;
+		}
+		break;
+	case SQLHint::NO_COST_BASED_JOIN:
+		if (!checkArgCount(hintExpr, 0, false)) {
+			return false;
+		}
+		break;
+	case SQLHint::OPTIMIZER_FAILURE_POINT:
+		{
+			if (!checkArgCount(hintExpr, 2, false) ||
+				!checkArgIsTable(hintExpr, 0, true) ||
+				!checkArgValueType(hintExpr, 1, TupleList::TYPE_LONG, 0, 1)) {
+				return false;
+			}
+		}
+		break;
 	case SQLHint::TABLE_ROW_COUNT:
 		{
 			if (!checkArgCount(hintExpr, 2, false) ||
@@ -22526,9 +23692,7 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 	return true;
 }
 
-void SQLHintInfo::makeHintMap(
-		const SyntaxTree::ExprList* hintList,
-		SQLTableInfoList &tableInfoList) {
+void SQLHintInfo::makeHintMap(const SyntaxTree::ExprList *hintList) {
 	if (hintList) {
 		SyntaxTree::ExprList::const_iterator itr = hintList->begin();
 		for ( ; itr != hintList->end(); ++itr) {
@@ -22559,6 +23723,9 @@ void SQLHintInfo::makeHintMap(
 						case SQLHint::MAX_GENERATED_ROWS:
 						case SQLHint::DISTRIBUTED_POLICY:
 						case SQLHint::TASK_ASSIGNMENT:
+						case SQLHint::LEGACY_PLAN:
+						case SQLHint::COST_BASED_JOIN:
+						case SQLHint::NO_COST_BASED_JOIN:
 							{
 								util::NormalOStringStream strstrm;
 								strstrm << "Hint(" << hintKey->c_str() <<
@@ -22572,6 +23739,7 @@ void SQLHintInfo::makeHintMap(
 						case SQLHint::INDEX_JOIN:
 						case SQLHint::NO_INDEX_JOIN:
 						case SQLHint::LEADING:
+						case SQLHint::OPTIMIZER_FAILURE_POINT:
 						case SQLHint::TABLE_ROW_COUNT:
 						default:
 							break;
@@ -22584,6 +23752,10 @@ void SQLHintInfo::makeHintMap(
 					if (hintId >= SQLHint::TABLE_ROW_COUNT
 						&& hintId < SQLHint::END_ID) {
 						parseStatisticalHint(hintId, *hintExpr);
+					}
+
+					if (hintId == SQLHint::OPTIMIZER_FAILURE_POINT) {
+						parseSymbolHint(hintId, hintExpr);
 					}
 				}
 				else {
@@ -22606,35 +23778,39 @@ void SQLHintInfo::makeHintMap(
 				++hintMapItr;
 			}
 		}
-		tableInfoList.applyStatisticalHint(*this);
+		checkExclusiveHints(
+				SQLHint::COST_BASED_JOIN, SQLHint::NO_COST_BASED_JOIN);
 	}
 }
 
-void SQLCompiler::makeJoinHintMap(const SQLPreparedPlan &plan) {
+void SQLCompiler::makeJoinHintMap(Plan &plan) {
 	typedef uint32_t HintTableId;
 
 	if (plan.hintInfo_ == NULL) {
 		return;
 	}
+
+	SQLHintInfo *hintInfo = ALLOC_NEW(alloc_) SQLHintInfo(*plan.hintInfo_);
 	HintTableId hintTableId = SQLHintInfo::START_HINT_TABLEID;
 	for (SQLPreparedPlan::NodeList::const_iterator itr = plan.nodeList_.begin();
 			itr != plan.nodeList_.end(); ++itr) {
 		if (itr->qName_ && itr->qName_->table_) {
 			const SyntaxTree::QualifiedName &qName = *itr->qName_;
-			plan.hintInfo_->insertHintTableIdMap(*qName.table_, hintTableId);
+			hintInfo->insertHintTableIdMap(*qName.table_, hintTableId);
 
 			++hintTableId;
 		}
 		if (itr->type_ == SQLType::EXEC_SCAN) {
 			const SQLTableInfo& tableInfo = getTableInfoList().resolve(itr->tableIdInfo_.id_);
-			plan.hintInfo_->insertHintTableIdMap(tableInfo.tableName_, hintTableId);
+			hintInfo->insertHintTableIdMap(tableInfo.tableName_, hintTableId);
 
 			++hintTableId;
 
-			plan.hintInfo_->insertTableInfoIdMap(tableInfo.tableName_, itr->tableIdInfo_.id_);
+			hintInfo->insertTableInfoIdMap(tableInfo.tableName_, itr->tableIdInfo_.id_);
 		}
 	}
-	plan.hintInfo_->makeJoinHintMap(plan);
+	hintInfo->makeJoinHintMap(plan);
+	plan.hintInfo_ = hintInfo;
 }
 
 SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const util::String& name) const {
@@ -22647,6 +23823,70 @@ SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const util::String& name) c
 	else {
 		return hintTableIdMapItr->second.id_;
 	}
+}
+
+void SQLHintInfo::parseSymbolHint(SQLHint::Id hintId, const Expr *hintExpr) {
+	assert(hintExpr != NULL);
+
+	ParsedHint parsedHint(alloc_);
+	parsedHint.hintId_ = hintId;
+	parsedHint.hintExpr_ = hintExpr;
+
+	do {
+		const ExprList *exprList = hintExpr->next_;
+		if (exprList == NULL || exprList->empty()) {
+			break;
+		}
+
+		const Expr *argExpr = exprList->front();
+		if (argExpr == NULL) {
+			break;
+		}
+
+		const SyntaxTree::QualifiedName *name = argExpr->qName_;
+		if (name == NULL) {
+			break;
+		}
+
+		util::NameCoderOptions options;
+		options.setCaseSensitive(false);
+
+		size_t pos = 0;
+		const size_t count = SymbolList::SYMBOL_LIST_SIZE;
+		for (; pos < count; pos++) {
+			const util::String *nameElem = (
+					pos == 0 ? name->db_ :
+					(pos == 1 ? name->table_ : name->name_));
+			if (nameElem == NULL) {
+				break;
+			}
+
+			StringConstant str;
+			if (!SQLPreparedPlan::Constants::CONSTANT_CODER(
+					nameElem->c_str(), str, options)) {
+				break;
+			}
+			parsedHint.symbolList_.setValue(pos, str);
+		}
+
+		if (pos != count) {
+			break;
+		}
+		symbolHintList_.push_back(parsedHint);
+		return;
+	}
+	while (false);
+
+	util::String token(alloc_);
+	util::NormalOStringStream strstrm;
+	assert(hintExpr->qName_ && hintExpr->qName_->name_);
+	strstrm << "Invalid symbol argument for hint(" <<
+			hintExpr->qName_->name_->c_str() << ")";
+	getExprToken(*hintExpr, token);
+	if (token.size() > 0) {
+		strstrm << " at or near \"" << token.c_str() << "\"";
+	}
+	reportWarning(strstrm.str().c_str());
 }
 
 SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const Expr &hintArgExpr) const {
@@ -23051,6 +24291,15 @@ void SQLHintInfo::makeJoinHintMap(const SQLPreparedPlan &plan) {
 	}
 }
 
+bool SQLHintInfo::hasHint(SQLHint::Id id) const {
+	HintExprMap::const_iterator it = hintExprMap_.find(id);
+	if (it == hintExprMap_.end()) {
+		return false;
+	}
+	const SQLHintInfo::HintExprArray *exprList = it->second;
+	return !exprList->empty();
+}
+
 const SQLHintInfo::HintExprArray* SQLHintInfo::getHintList(SQLHint::Id id) const {
 	HintExprMap::const_iterator itr = hintExprMap_.find(id);
 	if (itr != hintExprMap_.end()) {
@@ -23289,6 +24538,29 @@ bool SQLHintInfo::findJoinHintList(
 	return hintList.size() > 0;
 }
 
+const SQLHintValue* SQLHintInfo::findStatisticalHint(
+		SQLHint::Id hintId, const char8_t *tableName) const {
+	assert(tableName != NULL);
+	StatisticalHintKey key(
+			normalizeName(alloc_, tableName), util::String(alloc_));
+
+	StatisticalHintMap::const_iterator mapIt = statisticalHintMap_.find(key);
+	if (mapIt == statisticalHintMap_.end()) {
+		return NULL;
+	}
+
+	const util::Vector<SQLHintValue> &values = mapIt->second;
+	for (util::Vector<SQLHintValue>::const_iterator it = values.begin();
+			it != values.end(); ++it) {
+		if (it->getId() != hintId) {
+			continue;
+		}
+		return &(*it);
+	}
+
+	return NULL;
+}
+
 bool SQLHintInfo::findScanHint(const TableInfoId tableInfoId, const SimpleHint* &scanHint) const {
 	scanHint = NULL;
 	ScanHintMap::const_iterator itr = scanHintMap_.find(tableInfoId);
@@ -23346,6 +24618,11 @@ bool SQLHintInfo::findJoinMethodHint(
 	return (hint != NULL);
 }
 
+const util::Vector<SQLHintInfo::ParsedHint>&
+SQLHintInfo::getSymbolHintList() const {
+	return symbolHintList_;
+}
+
 void SQLHintInfo::dumpList(std::ostream &os, const HintTableIdList &target) const {
 	os << "{";
 	HintTableIdList::const_iterator itr = target.begin();
@@ -23372,6 +24649,21 @@ void SQLHintInfo::getExprToken(const Expr &expr, util::String &exprToken) const 
 			exprTokenLen = expr.startToken_.size_;
 			exprToken = util::String(expr.startToken_.value_, exprTokenLen, alloc_);
 		}
+	}
+}
+
+void SQLHintInfo::checkExclusiveHints(
+		SQLHint::Id hintId1, SQLHint::Id hintId2) const {
+	const SQLHintInfo::HintExprArray *list1 = getHintList(hintId1);
+	const SQLHintInfo::HintExprArray *list2 = getHintList(hintId2);
+	if ((list1 != NULL && !list1->empty()) &&
+			(list2 != NULL && !list2->empty())) {
+		const util::String *name1 = list1->front()->qName_->name_;
+		const util::String *name2 = list2->front()->qName_->name_;
+		util::NormalOStringStream strstrm;
+		strstrm << "Hint(" << *name1 << ") and hint(" << *name2 << ") "
+				"can not specified both";
+		reportWarning(strstrm.str().c_str());
 	}
 }
 
@@ -23453,8 +24745,8 @@ bool SQLHintInfo::checkArgSQLOpType(
 }
 
 bool SQLHintInfo::checkAllArgsValueType(
-		const Expr &hintExpr,
-		TupleList::TupleColumnType valueType, int64_t minValue) const {
+		const Expr &hintExpr, TupleList::TupleColumnType valueType,
+		int64_t minValue, int64_t maxValue) const {
 	util::String token(alloc_);
 	if (hintExpr.op_ != SQLType::EXPR_LIST) {
 		assert(hintExpr.qName_ && hintExpr.qName_->name_);
@@ -23471,7 +24763,7 @@ bool SQLHintInfo::checkAllArgsValueType(
 	assert(hintExpr.next_);
 	const ExprList &hintArgList = *(hintExpr.next_);
 	for (size_t pos = 0; pos < hintArgList.size(); ++pos) {
-		if (!checkArgValueType(hintExpr, pos, valueType, minValue)) {
+		if (!checkArgValueType(hintExpr, pos, valueType, minValue, maxValue)) {
 			return false;
 		}
 	}
@@ -23479,8 +24771,8 @@ bool SQLHintInfo::checkAllArgsValueType(
 }
 
 bool SQLHintInfo::checkArgValueType(
-		const Expr &hintExpr, size_t pos,
-		TupleList::TupleColumnType valueType, int64_t minValue) const {
+		const Expr &hintExpr, size_t pos, TupleList::TupleColumnType valueType,
+		int64_t minValue, int64_t maxValue) const {
 	util::String token(alloc_);
 	if (hintExpr.op_ != SQLType::EXPR_LIST) {
 		assert(hintExpr.qName_ && hintExpr.qName_->name_);
@@ -23499,27 +24791,19 @@ bool SQLHintInfo::checkArgValueType(
 	if (hintArg.op_ == SQLType::EXPR_CONSTANT) {
 		switch(valueType) {
 		case TupleList::TYPE_LONG:
-			if (hintArg.value_.getType() == TupleList::TYPE_LONG) {
-				if (minValue != std::numeric_limits<int64_t>::min()) {
-					if (hintArg.value_.get<int64_t>() >= minValue) {
-						return true;
-					}
-				}
-				else {
-					return true;
-				}
+			if (hintArg.value_.getType() == TupleList::TYPE_LONG &&
+					checkValueRange(
+							hintArg.value_.get<int64_t>(),
+							minValue, maxValue)) {
+				return true;
 			}
 			break;
 		case TupleList::TYPE_DOUBLE:
-			if (hintArg.value_.getType() == TupleList::TYPE_DOUBLE) {
-				if (minValue != std::numeric_limits<int64_t>::min()) {
-					if (hintArg.value_.get<double>() >= minValue) {
-						return true;
-					}
-				}
-				else {
-					return true;
-				}
+			if (hintArg.value_.getType() == TupleList::TYPE_DOUBLE &&
+					checkValueRange(
+							static_cast<int64_t>(hintArg.value_.get<double>()),
+							minValue, maxValue)) {
+				return true;
 			}
 			break;
 		case TupleList::TYPE_STRING:
@@ -23558,16 +24842,34 @@ bool SQLHintInfo::checkArgValueType(
 	}
 }
 
+bool SQLHintInfo::checkValueRange(
+		int64_t value, int64_t min, int64_t max) const {
+	if (min != std::numeric_limits<int64_t>::min()) {
+		if (!(value >= min)) {
+			return false;
+		}
+	}
+
+	if (max != std::numeric_limits<int64_t>::max()) {
+		if (!(value <= max)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 bool SQLHintInfo::checkArgIsTable(
-		const Expr &hintExpr, size_t pos) const
+		const Expr &hintExpr, size_t pos, bool forSymbol) const
 {
+	const char8_t *category = (forSymbol ? "symbol" : "table");
 	util::String token(alloc_);
 	assert(hintExpr.op_ == SQLType::EXPR_LIST);
 	const Expr &hintArgExpr = *hintExpr.next_->at(pos);
 	if (hintArgExpr.op_ != SQLType::EXPR_COLUMN) {
 		util::NormalOStringStream strstrm;
 		assert(hintExpr.qName_ && hintExpr.qName_->name_);
-		strstrm << "Invalid argument type for hint(" <<
+		strstrm << "Invalid " << category << " type of argument for hint(" <<
 				hintExpr.qName_->name_->c_str() << ")";
 		getExprToken(hintExpr, token);
 		if (token.size() > 0) {
@@ -23577,12 +24879,13 @@ bool SQLHintInfo::checkArgIsTable(
 		return false;
 	}
 	if ((hintArgExpr.qName_ == NULL) ||
-			(hintArgExpr.qName_->db_ != NULL) ||
-			(hintArgExpr.qName_->table_ != NULL) ||
+			(!forSymbol &&
+					((hintArgExpr.qName_->db_ != NULL) ||
+					(hintArgExpr.qName_->table_ != NULL))) ||
 			(hintArgExpr.qName_->name_ == NULL)) {
 		util::NormalOStringStream strstrm;
 		assert(hintExpr.qName_ && hintExpr.qName_->name_);
-		strstrm << "Invalid argument for hint(" <<
+		strstrm << "Invalid " << category << " name of argument for hint(" <<
 				hintExpr.qName_->name_->c_str() << ")";
 		getExprToken(hintExpr, token);
 		if (token.size() > 0) {
@@ -23655,6 +24958,20 @@ bool SQLHintInfo::checkLeadingTreeArgumentsType(const Expr &expr) const {
 	}
 }
 
+SQLHintInfo::SymbolElement::SymbolElement() :
+		value_(SQLPreparedPlan::Constants::END_STR) {
+}
+
+void SQLHintInfo::SymbolList::setValue(size_t pos, StringConstant value) {
+	elems_[pos].value_ = value;
+}
+
+SQLHintInfo::StringConstant SQLHintInfo::SymbolList::getValue(
+		size_t pos) const {
+	assert(pos < SYMBOL_LIST_SIZE);
+	return elems_[pos].value_;
+}
+
 SQLHintInfo::ParsedHint& SQLHintInfo::ParsedHint::operator=(
 		const SQLHintInfo::ParsedHint &another) {
 	hintId_ = another.hintId_;
@@ -23663,7 +24980,6 @@ SQLHintInfo::ParsedHint& SQLHintInfo::ParsedHint::operator=(
 	isTree_ = another.isTree_;
 	return *this;
 }
-
 
 SQLHintInfo::HintTableIdMapValue::HintTableIdMapValue(
 		SQLHintInfo::HintTableId id, const util::String &origName)
@@ -23690,3 +25006,43 @@ void SQLCompiler::dumpExprList(const PlanExprList &list) {
 	std::cout << std::endl;
 }
 
+SQLCompiler::CompilerInitializer::CompilerInitializer(
+		const CompileOption *option) :
+		baseOption_(option) {
+}
+
+SQLCompiler::CompilerInitializer::operator bool() {
+	assert(baseOption_ != &InitializerConstants::INVALID_OPTION);
+	return (CompileOption::findBaseCompiler(baseOption_, *this) != NULL);
+}
+
+const SQLCompiler* SQLCompiler::CompilerInitializer::operator->() {
+	assert(baseOption_ != &InitializerConstants::INVALID_OPTION);
+	return CompileOption::findBaseCompiler(baseOption_, *this);
+}
+
+SQLCompiler::ProfilerManager&
+SQLCompiler::CompilerInitializer::profilerManager() {
+	return ProfilerManager::getInstance();
+}
+
+void SQLCompiler::CompilerInitializer::close() {
+	assert(baseOption_ != &InitializerConstants::INVALID_OPTION);
+	baseOption_ = &InitializerConstants::INVALID_OPTION;
+}
+
+SQLCompiler::CompilerInitializer::End::End(CompilerInitializer &init) {
+	init.close();
+}
+
+SQLCompiler::CompileOption
+SQLCompiler::CompilerInitializer::InitializerConstants::INVALID_OPTION;
+
+SQLCompiler::CompilerSource::CompilerSource(const SQLCompiler *baseCompiler) :
+		baseCompiler_(baseCompiler) {
+}
+
+const SQLCompiler* SQLCompiler::CompilerSource::findBaseCompiler(
+		const CompilerSource *src) {
+	return (src == NULL ? NULL : src->baseCompiler_);
+}

@@ -37,6 +37,8 @@ struct SQLProfiler;
 struct NoSQLSyncContext;
 struct ExecutionProfilerInfo;
 class DataStoreV4;
+struct DatabaseStats;
+class SQLResultManager;
 
 enum SQLRequestType {
 	REQUEST_TYPE_EXECUTE,
@@ -58,6 +60,74 @@ static const SQLGetMode SQL_PUT = (SQL_CREATE | SQL_GET);
 static const int32_t SQL_DEFAULT_QUERY_TIMEOUT_INTERVAL = INT32_MAX;
 static const int64_t SQL_MAX_ROWS = INT64_MAX;
 static const int64_t SQL_DEFAULT_FETCH_SIZE = 65535;
+
+class BindParamSet {
+public:
+	BindParamSet(util::StackAllocator &alloc) :
+		alloc_(alloc),
+		bindParamList_(alloc),
+		currentPos_(0),
+		columnSize_(0),
+		rowCount_(0) {}
+
+	void prepare(int32_t columnNum, int64_t rowCount) {
+		clear();
+		columnSize_ = columnNum;
+		rowCount_ = rowCount;
+		for (size_t pos = 0; pos < rowCount; pos++) {
+			util::Vector<BindParam*> bindParamList(alloc_);
+			bindParamList_.push_back(bindParamList);
+		}
+	}
+
+	void append(BindParam *bindParam) {
+		if (bindParamList_[currentPos_].size() >= columnSize_) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_INTERNAL,
+				"(pos=" << currentPos_ << ", size1=" << bindParamList_[currentPos_].size() <<",size2=" << columnSize_);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_INTERNAL, "");
+		}
+		bindParamList_[currentPos_].push_back(bindParam);
+	}
+
+	util::Vector<BindParam*> &getParamList(size_t pos) {
+		if (bindParamList_.size() == 0) {
+			util::Vector<BindParam*> bindParamList(alloc_);
+			bindParamList_.push_back(bindParamList);
+		}
+		if (pos >= bindParamList_.size()) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_INTERNAL, 
+				"(pos=" << pos << ", size=" << bindParamList_.size());
+		}
+		return bindParamList_[pos];
+	}
+
+	void reset() {
+		currentPos_ = 0;
+	}
+
+	bool next() {
+		if (currentPos_ == rowCount_) {
+			return false;
+		}
+		currentPos_++;
+		return true;
+	}
+
+	void clear();
+
+	void copyBindParamSet(const BindParamSet& rhs);
+
+	int64_t getRowCount() {
+		return rowCount_;
+	}
+
+private:
+	util::StackAllocator &alloc_;
+	util::Vector<util::Vector<BindParam*>> bindParamList_;
+	size_t currentPos_;
+	int32_t columnSize_;
+	int64_t rowCount_;
+};
 
 /*!
 	@brief クライアントリクエスト情報
@@ -83,7 +153,7 @@ public:
 		paramCount_(0),
 		sessionMode_(SQL_CREATE),
 		eventType_(UNDEF_EVENT_TYPE),
-		preparedParamList_(eventStackAlloc_),
+		bindParamSet_(eventStackAlloc),
 		serializedBindInfo_(eventStackAlloc_),
 		serialized_(true) {
 	}
@@ -105,7 +175,7 @@ public:
 		paramCount_(0),
 		sessionMode_(SQL_CREATE),
 		eventType_(UNDEF_EVENT_TYPE),
-		preparedParamList_(eventStackAlloc_),
+		bindParamSet_(eventStackAlloc),
 		serializedBindInfo_(eventStackAlloc_),
 		serialized_(serialized) {
 	}
@@ -164,7 +234,7 @@ public:
 
 	EventType eventType_;
 
-	util::Vector<BindParam*> preparedParamList_;
+	BindParamSet bindParamSet_;
 
 	util::XArray<uint8_t> serializedBindInfo_;
 	bool serialized_;
@@ -199,24 +269,43 @@ struct ResponseInfo {
 
 struct SQLConfigParam {
 public:
-	SQLConfigParam(ConfigTable& config);
+	SQLConfigParam(const ConfigTable& config);
+
 	void setMultiIndexScan(bool value) {
 		multiIndexScan_ = value;
 	}
+
 	void setPartitioningRowKeyConstraint(bool value) {
 		partitioningRowKeyConstraint_ = value;
 	}
+
 	bool isMultiIndexScan() const {
 		return multiIndexScan_;
 	}
+
 	bool isPartitioningRowKeyConstraint() const {
 		return partitioningRowKeyConstraint_;
 	}
+
+	bool isCostBasedJoin() const {
+		return costBasedJoin_;
+	}
+
+	const SQLPlanningVersion& getPlanningVersion() const {
+		return planningVersion_;
+	}
+
 private:
-	SQLConfigParam(const SQLConfigParam& s);
-	const SQLConfigParam& operator=(const SQLConfigParam& s);
+	SQLConfigParam(const SQLConfigParam&);
+	const SQLConfigParam& operator=(const SQLConfigParam&);
+
+	SQLPlanningVersion getPlanningVersion(
+			const ConfigTable& config, SQLConfigTableParamId paramId);
+
 	bool multiIndexScan_;
 	bool partitioningRowKeyConstraint_;
+	bool costBasedJoin_;
+	SQLPlanningVersion planningVersion_;
 };
 
 class SQLConnectionControl {
@@ -346,6 +435,7 @@ public:
 	uint32_t getConnectionEnvUpdates(
 		const StatementHandler::ConnectionOption& connOption);
 	void dump();
+	void getDatabaseStats(util::StackAllocator& alloc, DatabaseId dbId, util::Map<DatabaseId, DatabaseStats*>& statsMap, bool isAdministrator);
 
 	void dumpTableCache(util::NormalOStringStream& oss, const char* dbName);
 	void resizeTableCache(const char* dbName, int32_t cacheSize);
@@ -412,6 +502,14 @@ public:
 		return ++nodeCounter_;
 	}
 
+	void incInternalRetry() {
+		++internalRetryCount_;
+	}
+
+	uint64_t getInternalRetry() {
+		return internalRetryCount_;
+	}
+
 	int64_t incCacheHit() {
 		tableCacheHitCount_++;
 		return tableCacheHitCount_;
@@ -471,8 +569,6 @@ private:
 	SQLExecution* get(ClientId& clientId);
 	void release(SQLExecution* execution);
 
-	const ManagerSet* mgrSet_;
-
 	util::Mutex lock_;
 	util::Mutex stackAllocatorLock_;
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
@@ -484,10 +580,16 @@ private:
 	SQLProcessorConfig* processorConfig_;
 	int64_t fetchSizeLimit_;
 	int64_t nosqlSizeLimit_;
+	int32_t tableCacheDumpLimitTime_;
+
+	const ManagerSet* mgrSet_;
+	SQLConfigParam config_;
+
 	util::Atomic<uint64_t> nodeCounter_;
 	std::vector<uint64_t> totalReadOperationList_;
 	std::vector<uint64_t> totalWriteOperationList_;
 
+	util::Atomic<uint64_t> internalRetryCount_;
 	util::Atomic<uint64_t> queueSizeMax_;
 	util::Atomic<uint64_t> tableCacheHitCount_;
 	util::Atomic<uint64_t> tableCacheMissHitCount_;
@@ -495,9 +597,6 @@ private:
 	util::Atomic<int64_t> tableCacheSearchCount_;
 	util::Atomic<int64_t> tableCacheSkipCount_;
 	util::Atomic<int64_t> tableCacheLoadTime_;
-	int32_t tableCacheDumpLimitTime_;
-
-	SQLConfigParam config_;
 
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
 		virtual void operator()(ConfigTable& config);
@@ -558,6 +657,22 @@ public:
 		DBConnection* commandMgr);
 
 	~SQLExecution();
+	
+	bool isBatch() {
+		return isBatch_;
+	}
+	void setBatch() {
+		isBatch_ = true;
+	}
+	
+	void setBatchCount(int64_t count) {
+		batchCountList_.push_back(count);
+		batchCurrentPos_++;
+	}
+
+	bool isBatchComplete() {
+		return (batchCount_ == batchCurrentPos_);
+	}
 
 	void execute(EventContext& ec,
 		RequestInfo& request, bool prepareBinded,
@@ -608,7 +723,6 @@ public:
 		void init(util::StackAllocator& alloc);
 
 	private:
-		ClientId& clientId_;
 		SQLString userName_;
 		SQLString dbName_;
 		DatabaseId dbId_;
@@ -616,14 +730,16 @@ public:
 		SQLString applicationName_;
 		bool isAdministrator_;
 		const NodeDescriptor clientNd_;
+		ClientId& clientId_;
 		double storeMemoryAgingSwapRate_;
 		util::TimeZone timezone_;
-		int32_t acceptableFeatureVersion_;
 		StatementHandler::ConnectionOption& connOption_;
+		int32_t acceptableFeatureVersion_;
 	};
 
 	class QueryAnalyzedInfo {
 		friend class SQLExecution;
+		friend class JobManager;
 	public:
 		QueryAnalyzedInfo(SQLVariableSizeGlobalAllocator& globalVarAlloc,
 			util::StackAllocator& eventStackAlloc) : parsedInfo_(eventStackAlloc),
@@ -631,6 +747,10 @@ public:
 			prepared_(false), fastInserted_(false),
 			isAnalyzed_(false), isTimeSeriesIncluded_(false), query_(globalVarAlloc),
 			notSelect_(false), isDDL_(false) {}
+
+			SQLParsedInfo& getParsedInfo() {
+				return parsedInfo_;
+			}
 	private:
 		bool isPragmaStatement() {
 			return (parsedInfo_.pragmaType_ != SQLPragma::PRAGMA_NONE);
@@ -704,11 +824,6 @@ public:
 		int64_t endTime_;
 		SQLPreparedPlan* preparedPlan_;
 
-		int32_t sqlCount_;
-		PartitionId connectedPId_;
-		PartitionGroupId connectedPgId_;
-		SQLRequestType requestType_;
-
 		void set(RequestInfo& request) {
 			sqlCount_ = request.sqlCount_;
 			connectedPId_ = request.pId_;
@@ -725,7 +840,13 @@ public:
 				fetchRemain_ = origMaxRows_;
 			}
 		};
+
 		FetchStatus fetchStatus_;
+
+		int32_t sqlCount_;
+		PartitionId connectedPId_;
+		PartitionGroupId connectedPgId_;
+		SQLRequestType requestType_;
 	};
 
 	class SQLExecutionContext {
@@ -751,7 +872,11 @@ public:
 
 		const char* getDBName() const;
 		const char* getApplicationName() const;
+		bool isSetApplicationName() const;
+
 		const char* getQuery() const;
+		bool isSetQuery() const;
+
 		void getQuery(util::String& str, size_t size);
 		void setQuery(util::String& query) const;
 		const DatabaseId getDBId() const;
@@ -765,6 +890,7 @@ public:
 
 		const double getStoreMemoryAgingSwapRate() const;
 		const util::TimeZone& getTimezone() const;
+
 		ClientId& getId() const;
 		const char* getNormalizedDBName();
 		bool isRetryStatement() const;
@@ -800,7 +926,6 @@ public:
 		util::Exception pendingException_;
 	};
 
-	SQLExecutionContext context_;
 	SQLExecutionContext& getContext() {
 		return context_;
 	}
@@ -810,7 +935,7 @@ public:
 	struct SQLReplyContext {
 		SQLReplyContext() : ec_(NULL), job_(NULL), typeList_(NULL),
 			versionId_(0), responseJobId_(NULL),
-			replyType_(SQL_REPLY_UNDEF) {}
+			replyType_(SQL_REPLY_UNDEF), countList_(NULL) {}
 		void setExplainAnalyze(EventContext* ec, Job* job,
 			uint8_t versionId, JobId* responseJobId) {
 			assert(ec);
@@ -823,6 +948,12 @@ public:
 		void setExplain(EventContext* ec) {
 			assert(ec);
 			ec_ = ec;
+			replyType_ = SQL_REPLY_SUCCESS_EXPLAIN;
+		}
+		void setBatch(EventContext *ec, util::Vector<int64_t> *countList) {
+			assert(ec);
+			ec_ = ec;
+			countList_ = countList;
 			replyType_ = SQL_REPLY_SUCCESS_EXPLAIN;
 		}
 		void set(EventContext* ec,
@@ -840,6 +971,7 @@ public:
 		uint8_t versionId_;
 		JobId* responseJobId_;
 		int32_t replyType_;
+		util::Vector<int64_t> *countList_;
 	};
 
 	bool replyClient(SQLReplyContext& cxt);
@@ -889,6 +1021,14 @@ public:
 	ExecutionProfilerInfo& getProfilerInfo() {
 		return profilerInfo_;
 	}
+	
+	SQLParsedInfo& getParsedInfo() {
+		return analyzedQueryInfo_.parsedInfo_;
+	}
+
+	int64_t getTotalSize() {
+		return executionStackAlloc_.getTotalSize();
+	}
 
 private:
 
@@ -930,10 +1070,6 @@ private:
 
 	void setTimeSeriesIncluded(bool flag) {
 		analyzedQueryInfo_.isTimeSeriesIncluded_ = flag;
-	}
-
-	SQLParsedInfo& getParsedInfo() {
-		return analyzedQueryInfo_.parsedInfo_;
 	}
 
 	util::Vector<SyntaxTree::ExprList*>& getMergeSelectList() {
@@ -1067,6 +1203,9 @@ private:
 
 	void setPreparedOption(RequestInfo& info, bool isRetry);
 
+	bool fetchBatch(
+		EventContext &ec, std::vector<int64_t> *countList);
+
 	bool fetchNotSelect(EventContext& ec,
 		TupleList::Reader* reader, TupleList::Column* columnList);
 
@@ -1084,10 +1223,13 @@ private:
 	void cleanupTableCache();
 	void checkConcurrency(EventContext& ec, std::exception* e);
 	bool doAfterParse(RequestInfo& request);
+	void checkBatchRequest(RequestInfo& request);
 
 	bool checkRetryError(SQLReplyType replyType, int32_t currentVersionId) {
 		return (replyType == SQL_REPLY_INTERNAL && currentVersionId >= 1);
 	}
+
+	bool checkExecutionConstraint(uint32_t& delayStartTime, uint32_t& delayExecutionTime);
 
 	void setupSyncContext();
 	bool metaDataQueryCheck(SQLConnectionControl* control);
@@ -1101,6 +1243,22 @@ private:
 		util::Vector<BindParam*>& bindParamInfos);
 
 	void checkColumnTypeFeatureVersion(ColumnType columnType);
+
+	struct Config {
+		Config(RequestInfo& request) {
+			typedef StatementMessage::Options Options;
+			fetchCount_ = request.option_.get<Options::FETCH_SIZE>();
+			maxRows_ = request.option_.get<Options::MAX_ROWS>();
+			queryTimeout_ = request.option_.get<
+				Options::STATEMENT_TIMEOUT_INTERVAL>();
+			txnTimeout_ = request.option_.get<
+				Options::TXN_TIMEOUT_INTERVAL>();
+		}
+		int64_t fetchCount_;
+		int64_t maxRows_;
+		int32_t queryTimeout_;
+		int32_t txnTimeout_;
+	};
 
 	util::Mutex lock_;
 	int64_t latchCount_;
@@ -1117,6 +1275,8 @@ private:
 
 	LocalTempStore::Group group_;
 	SQLResultSet* resultSet_;
+	ExecutionStatus executionStatus_;
+	Config config_;
 	NoSQLSyncContext* syncContext_;
 	ResponseInfo response_;
 
@@ -1141,14 +1301,16 @@ private:
 		static const int32_t PARSE = 0;
 		static const int32_t COMPILE = 1;
 
-		ExecutionProfilerWatcher(SQLExecution* execution, bool isNormal) :
-			profilerInfo_(execution->getProfilerInfo()), isNormal_(isNormal) {
+		ExecutionProfilerWatcher(SQLExecution* execution, bool isNormal, bool trace) :
+			profilerInfo_(execution->getProfilerInfo()), execution_(execution), isNormal_(isNormal), trace_(trace) {
 			profilerInfo_.init();
 			if (isNormal) {
 				watch_.reset();
 				watch_.start();
 			}
 		}
+
+		~ExecutionProfilerWatcher();
 
 		void lap(int32_t point) {
 			int64_t elapsed = watch_.elapsedMillis();
@@ -1166,37 +1328,27 @@ private:
 		}
 
 	private:
-		bool isNormal_;
-		util::Stopwatch watch_;
 		ExecutionProfilerInfo& profilerInfo_;
+		SQLExecution* execution_;
+		bool isNormal_;
+		bool trace_;
+		util::Stopwatch watch_;
 	};
 
 	ExecutionProfilerInfo profilerInfo_;
-
-
 	util::Atomic<bool> isCancelled_;
 
 	JobId currentJobId_;
 	PreparedInfo preparedInfo_;
 	ClientInfo clientInfo_;
 	QueryAnalyzedInfo analyzedQueryInfo_;
-	ExecutionStatus executionStatus_;
-	struct Config {
-		Config(RequestInfo& request) {
-			typedef StatementMessage::Options Options;
-			fetchCount_ = request.option_.get<Options::FETCH_SIZE>();
-			maxRows_ = request.option_.get<Options::MAX_ROWS>();
-			queryTimeout_ = request.option_.get<
-				Options::STATEMENT_TIMEOUT_INTERVAL>();
-			txnTimeout_ = request.option_.get<
-				Options::TXN_TIMEOUT_INTERVAL>();
-		}
-		int64_t fetchCount_;
-		int64_t maxRows_;
-		int32_t queryTimeout_;
-		int32_t txnTimeout_;
-	};
-	Config config_;
+	SQLExecutionContext context_;
+
+	bool isBatch_;
+	std::vector<int64_t> batchCountList_;
+	int64_t batchCount_;
+	int64_t batchCurrentPos_;
+	BindParamSet bindParamSet_;
 };
 
 struct SQLProfilerInfo {
@@ -1230,8 +1382,8 @@ struct SQLProfilerInfo {
 
 struct SQLProfiler {
 	SQLProfiler(util::StackAllocator& alloc) : alloc_(alloc), sqlProfiler_(alloc) {}
-	util::Vector<SQLProfilerInfo> sqlProfiler_;
 	util::StackAllocator& alloc_;
+	util::Vector<SQLProfilerInfo> sqlProfiler_;
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_MEMBERS(sqlProfiler_);
 };

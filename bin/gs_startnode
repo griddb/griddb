@@ -27,16 +27,16 @@ def getPort(nodeconf):
 util.install_sigint_handler()
 (homedir,logdir) = util.get_required_env()
 
-parser = OptionParser(usage="%prog [-w [WAIT_TIME] -u USER/PASS] [--releaseUnusedFileBlocks]",
-                      description="Starts a node.",
-            version="%prog [V2.8.00]")
+parser = OptionParser(usage="%prog [-u USER/PASS [-w [WAIT_TIME]] ] [--releaseUnusedFileBlocks]",
+                      description="Start the GridDB node.",
+                      version="%prog [V2.8.00]")
 
 util.add_client_options(parser)
 parser.remove_option("--server")
 parser.remove_option("--port")
 parser.add_option("-w", "--wait", action='callback', callback=\
-                    util.optional_arg(0), dest="wait_time",default=None,
-                  help="wait for a while until it starts")
+                  util.optional_arg(0), dest="wait_time",default=None,
+                  help="Wait for the GridDB node to start.")
 parser.add_option("--releaseUnusedFileBlocks", dest="release_unused_file_blocks",
                   action="store_true", default=False, help="Deallocate unused file blocks.")
 parser.set_defaults(checkPort=None)
@@ -45,13 +45,13 @@ parser.add_option("--checkPort", dest="checkPort", help=SUPPRESS_HELP)
 
 if options.wait_time is not None:
     if options.username is None:
-        print("AD0001: If you use a wait option,")
-        print("Specify a user name and a password. (-u USER/PASS)")
+        print("AD0001: If waiting for the GridDB node to start,")
+        print("specify a user name and a password."+" (-u USER/PASS)")
         sys.exit(2)
     try:
         wait_time = int(options.wait_time)
     except ValueError:
-        print("AD0002: Specify the correct number of seconds to wait. (-w WAIT_TIME)")
+        print("AD0002: Specify seconds to wait."+" (-w WAIT_TIME)")
         sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
@@ -59,10 +59,10 @@ log.info("%s start." % (__file__))
 
 statinfo = os.stat(homedir)
 if statinfo[stat.ST_UID] != os.getuid():
-    print("AD0101: You can't start the node because of you aren't the owner of home directory %s." % homedir)
-    print("the current user: %s" %(pwd.getpwuid(os.getuid())[0]))
-    print("the owner of home directory %s: %s" %(homedir, pwd.getpwuid(statinfo[stat.ST_UID])[0]))
-    log.error("AD0101: The current user is not the owner of home directory. (dir="+homedir+")")
+    print("AD0101: The GridDB node cannot be started since there is no owner permissions in the %s directory." % homedir)
+    print("The current user: %s" %(pwd.getpwuid(os.getuid())[0]))
+    print("The owner of home directory: %s" %(pwd.getpwuid(statinfo[stat.ST_UID])[0]))
+    log.error("AD0101: The GridDB node cannot be started since there is no owner permissions in the %s directory." % homedir)
     sys.exit(1)
 
 
@@ -77,7 +77,7 @@ with open(nodeconffile) as f:
 if options.checkPort is not None:
         port = getPort(nodeconf)
         if str(port) != options.checkPort:
-            print("AD0108: The specified port number isn't the port number of target node. (port="+str(options.checkPort)+", port(target node)="+str(port)+", file="+nodeconffile+")")
+            print("AD0108: The specified port number isn't the port number of target GridDB node. (port="+str(options.checkPort)+", port(target node)="+str(port)+", file="+nodeconffile+")")
             sys.exit(1)
 
 
@@ -86,9 +86,9 @@ pidfile = os.path.join(confdir, "gridstore.pid")
 if os.path.exists(pidfile):
     pid = util.getpid(pidfile)
     if util.psexists(pid, "gsserver"):
-        print("AD0102: gsserver process may exist.")
+        print("AD0102: There is a possibility that GridDB node has been started.")
         print("PID is " + pid)
-        log.error("AD0102: PID file and gsserver process exists. (pid="+pid+")")
+        log.error("AD0102: There is a possibility that GridDB node has been started. (pid="+pid+")")
         sys.exit(0)
     else:
         log.warning("AD0105: PID file exists, but gsserver process is not found. Then delete pid file and start gsserver. (pid="+pid+")")
@@ -176,22 +176,23 @@ if options.wait_time is not None:
             e = 2
             break
         if not os.path.exists(pidfile):
-            print("AD0104: Failed to start node.")
-            print("Confirm event logs (gridstore-YYYYMMDD-n.log).")
-            log.error("AD0104: Failed to start node.")
+            print("AD0104: Failed to start the GridDB node.")
+            print("Check the event log file."+" (gridstore-YYYYMMDD-n.log)")
+            log.error("AD0104: Failed to start the GridDB node.")
             sys.exit(1)
         if not util.psexists(serverPid, "gsserver"):
-            print("AD0105: Failed to start node.")
-            print("Confirm event logs (gridstore-YYYYMMDD-n.log).")
-            log.error("AD0105: Failed to start node.")
+            print("AD0105: Failed to start the GridDB node.")
+            print("Check the event log file."+" (gridstore-YYYYMMDD-n.log)")
+            log.error("AD0105: Failed to start the GridDB node.")
             sys.exit(1)
         if code == 200:
             nodestat = json.loads(res)
             recovery_status = nodestat.get("recovery").get("progressRate")
             # print recovery_status
 
-    util.wait_error_case(e,log,"\nStarted node.")
+    util.wait_error_case(e,log,"\nThe GridDB node has been started.")
     log.info("%s end." % (__file__))
     sys.exit(e)
 
 log.info("%s end." % (__file__))
+

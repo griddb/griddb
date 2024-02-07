@@ -593,7 +593,7 @@ void JsonUtils::BaseOutStream<V>::writeBinary(
 template<typename V>
 JsonUtils::Object* JsonUtils::BaseOutStream<V>::writeObject(
 		const Attribute &attr) {
-	return &(write(attr) = Value(Object())).get<Object>();
+	return &(write(attr) = Value(Object())).template get<Object>();
 }
 
 template<typename V>
@@ -609,7 +609,7 @@ JsonUtils::Value* JsonUtils::BaseOutStream<V>::writeValue(
 template<typename V>
 JsonUtils::Array* JsonUtils::BaseOutStream<V>::writeList(
 		size_t size, const Attribute &attr) {
-	JsonUtils::Array &dest = (write(attr) = Value(Array())).get<Array>();
+	JsonUtils::Array &dest = (write(attr) = Value(Array())).template get<Array>();
 	dest.reserve(size);
 	return &dest;
 }

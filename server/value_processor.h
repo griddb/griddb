@@ -1054,6 +1054,9 @@ public:
 
 	StringCursor(util::StackAllocator& alloc, const char *str);
 
+	StringCursor(
+			util::XArray<uint8_t> &buf, const uint8_t *str, uint32_t strLength);
+
 	/*!
 		@brief Free StringCursor Object
 	*/

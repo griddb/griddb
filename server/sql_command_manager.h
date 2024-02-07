@@ -124,8 +124,8 @@ struct PartitionRangeList {
 			startPId = set(startPId, range);
 		}
 	}
-	util::Vector<PartitionRange> ranges_;
 	util::StackAllocator& alloc_;
+	util::Vector<PartitionRange> ranges_;
 	uint32_t base_;
 	uint32_t mod_;
 	int32_t currentPos_;
@@ -164,7 +164,7 @@ public:
 		NoSQLStoreOption option_; 
 		const NameWithCaseSensitivity& dbName_; 
 		const NameWithCaseSensitivity& tableName_; 
-		CreateTableOption& createTableOption_; 
+		const CreateTableOption& createTableOption_; 
 		DDLBaseInfo* baseInfo_; 
 
 		DDLCommandType commandType_; 
@@ -191,7 +191,7 @@ public:
 
 		DDLSource(util::StackAllocator& alloc, EventContext& ec, SQLExecution* execution,
 			const NameWithCaseSensitivity& dbName, const NameWithCaseSensitivity& tableName,
-			CreateTableOption& createTableOption, DDLBaseInfo* baseInfo, DDLCommandType commandType) :
+			const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo, DDLCommandType commandType) :
 			alloc_(alloc), ec_(ec), execution_(execution), option_(execution),
 			dbName_(dbName), tableName_(tableName), createTableOption_(createTableOption),
 			baseInfo_(baseInfo), commandType_(commandType), targetContainer_(NULL),
@@ -215,7 +215,7 @@ public:
 		int32_t oldColumnNameLen_; 
 		int32_t newColumnNameLen_; 
 
-		RenameColumnContext(CreateTableOption& createTableOption);
+		RenameColumnContext(const CreateTableOption& createTableOption);
 		void checkColumnName(DDLSource& ddlSource);
 	};
 
@@ -324,7 +324,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo
 	);
 
@@ -348,7 +348,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo);
 
 	void dropView(
@@ -363,7 +363,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo
 	);
 
@@ -372,7 +372,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo
 	);
 
@@ -382,7 +382,7 @@ public:
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& indexName,
 		const NameWithCaseSensitivity& tableName,
-		CreateIndexOption& option,
+		const CreateIndexOption& option,
 		DDLBaseInfo* baseInfo);
 
 	void createIndexPost(
@@ -516,8 +516,6 @@ public:
 	}
 
 private:
-	PartitionList* partitionList_;
-	DataStoreConfig* dsConfig_;
 
 	void checkDatabase(
 		util::StackAllocator& alloc,
@@ -608,10 +606,12 @@ private:
 	SQLString dbName_;
 	SQLString normalizedDbName_;
 	size_t cacheSize_;
+	void* cache_;
 	PartitionTable* pt_;
+	PartitionList* partitionList_;
+	DataStoreConfig* dsConfig_;
 	DBConnection* dbConnection_;
 	JobManager* jobManager_;
-	void* cache_;
 	util::Atomic<int64_t> storeAccessCount_;
 	util::Atomic<int64_t> storeSkipCount_;
 	util::Atomic<int64_t> storeRecoveryCount_;
@@ -696,7 +696,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo);
 
 	void dropTable(
@@ -719,7 +719,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo);
 
 	void dropView(
@@ -735,7 +735,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo);
 
 	void renameColumn(
@@ -743,7 +743,7 @@ public:
 		SQLExecution* execution,
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
-		CreateTableOption& createTableOption,
+		const CreateTableOption& createTableOption,
 		DDLBaseInfo* baseInfo);
 
 	void createIndex(
@@ -752,7 +752,7 @@ public:
 		const NameWithCaseSensitivity& dbName,
 		const NameWithCaseSensitivity& tableName,
 		const NameWithCaseSensitivity& indexName,
-		CreateIndexOption& option,
+		const CreateIndexOption& option,
 		DDLBaseInfo* baseInfo);
 
 	void createIndexPost(
@@ -833,10 +833,6 @@ public:
 
 
 private:
-
-	PartitionList* partitionList_;
-	DataStoreConfig* dsConfig_;
-
 	NoSQLStore* getNoSQLStore(const char* dbName);
 
 	typedef std::pair<DatabaseId, NoSQLStore*> NoSQLStoreMapEntry;
@@ -853,6 +849,9 @@ private:
 	int32_t refCount_;
 
 	PartitionTable* pt_;
+
+	PartitionList* partitionList_;
+	DataStoreConfig* dsConfig_;
 	SQLService* sqlSvc_;
 };
 

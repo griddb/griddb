@@ -15,26 +15,26 @@ import stat
 import re
 from optparse import OptionParser
 
-import util
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+import util_server
+util_server.install_sigint_handler()
+(homedir,logdir) = util_server.get_required_env()
 
 reserved_name = ["admin","system"]
 
 parser = OptionParser(usage="%prog USERNAME [-p PASSWORD]",
-                      description="Add an administrator. USERNAME must start with gs#.",
-            version="%prog [V2.8.00]")
+                      description="Add an administrator of GridDB. The USERNAME must start with gs#."
+                + "",
+            version="%prog [V5.0.00]")
 parser.add_option("-p", "--password", dest="password",
-                  help='specify password. not display prompt')
+                  help='A password prompt does not display.')
 (options, args) = parser.parse_args()
 
 if len(args) < 1:
-    parser.error("A10001: Specify USERNAME.")
+    parser.error("A10001: Specify the USERNAME.")
 username = args[0]
 
 if not re.match(r"gs#[a-zA-Z0-9_]+$", username) and username not in reserved_name:
-    print("A10002: USERNAME must starts with gs#. After it, you must use combination of alphabetic, numeric character and _(underbar).")
-    print("USERNAME is case insensitive.")
+    print("A10002: The username must start with 'gs#', and only one or more ASCII alphanumeric characters and the underscore sign '_' . This is case insensitive.")
     sys.exit(1)
 
 filename = os.path.join(homedir, "conf/password")
@@ -42,7 +42,7 @@ with open(filename, 'r+') as file:
     try:
         fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except(IOError):
-        print("A10101: Failed to lock")
+        print("A10101: Failed to lock.")
         sys.exit(1)
 
     csvReader = csv.reader(file)
@@ -51,7 +51,7 @@ with open(filename, 'r+') as file:
         allPassword[row[0]] = row[1]
 
     if username.upper() in (name.upper() for name in allPassword):
-        print("A10102: USERNAME '" + username + "' already exists. USERNAME is case insensitive.")
+        print("A10102: USERNAME '" + username + "' already exists. This is case insensitive.")
         sys.exit(1)
 
     if options.password is not None:
@@ -68,9 +68,9 @@ with open(filename, 'r+') as file:
             sys.exit(1)
 
     if password == "":
-        print("A10104: Password cannnot include space")
+        print("A10104: Password cannot include space.")
         sys.exit(1)
-    digest = hashlib.sha256(util.strToBytes(password)).hexdigest()
+    digest = hashlib.sha256(util_server.strToBytes(password)).hexdigest()
     allPassword[username] = digest
 
     os.umask(0)
@@ -78,7 +78,7 @@ with open(filename, 'r+') as file:
     with open(tmpfilename, 'w+') as tmpfile:
         csvWriter = csv.writer(tmpfile)
         for row in list(allPassword.items()):
-            csvWriter.writerow(row);
+            csvWriter.writerow(row)
 
     statinfo = os.stat(filename)
     os.chown(tmpfilename, statinfo[stat.ST_UID], statinfo[stat.ST_GID])

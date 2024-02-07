@@ -223,7 +223,9 @@ public:
 	static const int32_t SQL_V4_0_MSG_VERSION;
 	static const int32_t SQL_V4_1_MSG_VERSION;
 	static const int32_t SQL_V4_1_0_MSG_VERSION;
+	static const int32_t SQL_V5_5_MSG_VERSION;
 	static const int32_t SQL_MSG_VERSION;
+	static const bool SQL_MSG_BACKWARD_COMPATIBLE;
 
 	/*!
 		@brief コンストラクタ
@@ -334,6 +336,14 @@ public:
 		return sendPendingTaskConcurrency_;
 	}
 
+	void setAddBatchMaxCount(int32_t count) {
+		addBatchMaxCount_ = count;
+	}
+
+	int32_t getAddBatchMaxCount() {
+		return addBatchMaxCount_;
+	}
+
 	void setJobMemoryLimit(int64_t limit) {
 		jobMemoryLimit_ = limit;
 	}
@@ -382,6 +392,14 @@ public:
 
 	int32_t getTableSchemaExpiredTime() {
 		return tableSchemaExpiredTime_;
+	}
+
+	bool getScanMetaTableByAdmin() {
+		return scanMetaTableByAdmin_;
+	}
+
+	void setScanMetaTableByAdmin(bool flag) {
+		scanMetaTableByAdmin_ = flag;
 	}
 
 	/*!
@@ -497,6 +515,10 @@ public:
 		return tableSchemaCacheSize_;
 	}
 
+	EventMonitor& getEventMonitor() {
+		return eventMonitor_;
+	}
+
 private:
 
 	EventEngine ee_;
@@ -513,12 +535,14 @@ private:
 
 	std::vector<uint8_t> statusList_;
 
-	util::Atomic <int64_t> nosqlSyncId_;
-
 	PartitionIdList startPIdList_;
 	PartitionIdList pgIdList_;
 
+	PartitionTable* pt_;
+
 	util::Atomic <uint64_t> clientSequenceNo_;
+
+	util::Atomic <int64_t> nosqlSyncId_;
 	/*!
 		@brief EventEngine config設定
 	*/
@@ -562,24 +586,27 @@ private:
 
 	SendEventHandler sendEventHandler_;
 
-	PartitionTable* pt_;
-
 	int32_t traceLimitTime_;
 	int32_t traceLimitQuerySize_;
 	int32_t nosqlFailoverTimeout_;
 	int32_t tableSchemaExpiredTime_;
 	int32_t tableSchemaCacheSize_;
+
+	int64_t jobMemoryLimit_;
+	bool isProfiler_;
+	int32_t checkCounter_;
+
 	int32_t sendPendingInterval_;
 	int32_t sendPendingTaskLimit_;
 	int32_t sendPendingJobLimit_;
 	int32_t sendPendingTaskConcurrency_;
+	int32_t addBatchMaxCount_;
 
 	int64_t totalInternalConnectionCount_;
 	int64_t totalExternalConnectionCount_;
+	bool scanMetaTableByAdmin_;
 
-	int64_t jobMemoryLimit_;
-	int32_t checkCounter_;
-	bool isProfiler_;
+	EventMonitor eventMonitor_;
 
 	Config config_;
 

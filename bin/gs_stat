@@ -5,36 +5,161 @@ import sys
 import log
 import os
 import json
-import util
+import util_client
 from optparse import OptionParser
 from optparse import SUPPRESS_HELP
+import csv
+from typing import Optional
 
-import util
+import util_client
+
+# typeの種類
+type_list = ["backup","container"]
+
+# --type オプションチェック
+def check_type(option, opt_str, value, parser):
+    if (value in type_list):
+        parser.values.type = value
+    else:
+        print("AE0002: The %s can be specified to type option. (" % "/".join(map(str, type_list)) +opt_str+"="+value+")")
+        sys.exit(2)
+
+# JSONを解析した結果のdictから取得した値がNone、True、Falseの場合、
+# それぞれ文字列null、true、falseに変換して返す。
+def conv_value(value) -> Optional[str]:
+    if value is None:
+        return "null"
+    elif value is True:
+        return "true"
+    elif value is False:
+        return "false"
+    return value
+
+# JSONを解析した結果のdictをCSV化し出力。
+# 第1引数: JSONを解析した結果のdict
+def disp_in_csv(json_loads_result):
+    csv_column_names = []
+    csv_column_values = {}
+    
+    parse_for_csv(json_loads_result, csv_column_values, "")
+
+    csv_column_names = sorted(csv_column_values.keys())
+    csv_header = "\"" + "\",\"".join(csv_column_names) + "\""
+    
+    sys.stdout.write(csv_header + "\n")
+    writer = csv.DictWriter(sys.stdout, fieldnames=csv_column_names, extrasaction='ignore', quoting=csv.QUOTE_ALL)
+    writer.writerow(csv_column_values)
+
+# CSV出力用のdictを作成する。
+# 第1引数: JSONを解析した結果のdict
+# 第2引数: CSV出力用のdict
+# 第3引数: CSV出力用のdictのキー名のprefix
+def parse_for_csv(json_loads_result, csv_column_values, prefix_name):
+    for i in json_loads_result:
+        value = json_loads_result[i]
+        if isinstance(value, dict):
+            parse_for_csv(value, csv_column_values, prefix_name + i + "/")
+        elif isinstance(value, list):
+            liststr: Optional[str] = list_to_str(value)
+            csv_column_values[prefix_name + i] = liststr
+        else:
+            csv_column_values[prefix_name + i] = str(conv_value(value))
+
+# listを文字列に変換して返す。
+def list_to_str(values) -> Optional[str]:
+    ret_val = ""
+    tmp_ret_vals = []
+    for list_val in values:
+        if isinstance(list_val, dict):
+            sub_values = {}
+            parse_for_csv(list_val, sub_values, "")
+            tmp_strs = []
+            sub_keys = sorted(sub_values.keys())
+            for sub_key in sub_keys:
+                tmp_strs.append(sub_key + ":" + str(sub_values[sub_key]))
+            tmp_ret_vals.append("{" + ", ".join(tmp_strs) + "}")
+        elif isinstance(list_val, list):
+            tmp_ret_vals.append(list_to_str(list_val))
+        else:
+            tmp_ret_vals.append(str(conv_value(list_val)))
+    
+    ret_val = "[" + ", ".join(tmp_ret_vals) + "]"
+    return str(ret_val)
 
 
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
 
-parser = OptionParser(usage="%prog [-a ADDR_TYPE]"+ util.CLIENT_OPTIONS_USAGE,
-                      description="Obtains internal information of a node.",
-            version="%prog [V2.8.00]")
-util.add_client_options(parser)
+parser = OptionParser(usage="%prog [[-a ADDR_TYPE] [--member]| -t TYPE]"+ util_client.CLIENT_OPTIONS_USAGE,
+                      description="Obtain the status of the GridDB node.",
+                      version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
 parser.add_option("-a", "--address-type", type="string",
-        action="callback", callback=util.check_addr_type, dest="addr_type",
-        help="obtain address information with a specified service type\
+                  action="callback", callback=util_client.check_addr_type, dest="addr_type",
+                  help="Specify the service type of the address to display.\
                             ADDR_TYPE\
                             system\
                             cluster\
                             transaction\
                             sync")
+parser.add_option("-t", "--type", type="string", 
+                  action="callback", callback=check_type, dest="type",
+                  help="The information of specified type is displayed.\
+                            TYPE\
+                            backup The backup status is displayed.")
+parser.add_option("--member", dest="member",
+                  action="store_true", default=False,
+                  help="If the cluster configuration method is set the fixed list or provider, display the address list of the cluster membership that this node is known.")
+
+parser.add_option("--memoryDetail", dest="memory_detail",
+                  action="store_true", default=False,
+                  help=SUPPRESS_HELP)
+parser.add_option("--detail", dest="detail",
+                  action="store_true", default=False,
+                  help=SUPPRESS_HELP)
+parser.add_option("--csv", dest="csv",
+                  action="store_true", default=False,
+                  help="If specified, display status in CSV format.")
+
 (options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
 
 if options.username is None:
-    print("AE0001: Specify a user name and a password. (-u USER/PASS)")
+    print("AE0001: User and password are required."+" (-u USER/PASS)")
     sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
 log.info("%s start." % (__file__))
+
+
+# バックアップ情報取得
+if options.type == "backup":
+    backupStatus = util_client.check_backup_stat_server(options,log)
+    if backupStatus == 1:
+        print("BackupStatus: -")
+        sys.exit(0)
+    elif backupStatus == 2:
+        print("BackupStatus: Processing")
+        sys.exit(0)
+    elif backupStatus == 3:
+        print("BackupStatus: Processing(Baseline)")
+        sys.exit(0)
+    elif backupStatus == 4:
+        print("BackupStatus: Processing(Since)")
+        sys.exit(0)
+    elif backupStatus == 5:
+        print("BackupStatus: Processing(Incremental)")
+        sys.exit(0)
+    else:
+        print("AE0101: Failed to obtain a status of backup.")
+        log.error("AE0101: Failed to obtain a status of backup.")
+        sys.exit(1)
+
+# コンテナ情報取得
+if options.type == "container":
+    print("AE0106: The getting container information option is unsupported from version V2.5.0.")
+    sys.exit(2)
 
 path = "/node/stat"
 data = {}
@@ -42,13 +167,26 @@ data = {}
 if options.addr_type is not None:
     data["addressType"] = options.addr_type
 
+if options.member:
+    data["notificationMember"] = "true"
+
+if options.memory_detail:
+    data["memoryDetail"] = "true"
+
+if options.detail:
+    data["detail"] = "true"
+
+# サーバから情報取得
 method = "GET"
-(res, code) = util.request_rest(method, path, data, options, log)
+(res, code) = util_client.request_rest(method, path, data, options, log)
 if res is not None:
-    print(json.dumps(json.loads(res), sort_keys=True, indent=4))
+    if options.csv:
+        disp_in_csv(json.loads(res))
+    else:
+        print(json.dumps(json.loads(res), sort_keys=True, indent=4))
 
 if code != 200:
-    log.error("AE0105: Failed to get stat.")
+    log.error("AE0105: Failed to obtain a status of the node.")
     sys.exit(1)
 
 log.info("%s end." % (__file__))

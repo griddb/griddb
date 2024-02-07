@@ -18,9 +18,17 @@
 	@file
 	@brief Implementation of BtreeMap
 */
+
+#ifndef GS_BTREE_MAP_DEFINE_SWITCHER_ONLY
+#define GS_BTREE_MAP_DEFINE_SWITCHER_ONLY 0
+#endif
+
+#if !GS_BTREE_MAP_DEFINE_SWITCHER_ONLY
+
 #include "btree_map.h"
 #include "data_store_common.h"
 #include "schema.h"
+#endif 
 
 template<>
 struct BtreeMap::MapKeyTraits<CompositeInfoObject8> {
@@ -84,6 +92,7 @@ struct BtreeMap::MapKeyTraits<CompositeInfoObject136> {
 	typedef CompositeInfoObject TYPE;
 };
 
+#if !GS_BTREE_MAP_DEFINE_SWITCHER_ONLY
 int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 						 const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting) {
 	int32_t ret = 0;
@@ -275,6 +284,7 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 	memcpy(suspendValue_, &suspendValue, valueSize);
 	suspendValueSize_ = valueSize;
 }
+#endif 
 
 template<typename Action>
 void BtreeMap::switchToBasicType(ColumnType type, Action &action) {
@@ -381,6 +391,7 @@ void BtreeMap::switchToBasicType(ColumnType type, Action &action) {
 	}
 }
 
+#if !GS_BTREE_MAP_DEFINE_SWITCHER_ONLY
 int32_t BtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
 	bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
 	InitializeFunc initializeFunc(txn, columnType, isUnique, btreeMapType,
@@ -557,8 +568,13 @@ void BtreeMap::UniqueSearchFunc::execute() {
 	ret_ = tree_->find<P, K, V, KEY_COMPONENT>(txn_, *reinterpret_cast<P *>(key_), oId_, setting_);
 }
 
-int32_t BtreeMap::search(TransactionContext &txn, SearchContext &sc,
-	util::XArray<OId> &idList, OutputOrder outputOrder) {
+int32_t BtreeMap::search(
+		TransactionContext &txn, SearchContext &sc, util::XArray<OId> &idList,
+		OutputOrder outputOrder) {
+	if (sc.getTermConditionUpdator() != NULL) {
+		return searchBulk(txn, sc, idList, outputOrder);
+	}
+
 	if (isEmpty()) {
 		return GS_FAIL;
 	}
@@ -905,3 +921,5 @@ uint32_t BtreeMap::SearchContext::getRangeConditionNum() {
 	return rangeConditionNum;
 }
 
+
+#endif 

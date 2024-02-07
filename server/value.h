@@ -78,6 +78,9 @@ private:
 	static const uint8_t defaultGeometryValue_[7];
 
 public:
+	class Pool;
+	typedef util::XArray<uint8_t> Buffer;
+
 	Value() : type_(COLUMN_TYPE_STRING) {
 		data_.object_.set(NULL, false);
 	}
@@ -180,32 +183,32 @@ public:
 		@brief Set string value
 		@note convert to RowMessage/RowObject string format
 	*/
-	inline void set(util::StackAllocator &alloc, char *s) {
-		type_ = COLUMN_TYPE_STRING;
-		uint32_t strSize = static_cast<uint32_t>(strlen(s));
-		uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
-		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
-		char *target =
-			reinterpret_cast<char *>(alloc.allocate(sizeLen + strSize));
-		memcpy(target, &encodedSize, sizeLen);
-		memcpy(target + sizeLen, s, strSize);
-		data_.object_.set(target, false);
+	inline void set(util::StackAllocator &alloc, const char8_t *s) {
+		const uint32_t strSize = static_cast<uint32_t>(strlen(s));
+		setString(alloc, s, strSize);
 	}
+
 	/*!
 		@brief Set string value
 		@note convert to RowMessage/RowObject string format
 	*/
-	inline void set(util::StackAllocator &alloc, char *s,
-		uint32_t strSize) {  
+	inline void set(
+			util::StackAllocator &alloc, const char8_t *s, uint32_t strSize) {
+		setString(alloc, s, strSize);
+	}
+
+	template<typename A>
+	inline void setString(A &alloc, const char8_t *s, uint32_t strSize) {
 		type_ = COLUMN_TYPE_STRING;
-		uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
-		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
-		char *target =
-			reinterpret_cast<char *>(alloc.allocate(sizeLen + strSize));
+		const uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
+		const uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
+		char8_t *target =
+				static_cast<char8_t*>(allocateBuffer(alloc, sizeLen + strSize));
 		memcpy(target, &encodedSize, sizeLen);
 		memcpy(target + sizeLen, s, strSize);
 		data_.object_.set(target, false);
 	}
+
 	inline void setTimestamp(Timestamp i) {
 		type_ = COLUMN_TYPE_TIMESTAMP;
 		data_.timestamp_ = i;
@@ -684,6 +687,33 @@ public:
 		}
 		return NULL;
 	}
+
+	static void* allocateBuffer(Buffer &buffer, size_t size) {
+		buffer.resize(size);
+		return buffer.data();
+	}
+
+	static void* allocateBuffer(util::StackAllocator &alloc, size_t size) {
+		return alloc.allocate(size);
+	}
+};
+
+class Value::Pool {
+public:
+	explicit Pool(util::StackAllocator &alloc);
+
+	void clear();
+	Value& newValue(Buffer *&buffer);
+
+private:
+	typedef std::pair<Value*, Buffer*> Entry;
+
+	Pool(const Pool&);
+	Pool operator=(const Pool&);
+
+	util::StackAllocator &alloc_;
+	util::Vector<Entry> entryList_;
+	size_t nextPos_;
 };
 
 /*!

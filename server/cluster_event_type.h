@@ -23,6 +23,7 @@
 #define CLUSTER_EVENT_TYPE_H_
 
 #include "util/type.h"
+#include "util/container.h"
 
 
 static const int32_t V_1_5_CLUSTER_START = 1000;
@@ -73,7 +74,10 @@ enum WebAPIErrorType {
 
 	WEBAPI_NOT_RECOVERY_CHECKPOINT = 400,
 	WEBAPI_CONFIG_SET_ERROR,
-	WEBAPI_CONFIG_GET_ERROR
+	WEBAPI_CONFIG_GET_ERROR,
+
+	WEBAPI_DATABASE = 500,
+	WEBAPI_DB_INVALID_PARAMETER
 };
 
 /*!
@@ -323,8 +327,6 @@ enum GSEventType {
 								SyncService */
 	TXN_SYNC_CHECK_END,
 
-
-
 	PARTITION_GROUP_START =
 		3000,			 /*!< start of checkpoint among a group of Partitions */
 	PARTITION_START,	 /*!< start of Partition checkpoint */
@@ -358,6 +360,12 @@ enum GSEventType {
 	EVENT_TYPE_MAX
 };
 
-const char8_t* getEventTypeName(EventType eventType);
+
+class EventTypeUtility {
+public:
+	static const char8_t* getEventTypeName(EventType eventType);
+	static EventType getCategoryEventType(EventType eventType);
+	static std::set<EventType> CATEGORY_EVENT_TYPES;
+};
 
 #endif

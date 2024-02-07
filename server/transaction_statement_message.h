@@ -89,8 +89,9 @@ struct StatementMessage {
 		FEATURE_V4_3 = 3,
 		FEATURE_V4_5 = 4,
 		FEATURE_V5_3 = 5,
+		FEATURE_V5_5 = 6,
 
-		FEATURE_SUPPORTED_MAX = FEATURE_V5_3
+		FEATURE_SUPPORTED_MAX = FEATURE_V5_5
 	};
 
 	struct FixedTypes {
@@ -1753,7 +1754,7 @@ inline void StatementMessage::OptionSet::EntryEncoder<C, S>::opCategory() {
 template<StatementMessage::OptionCategory C, typename S>
 template<StatementMessage::OptionType T>
 inline void StatementMessage::OptionSet::EntryEncoder<C, S>::opType() {
-	OptionCoder<T>().encode<S>(out_, optionSet_.get<T>());
+	OptionCoder<T>().template encode<S>(out_, optionSet_.get<T>());
 }
 
 template<StatementMessage::OptionCategory C, typename S>

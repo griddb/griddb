@@ -1019,7 +1019,9 @@ const DateTime::FieldData* DateTime::resolveMaxFields(
 void DateTime::checkUnixTimeBounds(
 		int64_t unixTimeMillis, const Option &option) {
 	if (unixTimeMillis < 0 || unixTimeMillis > resolveMaxUnixTime(option)) {
-		UTIL_THROW_UTIL_ERROR(CODE_INVALID_PARAMETER, "Time out of range");
+		UTIL_THROW_UTIL_ERROR(
+				CODE_INVALID_PARAMETER,
+				"Time out of range (unixTimeMillis=" << unixTimeMillis << ")");
 	}
 }
 

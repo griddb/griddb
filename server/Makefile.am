@@ -234,6 +234,7 @@ $(srcdir)/base_index.cpp \
 $(srcdir)/base_container.cpp \
 $(srcdir)/blob_processor.cpp \
 $(srcdir)/btree_map.cpp \
+$(srcdir)/btree_map_ext.cpp \
 $(srcdir)/checkpoint_service.cpp \
 $(srcdir)/chunk_manager.cpp \
 $(srcdir)/cluster_event_type.cpp \
@@ -286,6 +287,7 @@ $(srcdir)/c_utility.cpp \
 $(srcdir)/query_function.cpp \
 $(srcdir)/sql_common.cpp \
 $(srcdir)/sql_compiler.cpp \
+$(srcdir)/sql_compiler_join.cpp \
 $(srcdir)/sql_execution.cpp \
 $(srcdir)/sql_internal_parser.cpp \
 $(srcdir)/sql_job_manager.cpp \
@@ -323,6 +325,7 @@ $(srcdir)/affinity_manager.cpp \
 $(srcdir)/chunk_buffer.cpp \
 $(srcdir)/chunk.cpp \
 $(srcdir)/container_message_v4.cpp \
+$(srcdir)/database_manager.cpp \
 $(srcdir)/data_store_v4.cpp \
 $(srcdir)/interchangeable.cpp \
 $(srcdir)/key_data_store.cpp \

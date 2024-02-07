@@ -17,6 +17,13 @@ install:
 	dh_install ${SOURCE_DIR}/bin/gs_stat                                   usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/gs_stopcluster                            usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/gs_stopnode                               usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_checkpoint                             usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_config                                 usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_logconf                                usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_logs                                   usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_paramconf                              usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_partition                              usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/util_client.py                            usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/log.py                                    usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/util.py                                   usr/griddb-${GRIDDB_VER}/bin
 
@@ -69,6 +76,14 @@ install:
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stat             usr/bin/gs_stat
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stopcluster      usr/bin/gs_stopcluster
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stopnode         usr/bin/gs_stopnode
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_checkpoint       usr/bin/gs_checkpoint
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_config           usr/bin/gs_config
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_logconf          usr/bin/gs_logconf
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_logs             usr/bin/gs_logs
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_paramconf        usr/bin/gs_paramconf
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_partition        usr/bin/gs_partition
+	dh_link usr/griddb-${GRIDDB_VER}/bin/log.py              usr/griddb-${GRIDDB_VER}/bin/logs.py
+	dh_link usr/griddb-${GRIDDB_VER}/bin/util_client.py      usr/griddb-${GRIDDB_VER}/bin/util_server.py
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore           usr/griddb/bin/gridstore
 
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore.jar       usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar

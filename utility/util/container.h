@@ -3724,8 +3724,8 @@ bool BlockingQueue<T, Alloc>::poll(AllocUniquePtr<T> &ptr) {
 	}
 
 	const Entry &entry = base_.front();
-	base_.pop_front();
 	ptr = AllocUniquePtr<T>::of(entry.value_, entry.deteter_);
+	base_.pop_front();
 	return true;
 }
 

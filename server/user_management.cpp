@@ -45,6 +45,8 @@
 #include <signal.h>  
 #endif
 
+#define SET_USER_NAME(dbInfo)  (dbInfo.privilegeInfoList_.size() > 0 ? dbInfo.privilegeInfoList_[0]->userName_.c_str() : NULL)
+
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
 
@@ -658,14 +660,14 @@ bool DbUserHandler::checkDigest(TransactionContext &txn, util::StackAllocator &a
 	return true;
 }
 
-void DbUserHandler::makeDatabaseInfoList(
+void DbUserHandler::makeDatabaseInfoList(const DataStoreConfig& dsConfig,
 		TransactionContext &txn, util::StackAllocator &alloc,
 		BaseContainer &container, ResultSet &rs,
-		util::XArray<DatabaseInfo*> &dbInfoList) {
+		util::XArray<DatabaseInfo*> &dbInfoList, util::Vector<DatabaseId> *dbIdList) {
 	TEST_PRINT("makeDatabaseInfoList() S\n");
 
 	OutputMessageRowStore outputMessageRowStore(
-		getDataStore(txn.getPartitionId())->getConfig(), container.getColumnInfoList(),
+		dsConfig, container.getColumnInfoList(),
 		container.getColumnNum(), *(rs.getRowDataFixedPartBuffer()),
 		*(rs.getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
 	ResultSize resultNum;
@@ -679,7 +681,7 @@ void DbUserHandler::makeDatabaseInfoList(
 	uint32_t size2;
 	outputMessageRowStore.getAllVariablePart(data2, size2);
 
-	InputMessageRowStore inputMessageRowStore(getDataStore(txn.getPartitionId())->getConfig(),
+	InputMessageRowStore inputMessageRowStore(dsConfig,
 		container.getColumnInfoList(), container.getColumnNum(),
 		reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
 		reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2,
@@ -694,8 +696,17 @@ void DbUserHandler::makeDatabaseInfoList(
 	DatabaseInfo *dbInfo;
 	int8_t property;
 
+	util::XArray<RowId> rowIdList(alloc);
+	if (dbIdList) {
+		container.getRowIdList(txn, *(rs.getOIdList()), rowIdList);
+	}
+
 	for (size_t i = 0; i < rs.getResultNum(); i++) {
 		inputMessageRowStore.next();  
+		inputMessageRowStore.getField(COLUMN_ID_DBS_DBUSERNAME, field, fieldSize);  
+		util::String dbUserName(alloc);
+		dbUserName.append(
+			reinterpret_cast<const char*>(field), (size_t)fieldSize);
 
 		inputMessageRowStore.getField(COLUMN_ID_DBS_DBNAME, field, fieldSize);  
 		dbName.append(
@@ -708,7 +719,9 @@ void DbUserHandler::makeDatabaseInfoList(
 			dbInfo->dbName_.append(dbName);
 			dbInfo->property_ = 0;
 			dbInfoList.push_back(dbInfo);
-
+			if (dbIdList) {
+				dbIdList->push_back(rowIdList[i] + DBID_RESERVED_RANGE);
+			}
 			dbMap.insert(std::make_pair(dbName, dbInfo));
 		}
 		else {
@@ -738,13 +751,13 @@ void DbUserHandler::makeDatabaseInfoList(
 	TEST_PRINT("makeDatabaseInfoList() E\n");
 }
 
-bool DbUserHandler::checkPrivilege(TransactionContext &txn, util::StackAllocator &alloc, 
+bool DbUserHandler::checkPrivilege(const DataStoreConfig& dsConfig, TransactionContext &txn, util::StackAllocator &alloc,
 	BaseContainer *container, ResultSet *rs, DatabaseInfo &dbInfo) {
 
 	ResultSize resultNum = rs->getResultNum();
 	
 	util::XArray<DatabaseInfo *> dbInfoList(alloc);
-	makeDatabaseInfoList(txn, alloc, *container, *rs, dbInfoList);
+	makeDatabaseInfoList(dsConfig, txn, alloc, *container, *rs, dbInfoList);
 	if (dbInfoList.size() > 1) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	} else if (dbInfoList.size() == 1) {
@@ -939,7 +952,7 @@ void DbUserHandler::runWithTQL(
 		break;
 	}
 	case DUQueryInOut::DB_DETAILS: {
-		option->flag = checkPrivilege(txn, alloc, container, rs, *(option->dbInfo));
+		option->flag = checkPrivilege(getDataStore(txn.getPartitionId())->getConfig(), txn, alloc, container, rs, *(option->dbInfo));
 		break;
 	}
 	case DUQueryInOut::USER_INFO: {
@@ -951,7 +964,7 @@ void DbUserHandler::runWithTQL(
 			GS_THROW_USER_ERROR(
 				GS_ERROR_TXN_CURRENT_DATABASE_REMOVED, "[GetDatabases]");
 		}
-		makeDatabaseInfoList(txn, alloc, *container, *rs, *(option->dbInfoList));
+		makeDatabaseInfoList(getDataStore(txn.getPartitionId())->getConfig(), txn, alloc, *container, *rs, *(option->dbInfoList));
 		break;
 	}
 	case DUQueryInOut::REMOVE: {

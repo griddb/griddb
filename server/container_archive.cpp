@@ -481,9 +481,8 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 				util::XArray<OId> oIdList(txn.getDefaultAllocator());				
 				int32_t getAllStatus = GS_SUCCESS;
 				try {
-					StackAllocAutoPtr<BaseIndex> map(
-						txn.getDefaultAllocator(),
-						getIndex(txn, indexList[i]));
+					IndexAutoPtr map;
+					getIndex(txn, indexList[i], false, map);
 					if (map.get() == NULL) {
 						strstrm << (isValid ? ", " : "")
 								<< "{\"invalidGetIndex\",\"type\":"
@@ -577,9 +576,8 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 				util::XArray<OId> oIdList(txn.getDefaultAllocator());				
 				int32_t getAllStatus = GS_SUCCESS;
 				try {
-					StackAllocAutoPtr<BaseIndex> map(
-						txn.getDefaultAllocator(),
-						getIndex(txn, indexList[i], true));
+					IndexAutoPtr map;
+					getIndex(txn, indexList[i], true, map);
 					if (map.get() == NULL) {
 						break;
 					}

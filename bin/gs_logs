@@ -1,0 +1,376 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import log
+import os
+import json
+from optparse import OptionParser, SUPPRESS_HELP
+import re
+import base64
+from collections import OrderedDict
+import csv
+import datetime
+from typing import Optional
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
+
+# ログ1行を' '（スペース）で分割した結果を返す。
+def split_logline(logline):
+    splitline = logline.split(' ', 6)
+    return splitline
+
+# 出力対象のログであるかを判定。
+def is_output_target(splitline, log_keyword):
+    if  len(splitline) > 6 :
+        if log_keyword in splitline[5]:
+            return True
+    return False
+
+# ログ1行の分割結果よりeventTimeに相当する値を返す。
+def get_event_time_from_split_logline(splitline) -> Optional[str]:
+    return splitline[0]
+
+# ログ1行の分割結果よりhostNameに相当する値を返す。
+def get_host_name_from_split_logline(splitline) -> Optional[str]:
+    return splitline[1]
+
+# ログ1行の分割結果よりhostNameよりも後に出力する情報の値を返す。
+def get_log_info_from_split_logline(splitline) -> Optional[str]:
+    return splitline[6]
+
+# ログ中の値がnullを示す文字であるかを判定。
+def is_nullVal(val):
+    if val == "null":
+        return True
+    return False
+
+# ログ中の値がtrueを示す文字であるかを判定。
+def is_trueVal(val):
+    if val == "true":
+        return True
+    return False
+
+# ログ中の値がfalseを示す文字であるかを判定。
+def is_falseVal(val):
+    if val == "false":
+        return True
+    return False
+
+# ログ中の値が数値を示す文字（負数、小数含む）であるかを判定。
+def is_num(val):
+    # Unicode型にするためdecode()するコードだったが不要になったため削除
+    #if type(val) is str :
+    #    val = val.decode('utf-8')
+    checkVal = val.replace('.', '').replace('-', '')
+    return checkVal.isdecimal()
+
+# ログ中の値が文字がnull、true、false、数値を示す値の場合、型変換を行う。
+def conv_type(tmpvalue):
+    try:
+        if is_nullVal(tmpvalue):
+            value = None
+        elif is_trueVal(tmpvalue):
+            value = True
+        elif is_falseVal(tmpvalue):
+            value = False
+        elif is_num(tmpvalue):
+            if "." in tmpvalue:
+                value = float(tmpvalue)
+            else:
+                value = int(tmpvalue)
+        else:
+            value = tmpvalue
+    except ValueError:
+        value = tmpvalue
+    return value
+
+# ログ中の値より、dictを作成し返す。
+# 第1引数: eventTimeに相当する値
+# 第2引数: hostNameに相当する値
+# 第3引数: hostNameよりも後に出力する情報
+def make_dict(event_time, host_name, log_info):
+    stats = OrderedDict()
+    stats["eventTime"] = event_time
+    stats["hostName"] = host_name
+
+    keyvalues = log_info.split(',')
+    for keyvalue in keyvalues:
+        splitkeyvalue = keyvalue.split('=', 1)
+        key = splitkeyvalue[0].strip()
+        if len(splitkeyvalue) > 1 :
+            tmpvalue = splitkeyvalue[1].strip()
+        else:
+            tmpvalue = ""
+            
+        value = conv_type(tmpvalue)
+        if key:
+            stats[key] = value
+        
+    return stats
+
+# None、True、Falseの場合、それぞれ文字列null、true、falseに変換して返す。
+def conv_value(value) -> Optional[str]:
+    if value is None:
+        return "null"
+    elif value is True:
+        return "true"
+    elif value is False:
+        return "false"
+    return value
+
+# CSV出力用に値の変換を行う。
+def conv_for_csv(stats_list):
+    for stats in stats_list:
+        for stats_key in stats:
+            stats[stats_key] = conv_value(stats[stats_key])
+
+# CSV形式で出力する。
+# 第1引数: ログを解析した結果のdictのlist
+def disp_in_csv(stats_list):
+    if len(stats_list) > 0:
+        csv_column_names = list(stats_list[0].keys())
+        csv_header = "\"" + "\",\"".join(csv_column_names) + "\""
+    
+        sys.stdout.write(csv_header + "\n")
+        writer = csv.DictWriter(sys.stdout, fieldnames=csv_column_names, extrasaction='ignore', quoting=csv.QUOTE_ALL)
+        for stats in stats_list:
+            writer.writerow(stats)
+
+# JSON形式で出力する。
+# 第1引数: ログを解析した結果のdictのlist
+# 第2引数: 出力するJSONの先頭のキー名として用いる文字
+def disp_in_json(stats_list, head_keyname):
+    output_json_dict = {}
+    output_json_dict[head_keyname] = stats_list
+    print(json.dumps(output_json_dict, ensure_ascii=False, indent=4))
+
+# 文字列から日付型に変換する。
+# 第1引数: 変換する文字列 2018-11-30T12:15:02.047+0900 のように末尾にタイムゾーンの値があること
+#          2018-11-30T12:15:02.047 のようにタイムゾーンの値がない場合は戻り値の時差（秒）は0
+# 第2引数: 変換する際のフォーマット
+# 戻り値: 日付型に変換した値と時差（秒） ただし日付型の値は時差の値は反映していないものである
+def str_to_date(date_str, format):
+    ret_date = None
+    timezone_val_sec = 0
+    date_str_tmp = date_str
+    try:
+        if date_str_tmp is not None:
+            # python2 ではタイムゾーン日付書式%zがサポートされていないため
+            # タイムゾーン指定値を切り出して別途処置する
+            timezone_pos = date_str_tmp.rfind("+")
+            if timezone_pos < 0:
+                timezone_pos = date_str_tmp.rfind("-")
+            
+            if timezone_pos >= 0 and len(date_str_tmp[timezone_pos:]) == 5:
+                timezone_val = date_str_tmp[timezone_pos:]
+                date_str_tmp = date_str_tmp[:timezone_pos]
+                timezone_val_h = int(timezone_val[0:3])
+                timezone_val_m = int(timezone_val[3:5])
+                timezone_val_sec = timezone_val_h * 60 * 60 + timezone_val_m * 60
+                ret_date = datetime.datetime.strptime(date_str_tmp, format)
+            else:
+                ret_date = datetime.datetime.strptime(date_str_tmp, format)
+    except:
+        pass
+    
+    return (ret_date, timezone_val_sec)
+
+# dictに"executionTime"の値を追加する。
+# 第1引数: "executionTime"の算出に用いるeventTime
+# 第2引数: 処理対象のdict
+def add_execution_time(event_time, stats_dict):
+    event_time_date = None
+    event_time_date_timezone_sec = 0
+    start_time_date = None
+    start_time_date_timezone_sec = 0
+    
+    if event_time is not None:
+        (event_time_date, event_time_date_timezone_sec) = str_to_date(event_time, "%Y-%m-%dT%H:%M:%S.%f")
+    
+    if "startTime" in stats_dict:
+        start_time = stats_dict["startTime"]
+        # 「'」（シングルクォーテーション）でくくられていた場合「'」を取り除く
+        if len(start_time) > 0 and start_time[0] == "'" and start_time[-1] == "'":
+            start_time = start_time[1:-1]
+        (start_time_date, start_time_date_timezone_sec) = str_to_date(start_time, "%Y-%m-%dT%H:%M:%S.%f")
+    
+    if event_time_date is not None and start_time_date is not None:
+        # eventTime - startTime の秒数を"executionTime"（実行時間）の値とする
+        event_time_date = event_time_date - datetime.timedelta(seconds=event_time_date_timezone_sec)
+        start_time_date = start_time_date - datetime.timedelta(seconds=start_time_date_timezone_sec)
+        delta = event_time_date - start_time_date
+        execution_time_set = delta.total_seconds()
+        
+        newdict = OrderedDict()
+        for i in stats_dict:
+            newdict[i] = stats_dict[i]
+            # "startTime" の次に"executionTime"を追加する
+            if i == "startTime":
+                newdict["executionTime"] = int(execution_time_set)
+        
+        stats_dict.clear()
+        for i in newdict:
+            stats_dict[i] = newdict[i]
+        
+# 性能トレースのログ情報をJSON形式、またはCSV形式で出力する。
+# 第1引数: ログのlist
+# 第2引数: csvオプション
+def output_tracestats(loglines, is_csv_output):
+    output_dict_list = []
+    for logline in loglines:
+        splitline = split_logline(logline)
+        if is_output_target(splitline, "[50912:SC_TRACE_STATS]"):
+            
+            event_time: Optional[str] = get_event_time_from_split_logline(splitline)
+            host_name: Optional[str] = get_host_name_from_split_logline(splitline)
+            log_info: Optional[str] = get_log_info_from_split_logline(splitline)
+            
+            # ログ1行分の情報が入ったdictを作成
+            stats_dict = make_dict(event_time, host_name, log_info)
+            # 作成したdictをリストに追加
+            output_dict_list.append(stats_dict)
+
+    if is_csv_output:
+        # dictのリストよりCSV形式で出力を行う
+        conv_for_csv(output_dict_list)
+        disp_in_csv(output_dict_list)
+    else:
+        # dictのリストよりJSON形式で出力を行う
+        disp_in_json(output_dict_list, "traceStats")
+
+# スロークエリのログ情報をJSON形式、またはCSV形式で出力する。
+# 第1引数: ログのlist
+# 第2引数: csvオプション
+def output_slowlogs(loglines, is_csv_output):
+    output_dict_list = []
+    for logline in loglines:
+        splitline = split_logline(logline)
+        if is_output_target(splitline, "[200913:SQL_LONG_QUERY]"):
+            
+            event_time: Optional[str] = get_event_time_from_split_logline(splitline)
+            host_name: Optional[str] = get_host_name_from_split_logline(splitline)
+            log_info: Optional[str] = get_log_info_from_split_logline(splitline)
+            
+            # ログの値より、queryの値を取得
+            query_value = None
+            query_pos = log_info.rfind("query=")
+            if query_pos >= 0 :
+                # "query="より後ろの値をqueryの値として扱う
+                query_keyvalue = log_info[query_pos:]
+                query_keyvalue_split = query_keyvalue.split("=", 1)
+                if len(query_keyvalue_split) > 0:
+                    query_value = query_keyvalue_split[1].strip()
+
+                # ログの値より、"query="より後ろの値を取り除く
+                log_info = log_info[:query_pos]
+                comma_pos = log_info.rfind(",")
+                if comma_pos >= 0 :
+                    log_info = log_info[:comma_pos]
+            
+            # "query="より後ろの値を取り除いたログの値より、ログ1行分の情報が入ったdictを作成
+            stats_dict = make_dict(event_time, host_name, log_info)
+            # executionTimeをdictに追加
+            add_execution_time(event_time, stats_dict)
+            # queryの値をdictに追加
+            if query_value is not None:
+                stats_dict["query"] = query_value
+            
+            # dictの値が「'」（シングルクォーテーション）でくくられていた場合「'」を取り除く
+            stats_keys = list(stats_dict.keys())
+            for stats_key in stats_keys:
+                val = stats_dict[stats_key]
+                if isinstance(val, str) and len(val) > 0 and val[0] == "'" and val[-1] == "'":
+                    stats_dict[stats_key] = val[1:-1]
+            output_dict_list.append(stats_dict)
+
+    if is_csv_output:
+        # dictのリストよりCSV形式で出力を行う
+        conv_for_csv(output_dict_list)
+        disp_in_csv(output_dict_list)
+    else:
+        # dictのリストよりJSON形式で出力を行う
+        disp_in_json(output_dict_list, "longSqls")
+
+parser = OptionParser(usage="%prog [-g IGNORE_STR][-l LENGTH][--tracestats][--slowlogs][--csv]" + util_client.CLIENT_OPTIONS_USAGE + " [SEARCH_STR1 [SEARCH_STR2]]",
+            description="Obtain the recent log of the GridDB node.",
+            epilog="SEARCH_STR :First key word, SEARCH_STR2 :Second key word",
+            version="%prog [V5.0.00]")
+parser.add_option("-g", "--ignore", dest="ignore_str",
+                  default=None,
+                  help="Specify the excluding keyword.")
+parser.add_option("-l", "--lines", dest="length",
+                  default="30",
+                  help="Specify the number of results displayed.")
+parser.add_option("--tracestats", dest="tracestats",
+                  action="store_true", default=False,
+                  help="If specified, display TRACE_STATS informations.")
+parser.add_option("--slowlogs", dest="slowlogs",
+                  action="store_true", default=False,
+                  help="If specified, display SQL_LONG_QUERY informations.")
+parser.add_option("--csv", dest="csv",
+                  action="store_true", default=False,
+                  help="If specified with --tracestats or --slowlogs, display TRACE_STATS or SQL_LONG_QUERY informations in CSV format.")
+util_client.add_client_options(parser)
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("AA0001: Specify a user name and a password."+" (-u USER/PASS)")
+    sys.exit(2)
+if options.length is not None:
+    try:
+        length = int(options.length)
+    except ValueError:
+        print("AA0002: Specify the number of results displayed.(-l "+options.length+")")
+        sys.exit(2)
+
+if options.csv :
+    if ( not options.tracestats == True ) and ( not options.slowlogs == True ) :
+        print("AA0003: --csv must specify with --tracestats or --slowlogs")
+        sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+
+
+method = "GET"
+path = "/node/log"
+data = { "length": options.length }
+
+if options.tracestats:
+    # --tracestats が指定されていた場合、WebAPIにsearchStr=SC_TRACE_STATS の条件を付与
+    data["searchStr"] = "SC_TRACE_STATS"
+elif options.slowlogs:
+    # --slowlogs が指定されていた場合、WebAPIにsearchStr=SQL_LONG_QUERY の条件を付与
+    data["searchStr"] = "SQL_LONG_QUERY"
+
+if options.ignore_str is not None:
+    data["ignoreStr"] = options.ignore_str
+if len(args) > 0:
+    data["searchStr"] = args[0]
+    if len(args) > 1:
+        data["searchStr2"] = args[1]
+
+(res, code) = util_client.request_rest(method, path, data, options, log)
+
+if res is not None:
+    loglines = json.loads(res)
+
+    if options.tracestats:
+        output_tracestats(loglines, options.csv)
+    elif options.slowlogs:
+        output_slowlogs(loglines, options.csv)
+    else:
+        for logline in loglines:
+            print(logline)
+
+if code != 200:
+    log.error("AA0101: failed to get log.")
+    sys.exit(1)
+
+log.info("%s end." % (__file__))
+
+

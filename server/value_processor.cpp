@@ -753,6 +753,28 @@ StringCursor::StringCursor(util::StackAllocator &alloc, const char *str)
 	}
 }
 
+StringCursor::StringCursor(
+		util::XArray<uint8_t> &buf, const uint8_t *str, uint32_t strLength) :
+		BaseObject(NULL), zeroLengthStr_(ZERO_LENGTH_STR_BINARY_) {
+	setBaseOId(UNDEF_OID);
+	if (str == NULL) {
+		setBaseAddr(&zeroLengthStr_);
+		length_ = 0;
+	}
+	else {
+		length_ = strLength;
+		size_t offset = ValueProcessor::getEncodedVarSize(length_);  
+
+		buf.resize(offset + length_);
+		setBaseAddr(buf.data());
+
+		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
+		memcpy(getBaseAddr(), &encodedLength, offset);
+		memcpy(getBaseAddr() + offset, str, length_);
+		moveCursor(offset);
+	}
+}
+
 /*!
 	@brief Get data size
 */

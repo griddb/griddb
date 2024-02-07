@@ -40,6 +40,7 @@ class CompositeInfoObject;
 class ColumnSchema;
 struct StringKey;
 struct FullContainerKeyAddr;
+struct IndexData;
 
 /*!
 	@brief Term Condition
@@ -190,6 +191,26 @@ public:
 public:
 	virtual ~BaseIndex() {}
 
+	struct SearchContextPool {
+		SearchContextPool(
+				util::StackAllocator &alloc, util::StackAllocator &settingAlloc);
+
+		static void clear(SearchContextPool *pool) {
+			if (pool == NULL) {
+				return;
+			}
+			pool->condValuePool_.clear();
+			clearIndexData(pool->indexData_);
+		}
+
+		static IndexData& createIndexData(util::StackAllocator &alloc);
+		static void clearIndexData(IndexData &indexData);
+
+		Value::Pool condValuePool_;
+		IndexData &indexData_;
+		util::StackAllocator &settingAlloc_;
+	};
+
 	struct SearchContext {
 		enum NullCondition {
 			IS_NULL,		
@@ -209,86 +230,115 @@ public:
 			COND_ALL	
 		};
 
-		SearchContext(util::StackAllocator &alloc, ColumnId columnId)
-			: conditionList_(alloc),
-			  keyList_(alloc),
-			  limit_(MAX_RESULT_SIZE),
-			  isResume_(NOT_RESUME),
-			  nullCond_(NOT_IS_NULL),
-			  isSuspended_(false),
-			  suspendLimit_(MAX_RESULT_SIZE),
-			  suspendKey_(NULL),
-			  suspendKeySize_(0),
-			  suspendValue_(NULL),
-			  suspendValueSize_(0),
-			  isNullSuspended_(false),
-			  suspendRowId_(UNDEF_ROWID),
-			  columnIdList_(alloc)
-		{
+		SearchContext(util::StackAllocator &alloc, ColumnId columnId) :
+				conditionList_(alloc),
+				keyList_(alloc),
+				limit_(MAX_RESULT_SIZE),
+				isResume_(NOT_RESUME),
+				nullCond_(NOT_IS_NULL),
+				isSuspended_(false),
+				suspendLimit_(MAX_RESULT_SIZE),
+				suspendKey_(NULL),
+				suspendKeySize_(0),
+				suspendValue_(NULL),
+				suspendValueSize_(0),
+				isNullSuspended_(false),
+				suspendRowId_(UNDEF_ROWID),
+				columnIdList_(alloc),
+				pool_(NULL) {
 			columnIdList_.push_back(columnId);
 		}
-		SearchContext(util::StackAllocator &alloc, util::Vector<ColumnId> &columnIds)
-			: conditionList_(alloc),
-			  keyList_(alloc),
-			  limit_(MAX_RESULT_SIZE),
-			  isResume_(NOT_RESUME),
-			  nullCond_(NOT_IS_NULL),
-			  isSuspended_(false),
-			  suspendLimit_(MAX_RESULT_SIZE),
-			  suspendKey_(NULL),
-			  suspendKeySize_(0),
-			  suspendValue_(NULL),
-			  suspendValueSize_(0),
-			  isNullSuspended_(false),
-			  suspendRowId_(UNDEF_ROWID),
-			  columnIdList_(alloc)
-		{
+
+		SearchContext(
+				util::StackAllocator &alloc,
+				const util::Vector<ColumnId> &columnIds) :
+				conditionList_(alloc),
+				keyList_(alloc),
+				limit_(MAX_RESULT_SIZE),
+				isResume_(NOT_RESUME),
+				nullCond_(NOT_IS_NULL),
+				isSuspended_(false),
+				suspendLimit_(MAX_RESULT_SIZE),
+				suspendKey_(NULL),
+				suspendKeySize_(0),
+				suspendValue_(NULL),
+				suspendValueSize_(0),
+				isNullSuspended_(false),
+				suspendRowId_(UNDEF_ROWID),
+				columnIdList_(alloc),
+				pool_(NULL) {
 			columnIdList_.assign(columnIds.begin(), columnIds.end());
 		}
-		SearchContext(util::StackAllocator &alloc, TermCondition &cond, ResultSize limit)
-			: conditionList_(alloc),
-			  keyList_(alloc),
-			  limit_(limit),
-			  isResume_(NOT_RESUME),
-			  nullCond_(NOT_IS_NULL),
-			  isSuspended_(false),
-			  suspendLimit_(MAX_RESULT_SIZE),
-			  suspendKey_(NULL),
-			  suspendKeySize_(0),
-			  suspendValue_(NULL),
-			  suspendValueSize_(0),
-			  isNullSuspended_(false),
-			  suspendRowId_(UNDEF_ROWID),
-			  columnIdList_(alloc)
-		{
+
+		SearchContext(
+				util::StackAllocator &alloc, TermCondition &cond, ResultSize limit) :
+				conditionList_(alloc),
+				keyList_(alloc),
+				limit_(limit),
+				isResume_(NOT_RESUME),
+				nullCond_(NOT_IS_NULL),
+				isSuspended_(false),
+				suspendLimit_(MAX_RESULT_SIZE),
+				suspendKey_(NULL),
+				suspendKeySize_(0),
+				suspendValue_(NULL),
+				suspendValueSize_(0),
+				isNullSuspended_(false),
+				suspendRowId_(UNDEF_ROWID),
+				columnIdList_(alloc),
+				pool_(NULL) {
 			columnIdList_.push_back(cond.columnId_);
 			keyList_.push_back(0);
 			conditionList_.push_back(cond);
 		}
 
-		SearchContext(util::StackAllocator &alloc, TermCondition &startCond,
-			TermCondition &endCond, ResultSize limit)
-			: conditionList_(alloc),
-			  keyList_(alloc),
-			  limit_(limit),
-			  isResume_(NOT_RESUME),
-			  nullCond_(NOT_IS_NULL),
-			  isSuspended_(false),
-			  suspendLimit_(MAX_RESULT_SIZE),
-			  suspendKey_(NULL),
-			  suspendKeySize_(0),
-			  suspendValue_(NULL),
-			  suspendValueSize_(0),
-			  isNullSuspended_(false),
-			  suspendRowId_(UNDEF_ROWID),
-			  columnIdList_(alloc)
-		{
+		SearchContext(
+				util::StackAllocator &alloc, TermCondition &startCond,
+				TermCondition &endCond, ResultSize limit) :
+				conditionList_(alloc),
+				keyList_(alloc),
+				limit_(limit),
+				isResume_(NOT_RESUME),
+				nullCond_(NOT_IS_NULL),
+				isSuspended_(false),
+				suspendLimit_(MAX_RESULT_SIZE),
+				suspendKey_(NULL),
+				suspendKeySize_(0),
+				suspendValue_(NULL),
+				suspendValueSize_(0),
+				isNullSuspended_(false),
+				suspendRowId_(UNDEF_ROWID),
+				columnIdList_(alloc),
+				pool_(NULL) {
 			assert(startCond.columnId_ == endCond.columnId_);
 			columnIdList_.push_back(startCond.columnId_);
 			keyList_.push_back(0);
 			keyList_.push_back(1);
 			conditionList_.push_back(startCond);
 			conditionList_.push_back(endCond);
+		}
+
+		void clear() {
+			conditionList_.clear();
+			keyList_.clear();
+			limit_ = MAX_RESULT_SIZE;
+			isResume_ = NOT_RESUME;
+			nullCond_ = NOT_IS_NULL;
+			isSuspended_ = false;
+			suspendLimit_ = MAX_RESULT_SIZE;
+			suspendKey_ = NULL;
+			suspendKeySize_ = 0;
+			suspendValue_ = NULL;
+			suspendValueSize_ = 0;
+			isNullSuspended_ = false;
+			suspendRowId_ = UNDEF_ROWID;
+			columnIdList_.clear();
+			SearchContextPool::clear(pool_);
+		}
+
+		util::StackAllocator& getSettingAllocator() {
+			assert(pool_ != NULL);
+			return pool_->settingAlloc_;
 		}
 
 		uint32_t getConditionNum() const {
@@ -302,12 +352,17 @@ public:
 			return conditionList_[no];
 		}
 		void addCondition(TransactionContext &txn, TermCondition &term, bool isKey = false);
+		void setKeyConditions(const TermCondition *termList, size_t termCount);
+
 		void copy(util::StackAllocator &alloc, SearchContext &dest);
 		uint32_t getKeyColumnNum() const {
 			return columnIdList_.size();
 		}
 		const util::Vector<ColumnId> &getColumnIds() const {
 			return columnIdList_;
+		}
+		void setColumnIds(const util::Vector<ColumnId> &list) {
+			columnIdList_.assign(list.begin(), list.end());
 		}
 		NullCondition getNullCond() {
 			return nullCond_;
@@ -353,6 +408,7 @@ public:
 			TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy& strategy, TreeFuncInfo *, const K &suspendKey, const V &suspendValue) {
 			UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
 			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+			UTIL_STATIC_ASSERT((!util::IsSame<K, CompositeInfoObject>::VALUE));
 
 			uint32_t keySize = sizeof(K);
 			suspendKey_ =
@@ -427,6 +483,21 @@ public:
 			return keyList_;
 		}
 
+		IndexData& prepareIndexData(util::StackAllocator &alloc) {
+			if (pool_ == NULL) {
+				return SearchContextPool::createIndexData(alloc);
+			}
+			return pool_->indexData_;
+		}
+
+		void setPool(SearchContextPool *pool) {
+			pool_ = pool;
+		}
+
+		SearchContextPool* getPool() {
+			return pool_;
+		}
+
 		virtual std::string dump();
 	protected:
 		enum ConditionStatus {
@@ -452,7 +523,9 @@ public:
 		bool isNullSuspended_;
 		RowId suspendRowId_;
 		util::Vector<ColumnId> columnIdList_; 
+		SearchContextPool *pool_;
 	};
+
 	TreeFuncInfo *getFuncInfo() {
 		return funcInfo_;
 	}
@@ -460,8 +533,10 @@ public:
 	struct Setting {
 		Setting(ColumnType keyType, bool isCaseSensitive, TreeFuncInfo *funcInfo);
 
-		void initialize(util::StackAllocator &alloc, SearchContext &sc,
-			OutputOrder outputOrder);
+		void initialize(
+				util::StackAllocator &alloc, SearchContext &sc,
+				OutputOrder outputOrder, bool *initializedForNext = NULL);
+
 		TermCondition *getStartKeyCondition() const {
 			return startCondition_;
 		}
@@ -511,6 +586,94 @@ protected:
 	TreeFuncInfo *funcInfo_;
 	MapType mapType_;
 
+};
+
+class BaseIndexStorage {
+public:
+	template<typename T> class AutoPtr;
+
+	template<typename T>
+	void clear();
+
+	template<typename T>
+	static T* create(
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			MapType mapType, OId mapOId, AllocateStrategy &strategy,
+			BaseContainer *container, TreeFuncInfo *funcInfo,
+			BaseIndexStorage **indexStorage);
+
+	MapType getMapType() const throw() {
+		return mapType_;
+	}
+
+private:
+	template<typename T> class As;
+
+	template<typename T>
+	static T* createWithAllocator(
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			OId mapOId, AllocateStrategy &strategy, BaseContainer *container,
+			TreeFuncInfo *funcInfo);
+
+	template<typename T>
+	static T* createWithStorage(
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			MapType mapType, OId mapOId, AllocateStrategy &strategy,
+			BaseContainer *container, TreeFuncInfo *funcInfo,
+			BaseIndexStorage *&indexStorage);
+
+	explicit BaseIndexStorage(MapType mapType) : mapType_(mapType) {
+	}
+
+	MapType mapType_;
+};
+
+template<typename T>
+class BaseIndexStorage::AutoPtr {
+public:
+	AutoPtr() :
+			storage_(NULL),
+			value_(NULL) {
+	}
+
+	~AutoPtr() {
+		clear();
+	}
+
+	void initialize(BaseIndexStorage *&storage, T *value) {
+		assert(storage != NULL && value != NULL);
+		clear();
+		storage_ = &storage;
+		value_ = value;
+	}
+
+	void clear() throw() {
+		if (value_ != NULL) {
+			assert(storage_ != NULL);
+			(*storage_)->clear<T>();
+		}
+		value_ = NULL;
+		storage_ = NULL;
+	}
+
+	T* get() {
+		return value_;
+	}
+
+private:
+	AutoPtr(const AutoPtr&);
+	AutoPtr& operator=(const AutoPtr&);
+
+	BaseIndexStorage **storage_;
+	T *value_;
+};
+
+template<typename T>
+struct BaseIndexStorage::As : public BaseIndexStorage {
+	explicit As(MapType mapType) : BaseIndexStorage(mapType) {
+	}
+
+	util::LocalUniquePtr<T> map_;
 };
 
 typedef BaseIndex::SearchContext::ResumeStatus ResumeStatus;
@@ -573,6 +736,10 @@ template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext& txn,
 	ObjectManagerV4& objectManager, AllocateStrategy& strategy, TreeFuncInfo* funcInfo, const FullContainerKeyAddr& suspendKey, const KeyDataStoreValue& suspendValue);
 
+template <>
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext& txn,
+	ObjectManagerV4& objectManager, AllocateStrategy& strategy, TreeFuncInfo* funcInfo, const CompositeInfoObject& suspendKey, const OId& suspendValue);
+
 inline BaseIndex::SearchContext::ConditionStatus BaseIndex::SearchContext::checkCondition(TransactionContext &txn, 
    TermCondition &orgCond, TermCondition &newCond) {
 	ConditionStatus status = NO_CONTRADICTION;
@@ -633,6 +800,63 @@ inline void BaseIndex::SearchContext::addCondition(TransactionContext &txn, Term
 	} else {
 		conditionList_.push_back(term);
 	}
+}
+
+inline void BaseIndex::SearchContext::setKeyConditions(
+		const TermCondition *termList, size_t termCount) {
+	keyList_.clear();
+	conditionList_.clear();
+	for (size_t i = 0; i < termCount; i++) {
+		keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
+		conditionList_.push_back(termList[i]);
+	}
+}
+
+template<typename T>
+void BaseIndexStorage::clear() {
+	static_cast<As<T>*>(this)->map_.reset();
+}
+
+template<typename T>
+T* BaseIndexStorage::create(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		MapType mapType, OId mapOId, AllocateStrategy &strategy,
+		BaseContainer *container, TreeFuncInfo *funcInfo,
+		BaseIndexStorage **indexStorage) {
+	if (indexStorage == NULL) {
+		return createWithAllocator<T>(
+				txn, objectManager, mapOId, strategy, container, funcInfo);
+	}
+
+	return createWithStorage<T>(
+			txn, objectManager, mapType, mapOId, strategy, container, funcInfo,
+			*indexStorage);
+}
+
+template<typename T>
+T* BaseIndexStorage::createWithAllocator(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		OId mapOId, AllocateStrategy &strategy, BaseContainer *container,
+		TreeFuncInfo *funcInfo) {
+	return ALLOC_NEW(txn.getDefaultAllocator()) T(
+			txn, objectManager, mapOId, strategy, container, funcInfo);
+}
+
+template<typename T>
+T* BaseIndexStorage::createWithStorage(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		MapType mapType, OId mapOId, AllocateStrategy &strategy,
+		BaseContainer *container, TreeFuncInfo *funcInfo,
+		BaseIndexStorage *&indexStorage) {
+	if (indexStorage == NULL || indexStorage->mapType_ != mapType) {
+		indexStorage = ALLOC_NEW(txn.getDefaultAllocator()) As<T>(mapType);
+	}
+
+	util::LocalUniquePtr<T> &map = static_cast<As<T>*>(indexStorage)->map_;
+	map = UTIL_MAKE_LOCAL_UNIQUE(
+			map, T, txn, objectManager, mapOId, strategy, container, funcInfo);
+
+	return map.get();
 }
 
 #endif  

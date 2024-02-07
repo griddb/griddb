@@ -36,7 +36,6 @@
 
 
 
-
 const int64_t SyntaxTree::SQL_TOKEN_COUNT_LIMIT = 100000;
 const int64_t SyntaxTree::SQL_EXPR_TREE_DEPTH_LIMIT = 3000;
 const int64_t SyntaxTree::SQL_VIEW_NESTING_LEVEL_LIMIT = 10;
@@ -102,6 +101,8 @@ DDLWithParameter::Coder::NameTable::NameTable() : entryEnd_(entryList_) {
 	
 	SQL_DDL_WITH_PARAM_CODER_NAME_TABLE_ADD(DATA_AFFINITY);
 	SQL_DDL_WITH_PARAM_CODER_NAME_TABLE_ADD(DATA_AFFINITY_POLICY);
+	SQL_DDL_WITH_PARAM_CODER_NAME_TABLE_ADD(INTERVAL_WORKER_GROUP);
+	SQL_DDL_WITH_PARAM_CODER_NAME_TABLE_ADD(INTERVAL_WORKER_GROUP_POSITION);
 
 #undef SQL_DDL_WITH_PARAM_CODER_NAME_TABLE_ADD
 
@@ -403,6 +404,19 @@ int32_t SyntaxTree::Select::calcCommandType() {
 	return COMMAND_NONE;
 }
 
+bool SyntaxTree::Select::isDropOnlyCommand() {
+	switch (cmdType_) {
+	case CMD_SELECT:
+	case CMD_DELETE:
+	case CMD_DROP_TABLE:
+	case CMD_DROP_VIEW:
+	case CMD_DROP_INDEX:
+	case CMD_ALTER_TABLE_DROP_PARTITION:
+		return true;
+	default:
+		return false;
+	}
+}
 
 SyntaxTree::CommandType SyntaxTree::Select::getCommandType() {
 	return cmdType_;
@@ -1886,6 +1900,87 @@ int32_t SyntaxTree::gsDequote(SQLAllocator &alloc, util::String &str) {
 }
 
 
+SQLPlanningVersion::SQLPlanningVersion() :
+		major_(-1),
+		minor_(-1) {
+}
+
+SQLPlanningVersion::SQLPlanningVersion(int32_t major, int32_t minor) :
+		major_(major),
+		minor_(minor) {
+}
+
+bool SQLPlanningVersion::isEmpty() const {
+	return major_ < 0;
+}
+
+int32_t SQLPlanningVersion::getMajor() const {
+	return major_;
+}
+
+int32_t SQLPlanningVersion::getMinor() const {
+	return minor_;
+}
+
+void SQLPlanningVersion::parse(const char8_t *str) {
+	const char8_t sep = '.';
+	const size_t len = strlen(str);
+
+	const size_t elemCount = 3;
+	int32_t elemList[elemCount] = { 0 };
+	size_t nextElemPos = 0;
+	bool failed = false;
+
+	const char8_t *const end = str + len;
+	const char8_t *lastElemStart = str;
+	for (const char8_t *it = str;; ++it) {
+		if (it != end && *it != sep) {
+			continue;
+		}
+
+		int64_t elem;
+		if (nextElemPos >= elemCount ||
+				!SQLProcessor::ValueUtils::toLong(
+						lastElemStart, (it - lastElemStart), elem) ||
+				elem < 0 || elem > std::numeric_limits<int32_t>::max()) {
+			failed = true;
+			break;
+		}
+
+		elemList[nextElemPos] = elem;
+		if (it == end) {
+			break;
+		}
+		lastElemStart = it + 1;
+		nextElemPos++;
+	}
+
+	if (failed) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
+				"Failed to parse planning version (value=" << str << ")");
+	}
+
+	major_ = elemList[0];
+	minor_ = elemList[1];
+}
+
+int32_t SQLPlanningVersion::compareTo(int32_t major, int32_t minor) const {
+	return compareTo(SQLPlanningVersion(major, minor));
+}
+
+int32_t SQLPlanningVersion::compareTo(const SQLPlanningVersion &another) const {
+	if (isEmpty() || another.isEmpty()) {
+		return (isEmpty() ? 1 : 0) - (another.isEmpty() ? 1 : 0);
+	}
+
+	if (major_ != another.major_) {
+		return (major_ - another.major_);
+	}
+
+	return (minor_ - another.minor_);
+}
+
 GenSyntaxTree::GenSyntaxTree(SQLAllocator &alloc)
 : alloc_(alloc), parser_(NULL), parserCxt_(alloc),
   tokenCountLimit_(SyntaxTree::SQL_TOKEN_COUNT_LIMIT)
@@ -2001,7 +2096,7 @@ void GenSyntaxTree::parseAll(
 	if (semiPos == std::string::npos ||
 		((semiPos + 1) != commandLen &&
 		sqlCommandList.find_last_not_of(" ", semiPos + 1) != std::string::npos)) {
-		sqlCommandList.append(";");
+		sqlCommandList.append("\n;"); 
 	}
 	util::String sql(alloc_);
 	sql = sqlCommandList;

@@ -184,13 +184,13 @@ private:
 	util::Condition condition_;
 	State state_;
 	util::Exception exception_;
+	SQLVariableSizeGlobalAllocator& varAlloc_;
 	NoSQLRequestId requestId_;
+	uint8_t* syncBinaryData_;
+	size_t syncBinarySize_;
 	SQLService* sqlSvc_;
 	TransactionService* txnSvc_;
 	EventType eventType_;
-	uint8_t* syncBinaryData_;
-	size_t syncBinarySize_;
-	SQLVariableSizeGlobalAllocator& varAlloc_;
 	NoSQLContainer* container_;
 	ClientId* clientId_;
 	void clear();
@@ -247,6 +247,7 @@ struct TableExpirationSchemaInfo {
 	TimeUnit timeUnit_;
 	int64_t startValue_;
 	int64_t limitValue_;
+	bool isTableExpiration_;
 	int64_t subContainerAffinity_;
 	size_t dataAffinityPos_;
 	bool updateSchema(util::StackAllocator& alloc,
@@ -255,7 +256,6 @@ struct TableExpirationSchemaInfo {
 
 	void encode(EventByteOutStream& out);
 
-	bool isTableExpiration_;
 	bool isTableExpiration() {
 		return isTableExpiration_;
 	}
@@ -285,7 +285,8 @@ struct TableContainerInfo {
 		containerId_(0),
 		versionId_(0),
 		pId_(0), pos_(0),
-		affinity_(UNDEF_NODE_AFFINITY_NUMBER) {}
+		affinity_(UNDEF_NODE_AFFINITY_NUMBER),
+		approxSize_(-1) {}
 
 	TableContainerInfo& operator=(const TableContainerInfo& right) {
 		return *this;
@@ -295,12 +296,13 @@ struct TableContainerInfo {
 	ContainerId containerId_;
 	uint32_t versionId_;
 	PartitionId pId_;
-	NodeAffinityNumber affinity_;
 	size_t pos_;
+	NodeAffinityNumber affinity_;
+	int64_t approxSize_;
 
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_MEMBERS(
-		containerId_, versionId_, pId_);
+		containerId_, versionId_, pId_, approxSize_);
 };
 
 static const uint32_t OLD_LARGE_CONTAINER_VERSION_ID = 0;
@@ -349,7 +351,8 @@ struct TablePartitioningOptionInfo {
 		subPartitionColumnNameList_(alloc),
 		subPartitionColumnIdList_(alloc),
 		keyNameIdList_(alloc), keyValueList_(alloc), keyPositionList_(alloc),
-		primaryColumnIdList_(alloc), primaryColumnNameList_(alloc),
+		primaryColumnNameList_(alloc),
+		primaryColumnIdList_(alloc),
 		primaryColumnTypeList_(alloc) {}
 
 	Alloc& alloc_;
@@ -458,7 +461,7 @@ struct TablePartitioningInfo {
 		intervalUnit_ = info.intervalUnit_;
 		intervalValue_ = info.intervalValue_;
 		largeContainerId_ = info.largeContainerId_;
-		largeAffinityNumber_ = info.largeAffinityNumber_;
+		intervalAffinity_ = info.intervalAffinity_;
 		for (size_t pos = 0; pos < subContainerNameList_.size(); pos++) {
 			subContainerNameList_[pos] = subContainerNameList_[pos].c_str();
 		}
@@ -621,6 +624,28 @@ struct TablePartitioningInfo {
 		UTIL_OBJECT_CODER_MEMBERS(timeUnit_, dividedNum_, elapsedTime_);
 	};
 
+	void setIntervalWorkerGroup(uint32_t group) {
+		intervalAffinity_ &= 0xFFFFFFFF00000000;
+		intervalAffinity_ |= static_cast<uint32_t>(group);
+	}
+
+	void setIntervalWorkerGroupPosition(int32_t pos) {
+		intervalAffinity_ &= 0x00000000FFFFFFFF;
+		intervalAffinity_ |= static_cast<uint64_t>(static_cast<uint64_t>(pos + 1) << 32);
+	}
+
+	bool isSetSetIntervalWorkerGroupPosition() {
+		return (!((intervalAffinity_ & 0xFFFFFFFF00000000) == 0xFFFFFFFF00000000));
+	}
+
+	uint32_t getIntervalWorkerGroup() {
+		return static_cast<uint32_t>(intervalAffinity_ & 0x00000000FFFFFFFF);
+	}
+
+	int32_t getIntervalWorkerGroupPosition() {
+		return (isSetSetIntervalWorkerGroupPosition() ? static_cast<uint32_t>((intervalAffinity_ >> 32) - 1) : 0);
+	}
+
 	Alloc& alloc_;
 	uint8_t partitionType_;
 	PartitionId partitioningNum_;
@@ -633,7 +658,7 @@ struct TablePartitioningInfo {
 	int64_t intervalValue_;
 
 	ContainerId largeContainerId_;
-	NodeAffinityNumber largeAffinityNumber_;
+	uint64_t intervalAffinity_;
 
 	SubContainerNameList subContainerNameList_;
 	CondensedPartitionIdList condensedPartitionIdList_;
@@ -824,7 +849,7 @@ struct TablePartitioningInfo {
 		partitioningNum_,
 		partitioningColumnId_,
 		largeContainerId_,
-		largeAffinityNumber_,
+		intervalAffinity_,
 		condensedPartitionIdList_,
 		intervalUnit_,
 		intervalValue_,
@@ -870,8 +895,8 @@ struct TablePartitioningIndexInfoEntry {
 
 	util::StackAllocator& alloc_;
 	util::String indexName_;
-	MapType indexType_;
 	util::Vector<uint32_t> columnIds_;
+	MapType indexType_;
 	LargeContainerStatusType status_;
 	int32_t pos_;
 
@@ -890,8 +915,8 @@ struct TablePartitioningIndexInfo {
 		partitioningVersionId_(0) {}
 
 	util::StackAllocator& eventStackAlloc_;
-	util::Map<util::String, TablePartitioningIndexInfoEntry*> indexEntryMap_;
 	util::Vector<TablePartitioningIndexInfoEntry*> indexEntryList_;
+	util::Map<util::String, TablePartitioningIndexInfoEntry*> indexEntryMap_;
 	TablePartitioningVersionId partitioningVersionId_;
 
 	void getIndexInfoList(util::StackAllocator& alloc,
@@ -1290,6 +1315,7 @@ struct NoSQLSyncContext {
 	util::Mutex lock_;
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	ClientId clientId_;
+	NoSQLRequest nosqlRequest_;
 	PartitionId replyPId_;
 	const char* dbName_;
 	DatabaseId dbId_;
@@ -1298,7 +1324,6 @@ struct NoSQLSyncContext {
 	TransactionService* txnSvc_;
 	SQLService* sqlSvc_;
 	PartitionTable* pt_;
-	NoSQLRequest nosqlRequest_;
 	int32_t txnTimeoutInterval_;
 };
 
@@ -1644,9 +1669,11 @@ public:
 		return nodeId_;
 	}
 
-private:
+	int64_t containerApproxSize() {
+		return approxSize_;
+	}
 
-	EventContext* ec_;
+private:
 
 	void start(ClientSession::Builder& sessionBuilder);
 	bool executeCommand(Event& request, bool isSync, util::XArray<uint8_t>& response);
@@ -1697,11 +1724,11 @@ private:
 
 	util::StackAllocator& eventStackAlloc_;
 
-	util::String containerName_;
 	NodeId nodeId_;
 	ContainerId containerId_;
 	SchemaVersionId versionId_;
 	PartitionId txnPId_;
+	util::String containerName_;
 	StatementId stmtId_;
 	NoSQLSyncContext* context_;
 	ClientSession clientSession_;
@@ -1715,7 +1742,6 @@ private:
 	bool hasRowKey_;
 	bool founded_;
 	bool setted_;
-	util::String sqlString_;
 
 	struct NoSQLColumn {
 		NoSQLColumn(util::StackAllocator& alloc) :
@@ -1742,7 +1768,10 @@ private:
 	const KeyConstraint keyConstraint_;
 	const FullContainerKey* containerKey_;
 	EventMonotonicTime startTime_;
+	EventContext* ec_;
+	util::String sqlString_;
 	ClientId nosqlClientId_;
+	int64_t approxSize_;
 };
 
 struct NoSQLContainer::OptionalRequest {
@@ -1882,7 +1911,7 @@ struct NoSQLUtils {
 	}
 
 	static void getAffinityValue(util::StackAllocator& alloc,
-		CreateTableOption& createOption, util::String& value);
+		const CreateTableOption& createOption, util::String& value);
 
 	static void getAffinityValue(util::StackAllocator& alloc,
 		util::XArray<uint8_t>& containerSchema,
@@ -1898,7 +1927,7 @@ struct NoSQLUtils {
 	template<typename Alloc>
 	static void makeNormalContainerSchema(
 		util::StackAllocator& alloc, const char* containerName,
-		CreateTableOption& createOption, util::XArray<uint8_t>& containerSchema,
+		const CreateTableOption& createOption, util::XArray<uint8_t>& containerSchema,
 		util::XArray<uint8_t>& optionList,
 		TablePartitioningInfo<Alloc>& partitioningInfo);
 
@@ -1934,8 +1963,9 @@ struct NoSQLUtils {
 		const char* key, OutputMessageRowStore& outputMrs,
 		util::Vector<IndexInfo>& indexInfoList);
 
-	static int32_t checkPrimaryKey(CreateTableOption& option);
-	static void checkPrimaryKey(util::StackAllocator& alloc, CreateTableOption& option,
+	static int32_t checkPrimaryKey(const CreateTableOption& option);
+	static void checkPrimaryKey(
+		util::StackAllocator& alloc, const CreateTableOption& option,
 		util::Vector<ColumnId>& columnIds);
 	static void decodePartitioningTableIndexInfo(
 		util::StackAllocator& alloc,

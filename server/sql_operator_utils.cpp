@@ -76,12 +76,17 @@ void SQLOps::OpCodeBuilder::applyJoinTypeTo(
 	}
 }
 
-SQLOps::OpConfig& SQLOps::OpCodeBuilder::createConfig() {
-	return *(ALLOC_NEW(getAllocator()) OpConfig());
+SQLOps::OpConfig& SQLOps::OpCodeBuilder::createConfig(const OpConfig *src) {
+	OpConfig *dest = ALLOC_NEW(getAllocator()) OpConfig();
+	if (src != NULL) {
+		*dest = *src;
+	}
+	return *dest;
 }
 
-SQLOps::ContainerLocation& SQLOps::OpCodeBuilder::createContainerLocation() {
-	return *(ALLOC_NEW(getAllocator()) ContainerLocation());
+SQLOps::ContainerLocation& SQLOps::OpCodeBuilder::createContainerLocation(
+		const ContainerLocation &src) {
+	return *(ALLOC_NEW(getAllocator()) ContainerLocation(src));
 }
 
 SQLExprs::IndexConditionList& SQLOps::OpCodeBuilder::createIndexConditionList() {
@@ -626,6 +631,20 @@ SQLExprs::Expression& SQLOps::OpCodeBuilder::arrangePredicate(
 	return rewriter_.rewrite(factoryCxt, src, NULL);
 }
 
+void SQLOps::OpCodeBuilder::replaceColumnToConstExpr(Projection &proj) {
+	SQLExprs::ExprFactoryContext &factoryCxt = getExprFactoryContext();
+	SQLExprs::Expression &dest =
+			SQLExprs::ExprRewriter::replaceColumnToConstExpr(factoryCxt, proj);
+	assert(&dest == &proj);
+	static_cast<void>(dest);
+
+	const size_t count = proj.getChainCount();
+	for (size_t i = 0; i < count; i++) {
+		replaceColumnToConstExpr(proj.chainAt(i));
+	}
+}
+
+#include <iostream>
 const SQLExprs::Expression* SQLOps::OpCodeBuilder::extractJoinKeyColumns(
 		const SQLExprs::Expression *srcExpr,
 		const SQLType::JoinType *joinTypeOfFilter,
@@ -826,7 +845,7 @@ void SQLOps::OpCodeBuilder::setUpNoopNodes(
 SQLOps::OpCode SQLOps::OpCodeBuilder::createOutputEmptyCode(
 		const ColumnTypeList &outTypeList) {
 	OpCode code;
-	code.setType(SQLOpTypes::OP_SELECT_PIPE);
+	code.setType(SQLOpTypes::OP_SELECT_NONE);
 	code.setPipeProjection(&createEmptyConstProjection(outTypeList, true));
 	return code;
 }
@@ -834,7 +853,8 @@ SQLOps::OpCode SQLOps::OpCodeBuilder::createOutputEmptyCode(
 bool SQLOps::OpCodeBuilder::isNoopAlways(const OpCode &code) {
 	return (code.getLimit() == 0 &&
 			code.findContainerLocation() == NULL &&
-			code.getType() != SQLOpTypes::OP_SELECT_PIPE);
+			!(code.getType() == SQLOpTypes::OP_SELECT_PIPE ||
+			code.getType() == SQLOpTypes::OP_SELECT_NONE));
 }
 
 SQLOps::OpCode SQLOps::OpCodeBuilder::toExecutable(const OpCode &src) {
@@ -1643,7 +1663,7 @@ util::StackAllocator& SQLOps::OpAllocatorManager::create(
 	}
 
 	if (cachedAllocList_->empty()) {
-		const size_t headSize = util::detail::AlignedSizeOf<size_t>::VALUE;
+		const size_t headSize = SQLValues::VarAllocator::getElementHeadSize();
 		const size_t blockSizeBase =
 				SQLValues::VarAllocator::TraitsType::getFixedSize(1);
 		assert(headSize < blockSizeBase);
@@ -2132,6 +2152,109 @@ void SQLOps::OpLatchKeeper::adjust(uint64_t size) {
 }
 
 
+const SQLOps::OpSimulator::PointEntry SQLOps::OpSimulator::POINT_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(PONIT_INIT),
+	UTIL_NAME_CODER_ENTRY(POINT_SCAN_MAIN),
+	UTIL_NAME_CODER_ENTRY(POINT_SCAN_OID)
+};
+const SQLOps::OpSimulator::PointCoder SQLOps::OpSimulator::POINT_CODER(
+		POINT_LIST, 1);
+
+const SQLOps::OpSimulator::ActionEntry SQLOps::OpSimulator::ACTION_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(ACTION_INTERRUPT),
+	UTIL_NAME_CODER_ENTRY(ACTION_INDEX_LOST),
+	UTIL_NAME_CODER_ENTRY(ACTION_UPDATE_ROW),
+	UTIL_NAME_CODER_ENTRY(ACTION_UPDATE_LIST_INVALID)
+};
+const SQLOps::OpSimulator::ActionCoder SQLOps::OpSimulator::ACTION_CODER(
+		ACTION_LIST, 1);
+
+SQLOps::OpSimulator::OpSimulator(SQLValues::VarAllocator &varAlloc) :
+		inactiveList_(varAlloc),
+		activeList_(varAlloc),
+		lastTupleId_(std::numeric_limits<int64_t>::max()) {
+}
+
+void SQLOps::OpSimulator::addEntry(const Entry &entry) {
+	if (entry.point_ == PONIT_INIT) {
+		activeList_.push_back(entry);
+	}
+	else {
+		inactiveList_.push_back(entry);
+	}
+}
+
+void SQLOps::OpSimulator::handlePoint(
+		OpSimulator *simulator, PointType point) {
+	if (simulator != NULL) {
+		simulator->handlePoint(point);
+	}
+}
+
+void SQLOps::OpSimulator::handlePoint(PointType point) {
+	for (EntryList::iterator it = inactiveList_.begin();
+			it != inactiveList_.end();) {
+		if (it->point_ == point) {
+			activeList_.push_back(*it);
+			it = inactiveList_.erase(it);
+		}
+		else {
+			++it;
+		}
+	}
+}
+
+bool SQLOps::OpSimulator::findAction(ActionType action) const {
+	for (size_t i = 0; i < 2; i++) {
+		const bool forActive = (i == 0);
+		const EntryList &list = (forActive ? activeList_ : inactiveList_);
+		for (EntryList::const_iterator it = list.begin(); it != list.end(); ++it) {
+			if (it->action_ == action) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool SQLOps::OpSimulator::nextAction(
+		ActionType action, int64_t *param, bool once) {
+	for (EntryList::iterator it = activeList_.begin();
+			it != activeList_.end(); ++it) {
+		if (it->action_ == action) {
+			if (param != NULL) {
+				*param = it->param_;
+			}
+			if (once) {
+				activeList_.erase(it);
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SQLOps::OpSimulator::nextInterruptionAction(int64_t &interval) {
+	return nextAction(ACTION_INTERRUPT, &interval, true);
+}
+
+void SQLOps::OpSimulator::acceptTupleId(int64_t tupleId) {
+	lastTupleId_ = tupleId;
+}
+
+bool SQLOps::OpSimulator::getLastTupleId(int64_t &tupleId) {
+	tupleId = lastTupleId_;
+	return (tupleId != std::numeric_limits<int64_t>::max());
+}
+
+
+SQLOps::OpSimulator::Entry::Entry() :
+		point_(END_POINT),
+		action_(END_ACTION),
+		param_(0) {
+}
+
+
 SQLOps::OpProfiler::OpProfiler(const util::StdAllocator<void, void> &alloc) :
 		alloc_(alloc),
 		idManager_(alloc),
@@ -2249,6 +2372,11 @@ void SQLOps::OpProfiler::addIndexProfile(
 
 	ref.executionCount_ = info.executionCount_;
 	ref.actualTime_ = info.actualTime_;
+
+	ref.modification_ = info.modification_;
+	ref.bulk_ = info.bulk_;
+	ref.hit_ = info.hit_;
+	ref.mvccHit_ = info.mvccHit_;
 }
 
 SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
@@ -2280,7 +2408,11 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
 		src.indexRef_.clear();
 		for (LocalIndexInfoList::iterator it = indexList.begin();
 				it != indexList.end(); ++it) {
-			src.indexRef_.push_back(getAnalysisIndexInfo(*it));
+			AnalysisIndexInfo indexInfo;
+			if (!findAnalysisIndexInfo(*it, indexInfo)) {
+				continue;
+			}
+			src.indexRef_.push_back(indexInfo);
 		}
 		ref.index_ = &src.indexRef_;
 	}
@@ -2293,6 +2425,7 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
 		for (SubMap::iterator it = subMap.begin(); it != subMap.end(); ++it) {
 			src.subRef_.push_back(profiler->getAnalysisInfo(&it->second));
 		}
+		reduceNoopInfo(src.subRef_);
 		ref.op_ = &src.subRef_;
 	}
 
@@ -2335,13 +2468,13 @@ SQLOps::OpProfiler::OptimizationList* SQLOps::OpProfiler::getOptimizations(
 	return &destList;
 }
 
-SQLOpUtils::AnalysisIndexInfo SQLOps::OpProfiler::getAnalysisIndexInfo(
-		LocalIndexInfo &src) {
+bool SQLOps::OpProfiler::findAnalysisIndexInfo(
+		LocalIndexInfo &src, AnalysisIndexInfo &dest) {
 	if (src.ref_.empty()) {
-		return AnalysisIndexInfo();
+		return false;
 	}
 
-	AnalysisIndexInfo dest = src.ref_.front();
+	dest = src.ref_.front();
 
 	if (!src.name_.empty()) {
 		dest.name_ = &src.name_;
@@ -2368,7 +2501,7 @@ SQLOpUtils::AnalysisIndexInfo SQLOps::OpProfiler::getAnalysisIndexInfo(
 		dest.conditionList_ = &src.conditionListRef_;
 	}
 
-	return dest;
+	return true;
 }
 
 uint64_t SQLOps::OpProfiler::nanoTimeToMillis(uint64_t nanoTime) {
@@ -2392,6 +2525,49 @@ SQLOps::OpProfiler::LocalInfo& SQLOps::OpProfiler::createInfo(
 	info.ref_.front().type_ = type;
 
 	return info;
+}
+
+void SQLOps::OpProfiler::reduceNoopInfo(
+		util::AllocVector<AnalysisInfo> &subInfoList) {
+	size_t noopCount = 0;
+	for (util::AllocVector<AnalysisInfo>::iterator it = subInfoList.begin();
+			it != subInfoList.end(); ++it) {
+		if (isNoopInfo(*it)) {
+			noopCount++;
+		}
+	}
+
+	if (noopCount == 0 || noopCount == subInfoList.size()) {
+		return;
+	}
+
+	for (util::AllocVector<AnalysisInfo>::iterator it = subInfoList.begin();
+			it != subInfoList.end();) {
+		if (isNoopInfo(*it)) {
+			it = subInfoList.erase(it);
+		}
+		else {
+			++it;
+		}
+	}
+}
+
+bool SQLOps::OpProfiler::isNoopInfo(const AnalysisInfo &info) {
+	if (info.op_ != NULL) {
+		bool noopOnly = false;
+		for (util::AllocVector<AnalysisInfo>::iterator it = info.op_->begin();
+				it != info.op_->end(); ++it) {
+			if (!isNoopInfo(*it)) {
+				return false;
+			}
+			noopOnly = true;
+		}
+		if (noopOnly) {
+			return true;
+		}
+	}
+
+	return (info.type_ == SQLOpTypes::OP_SELECT_NONE);
 }
 
 
@@ -2513,17 +2689,33 @@ SQLOps::OpProfilerEntry::getOptimizationEntry() {
 	return *optimization_;
 }
 
-SQLOps::OpProfilerIndexEntry& SQLOps::OpProfilerEntry::getIndexEntry() {
-	if (index_.get() == NULL) {
-		if (localInfo_.index_.empty()) {
-			localInfo_.index_.push_back(LocalIndexInfo(alloc_));
-		}
-		LocalIndexInfo *localIndexInfo = &localInfo_.index_[0];
-		index_ = ALLOC_UNIQUE(
-				alloc_, OpProfilerIndexEntry, alloc_, localIndexInfo);
+SQLOps::OpProfilerIndexEntry& SQLOps::OpProfilerEntry::getIndexEntry(
+		uint32_t ordinal) {
+	while (ordinal >= localInfo_.index_.size()) {
+		localInfo_.index_.push_back(LocalIndexInfo(alloc_));
 	}
+	if (index_.get() == NULL) {
+		index_ = ALLOC_UNIQUE(
+				alloc_, OpProfilerIndexEntry, alloc_, &localInfo_.index_);
+	}
+	index_->updateOrdinal(ordinal);
 	return *index_;
 }
+
+
+
+const util::NameCoderEntry<SQLOps::OpProfilerIndexEntry::ModificationType>
+		SQLOps::OpProfilerIndexEntry::Coders::MOD_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(MOD_UPDATE_ROW),
+	UTIL_NAME_CODER_ENTRY(MOD_REMOVE_ROW),
+	UTIL_NAME_CODER_ENTRY(MOD_REMOVE_ROW_ARRAY),
+	UTIL_NAME_CODER_ENTRY(MOD_REMOVE_CHUNK)
+};
+
+const util::NameCoder<
+		SQLOps::OpProfilerIndexEntry::ModificationType,
+		SQLOps::OpProfilerIndexEntry::END_MOD>
+		SQLOps::OpProfilerIndexEntry::Coders::MOD_CODER(MOD_LIST, 1);
 
 
 SQLOps::OpProfilerOptimizationEntry::OpProfilerOptimizationEntry(
@@ -2551,19 +2743,30 @@ const SQLValues::ProfileElement& SQLOps::OpProfilerOptimizationEntry::get(
 
 
 SQLOps::OpProfilerIndexEntry::OpProfilerIndexEntry(
-		const util::StdAllocator<void, void> &alloc, LocalIndexInfo *localInfo) :
+		const util::StdAllocator<void, void> &alloc, LocalIndexInfoList *localInfoList) :
 		executionCount_(0),
-		localInfo_(localInfo),
+		localInfoList_(localInfoList),
+		localInfoOrdinal_(std::numeric_limits<uint32_t>::max()),
 		alloc_(alloc),
-		nameMap_(alloc) {
+		nameMap_(alloc),
+		modification_(END_MOD),
+		bulk_(0),
+		hit_(0),
+		mvccHit_(0) {
 }
 
 bool SQLOps::OpProfilerIndexEntry::isEmpty() {
-	return nameMap_.empty();
+	return (localInfoOrdinal_ == std::numeric_limits<uint32_t>::max() ||
+			getLocalInfo().columnNameList_.empty());
+}
+
+void SQLOps::OpProfilerIndexEntry::setModificationType(
+		ModificationType modification) {
+	modification_ = modification;
 }
 
 const char8_t* SQLOps::OpProfilerIndexEntry::findIndexName() {
-	const util::AllocString &name = localInfo_->name_;
+	const util::AllocString &name = getLocalInfo().name_;
 	if (name.empty()) {
 		return NULL;
 	}
@@ -2571,7 +2774,7 @@ const char8_t* SQLOps::OpProfilerIndexEntry::findIndexName() {
 }
 
 void SQLOps::OpProfilerIndexEntry::setIndexName(const char8_t *name) {
-	localInfo_->name_ = name;
+	getLocalInfo().name_ = name;
 }
 
 const char8_t* SQLOps::OpProfilerIndexEntry::findColumnName(
@@ -2589,7 +2792,7 @@ void SQLOps::OpProfilerIndexEntry::setColumnName(
 }
 
 void SQLOps::OpProfilerIndexEntry::addIndexColumn(uint32_t column) {
-	OpProfiler::NameList &nameList = localInfo_->columnNameList_;
+	OpProfiler::NameList &nameList = getLocalInfo().columnNameList_;
 
 	nameList.push_back(util::AllocString(alloc_));
 
@@ -2613,12 +2816,16 @@ void SQLOps::OpProfilerIndexEntry::addCondition(
 		return;
 	}
 
-	OpProfiler::IndexCondList &condList = localInfo_->conditionListRef_;
+	OpProfiler::IndexCondList &condList = getLocalInfo().conditionListRef_;
 	const size_t condIndex = condList.size();
+
+	if (condList.empty() && cond.bulkOrCount_ > 1) {
+		bulk_ = static_cast<int64_t>(cond.bulkOrCount_);
+	}
 
 	condList.push_back(destCond);
 
-	OpProfiler::NameList &nameList = localInfo_->conditionColumnList_;
+	OpProfiler::NameList &nameList = getLocalInfo().conditionColumnList_;
 	if (condIndex >= nameList.size()) {
 		nameList.resize(condIndex + 1, util::AllocString(alloc_));
 	}
@@ -2638,28 +2845,61 @@ void SQLOps::OpProfilerIndexEntry::finishSearch() {
 	++executionCount_;
 }
 
+void SQLOps::OpProfilerIndexEntry::addHitCount(int64_t count, bool onMvcc) {
+	(onMvcc ? mvccHit_ : hit_) += count;
+}
+
+void SQLOps::OpProfilerIndexEntry::updateOrdinal(uint32_t ordinal) {
+	if (localInfoOrdinal_ == ordinal) {
+		return;
+	}
+	update();
+	localInfoOrdinal_ = ordinal;
+}
+
 void SQLOps::OpProfilerIndexEntry::update() {
-	if (localInfo_->ref_.empty()) {
-		localInfo_->ref_.push_back(AnalysisIndexInfo());
+	if (localInfoOrdinal_ == std::numeric_limits<uint32_t>::max()) {
+		return;
 	}
 
-	AnalysisIndexInfo &ref = localInfo_->ref_.front();
+	LocalIndexInfo &localInfo = getLocalInfo();
+	if (localInfo.ref_.empty()) {
+		localInfo.ref_.push_back(AnalysisIndexInfo());
+	}
+
+	AnalysisIndexInfo &ref = localInfo.ref_.front();
 	ref.executionCount_ = executionCount_;
 	ref.actualTime_ = static_cast<int64_t>(
 			OpProfiler::nanoTimeToMillis(searchWatch_.elapsedNanos()));
+
+	ref.modification_ = modification_;
+	ref.bulk_ = bulk_;
+	ref.hit_ = hit_;
+	ref.mvccHit_ = mvccHit_;
+}
+
+SQLOps::OpProfiler::LocalIndexInfo&
+SQLOps::OpProfilerIndexEntry::getLocalInfo() {
+	assert(localInfoList_ != NULL);
+	assert(localInfoOrdinal_ < localInfoList_->size());
+
+	return (*localInfoList_)[localInfoOrdinal_];
 }
 
 
 const util::NameCoderEntry<SQLOpTypes::Type>
 		SQLOpUtils::AnalysisInfo::OP_TYPE_LIST[] = {
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_SEMI_FILTERING),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_UNIQUE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_NO_INDEXED),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_FULL),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_RANGE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_INDEX),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_META),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT_NONE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT_PIPE),
-	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT_FINISH),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_LIMIT),
 
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SORT),
@@ -2712,6 +2952,7 @@ SQLOpUtils::AnalysisInfo::AnalysisInfo() :
 		optimization_(NULL),
 		index_(NULL),
 		op_(NULL),
+		partial_(NULL),
 		actualNanoTime_(0) {
 }
 
@@ -2758,7 +2999,7 @@ const util::NameCoderEntry<SQLOpUtils::AnalysisIndexCondition::ConditionType>
 const util::NameCoder<
 		SQLOpUtils::AnalysisIndexCondition::ConditionType,
 		SQLOpUtils::AnalysisIndexCondition::END_CONDITION>
-		SQLOpUtils::AnalysisIndexCondition::CONDITION_CODER(	CONDITION_LIST, 1);
+		SQLOpUtils::AnalysisIndexCondition::CONDITION_CODER(CONDITION_LIST, 1);
 
 SQLOpUtils::AnalysisIndexCondition::AnalysisIndexCondition() :
 		column_(NULL),
@@ -2767,11 +3008,15 @@ SQLOpUtils::AnalysisIndexCondition::AnalysisIndexCondition() :
 
 
 SQLOpUtils::AnalysisIndexInfo::AnalysisIndexInfo() :
+		modification_(IndexProfiler::END_MOD),
 		name_(NULL),
 		columnList_(NULL),
 		conditionList_(NULL),
+		bulk_(0),
 		executionCount_(0),
-		actualTime_(0) {
+		actualTime_(0),
+		hit_(0),
+		mvccHit_(0) {
 }
 
 

@@ -37,7 +37,7 @@ AUDIT_TRACER_DECLARE(AUDIT_CONNECT);
 
 #define TXN_TRACE_HANDLER_CALLED(ev)               \
 	UTIL_TRACE_DEBUG(TRANSACTION_SERVICE,          \
-		"handler called. (type=" << getEventTypeName(ev.getType()) \
+		"handler called. (type=" <<  EventTypeUtility::getEventTypeName(ev.getType()) \
 							<< "[" << ev.getType() << "]" \
 							<< ", nd=" << ev.getSenderND() \
 							<< ", pId=" << ev.getPartitionId() << ")")
@@ -664,7 +664,6 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -676,6 +675,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 
 		EventByteInStream in(ev.getInStream());
 		decodeRequestCommonPart(in, request, connOption);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		const RequestType requestType =
 				request.optional_.get<Options::REQUEST_MODULE_TYPE>();
@@ -796,7 +796,6 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		}
 
 		}
-
 		TEST_PRINT("<<<LoginHandler>>> END\n");
 	}
 	catch (DenyException &e) {
@@ -886,7 +885,7 @@ bool LoginHandler::executeAuthenticationInternal(
 				return false;
 			}
 			dbId = option.dbId;
-			TEST_PRINT1("dbId=%d\n", dbId);
+			TEST_PRINT1("dbId=%ld\n", dbId);
 		}
 		{
 			DUGetInOut option;
@@ -916,7 +915,7 @@ bool LoginHandler::executeAuthenticationInternal(
 				return false;
 			}
 			dbId = option.dbId;
-			TEST_PRINT1("dbId=%d\n", dbId);
+			TEST_PRINT1("dbId=%ld\n", dbId);
 		}
 		TEST_PRINT("executeAuthenticationInterval() (Ph3) E\n");
 	}
@@ -943,7 +942,7 @@ void LoginHandler::executeAuthentication(
 			, isNewSQL_
 			);
 	authId = authContext.getAuthenticationId();
-	TEST_PRINT1("authId=%d\n", authId);
+	TEST_PRINT1("authId=%ld\n", authId);
 
 	Event authEvent(ec, AUTHENTICATION, 0 /*pId*/);
 	EventByteOutStream out = authEvent.getOutStream();
@@ -968,7 +967,7 @@ void LoginHandler::executeAuthentication(
 	out << pId;
 	int32_t num = 0;
 	if (strlen(digest) == 0) {
-		num = roleNameList.size();
+		num = static_cast<int32_t>(roleNameList.size());
 		TEST_PRINT1("num=%d\n", num);
 		out << num;
 		for (uint32_t i = 0; i < static_cast<uint32_t>(roleNameList.size()); i++) {
@@ -1017,7 +1016,7 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 		UserType userType;
 
 		decodeAuthenticationAck<EventByteInStream>(in, request);
-		TEST_PRINT1("(authId=%d\n)", request.authId_);
+		TEST_PRINT1("(authId=%ld\n)", request.authId_);
 		TEST_PRINT1("(authPId=%d\n)", request.authPId_);
 		decodeStringData<EventByteInStream, util::String>(in, userName);
 		decodeStringData<EventByteInStream, util::String>(in, digest);
@@ -1205,7 +1204,7 @@ void AuthenticationAckHandler::replySuccess(
 	}
 
 	TEST_PRINT1("pId=%d\n", authContext.getPartitionId());
-	TEST_PRINT1("stmtId=%d\n", authContext.getStatementId());
+	TEST_PRINT1("stmtId=%ld\n", authContext.getStatementId());
 	try {
 		ConnectionOption* connOption = &(authContext.getConnectionND().getUserData<ConnectionOption>());
 		OutMessage outMes(authContext.getStatementId(), TXN_STATEMENT_SUCCESS,
@@ -1278,7 +1277,7 @@ void AuthenticationHandler::replyAuthenticationAck(
 			out << privilege;
 		}
 		TEST_PRINT1("num=%d\n", num);
-		TEST_PRINT1("dbId=%d\n", dbId);
+		TEST_PRINT1("dbId=%ld\n", dbId);
 		TEST_PRINT1("priv=%d\n", priv);
 		TEST_PRINT1("privilege=%s\n", privilege.c_str());
 		TEST_PRINT1("roleName=%s\n", dbName.c_str());
@@ -1376,7 +1375,7 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 		PrivilegeType priv = inMes.priv_;
 		util::String& dbName = inMes.dbName_;
 		
-		TEST_PRINT1("(authId=%d\n)", ack.authId_);
+		TEST_PRINT1("(authId=%ld\n)", ack.authId_);
 		TEST_PRINT1("(authPId=%d\n)", ack.authPId_);
 
 		if (inMes.num_ <= 0) {
@@ -1389,7 +1388,7 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED, "");
 		}
 
-		TEST_PRINT1("dbId=%d\n", dbId);
+		TEST_PRINT1("dbId=%ld\n", dbId);
 		TEST_PRINT1("priv=%d\n", priv);
 		TEST_PRINT1("roleName=%s\n", dbName.c_str());
 		
@@ -1451,7 +1450,6 @@ void DisconnectHandler::operator()(EventContext &ec, Event &ev) {
 
 		ConnectionOption &connOption =
 				ev.getSenderND().getUserData<ConnectionOption>();
-
 		releaseUserCache(connOption);
 		sqlService_->getExecutionManager()->clearConnection(ev, isNewSQL_);
 
@@ -1471,15 +1469,17 @@ void LogoutHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 
 		releaseUserCache(connOption);
@@ -1557,7 +1557,7 @@ void CheckTimeoutHandler::checkAuthenticationTimeout(EventContext &ec) {
 		}
 
 		if (timeoutResourceCount > 0) {
-			TEST_PRINT1("TIMEOUT count=%d\n", timeoutResourceCount);
+			TEST_PRINT1("TIMEOUT count=%ld\n", timeoutResourceCount);
 			GS_TRACE_WARNING(AUTHENTICATION_TIMEOUT,
 				GS_TRACE_TXN_AUTHENTICATION_TIMEOUT,
 				"(pgId=" << pgId << ", timeoutResourceCount="

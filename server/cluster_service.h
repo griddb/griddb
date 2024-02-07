@@ -50,7 +50,8 @@ class JobManager;
 class PartitionList;
 class DataStoreConfig;
 struct ClusterOptionalInfo;
-
+class DatabaseManager;
+class OpenLDAPFactory;
 
 class ServiceConfig {
 public:
@@ -127,15 +128,16 @@ struct ManagerSet {
 		RecoveryManager* recoveryMgr,
 		GlobalFixedSizeAllocator* fixedSizeAlloc,
 		GlobalVariableSizeAllocator* varSizeAlloc,
-		util::ExecutorService *execSvc,
+		util::ExecutorService* execSvc,
 		ConfigTable* config,
-		StatTable* stats
-		,
+		StatTable* stats,
 		SQLService* sqlSvc,
 		SQLExecutionManager* execMgr,
-		JobManager* jobMgr
-		, UserCache* userCache
-		, DataStoreConfig* dsConfig
+		JobManager* jobMgr,
+		UserCache* userCache,
+		OpenLDAPFactory* olFactory,
+		DataStoreConfig* dsConfig,
+		DatabaseManager* dbMgr
 	)
 		: clsSvc_(clsSvc),
 		syncSvc_(syncSvc),
@@ -157,7 +159,9 @@ struct ManagerSet {
 		config_(config),
 		stats_(stats),
 		userCache_(userCache),
-		dsConfig_(dsConfig) {}
+		olFactory_(olFactory),
+		dsConfig_(dsConfig),
+		dbMgr_(dbMgr){}
 
 	ManagerSet() :
 		clsSvc_(NULL),
@@ -179,7 +183,9 @@ struct ManagerSet {
 		config_(NULL),
 		stats_(NULL),
 		userCache_(NULL),
-		dsConfig_(NULL) {}
+		olFactory_(NULL),
+		dsConfig_(NULL),
+		dbMgr_(NULL) {}
 
 
 	ClusterService* clsSvc_;
@@ -203,7 +209,9 @@ struct ManagerSet {
 	ConfigTable* config_;
 	StatTable* stats_;
 	UserCache* userCache_;
+	OpenLDAPFactory* olFactory_;
 	DataStoreConfig* dsConfig_;
+	DatabaseManager* dbMgr_;
 };
 
 
@@ -648,6 +656,8 @@ class ClusterService {
 	friend class TimerNotifyClusterHandler;
 	friend class ClusterManager::StatUpdator;
 public:
+	static const int32_t CLUSTER_EVENT_TRACE_LIMIT_INTERVAL = 3 * 1000;
+	static const int32_t CLUSTER_TIMER_EVENT_DIFF_TRACE_LIMIT_INTERVAL = 3 * 1000;
 
 	ClusterService(
 		const ConfigTable& config,
@@ -931,13 +941,14 @@ struct ClusterOptionalInfo {
 	static const int32_t RACKZONE_ID = 2;
 	static const int32_t DROP_PARTITION_INFO = 3;
 	static const int32_t PUBLIC_ADDRESS_INFO_SET = 4;
-	static const int32_t PARAM_MAX = 5;
+	static const int32_t SSL_ADDRESS_LIST = 5;
+	static const int32_t PARAM_MAX = 6;
 
 	static const int8_t INACTIVE = 0;
 	static const int8_t ACTIVE = 1;
 
 	ClusterOptionalInfo(util::StackAllocator& alloc, PartitionTable* pt) :
-		alloc_(alloc), pt_(pt), setList_(PARAM_MAX, INACTIVE, alloc),
+		alloc_(alloc), setList_(PARAM_MAX, INACTIVE, alloc), pt_(pt),
 		dropPartitionNodeInfo_(alloc), ssl_port_(UNDEF_SSL_PORT) {
 	}
 
@@ -979,6 +990,14 @@ struct ClusterOptionalInfo {
 		return ssl_port_;
 	}
 
+	void setSSLAddress(NodeAddress& address, int32_t sslPortNo) {
+		sslAddressList_.add(address, sslPortNo);
+	}
+
+	std::vector<SSLPair>& getSSLAddressList() {
+		return sslAddressList_.getList();
+	}
+
 	util::StackAllocator& alloc_;
 	util::Vector<uint8_t> setList_;
 	PartitionTable* pt_;
@@ -986,6 +1005,18 @@ struct ClusterOptionalInfo {
 	RackZoneInfoList rackZoneInfoList_;
 	DropPartitionNodeInfo dropPartitionNodeInfo_;
 	int32_t ssl_port_;
+	SSLAddressList sslAddressList_;
 };
 
+class EventTracer {
+public:
+	EventTracer(const char* clusterStatus, EventType eventType, const NodeDescriptor& nd, ClusterManager& clsMgr);
+	~EventTracer();
+
+private:
+	EventType eventType_;
+	const char* clusterStatus_;
+	const NodeDescriptor& nd_;
+	ClusterManager& clsMgr_;
+};
 #endif

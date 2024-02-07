@@ -31,8 +31,16 @@
 #include "sql_job_manager.h"
 #include "nosql_command.h"
 #include "key_data_store.h"
+#include "database_manager.h"
+#include "query_processor.h"
 UTIL_TRACER_DECLARE(SQL_SERVICE);
 
+
+
+template<typename T>
+const char* MetaProcessor::StoreCoreHandler::getLimitTime(T time) {
+	return (time < 0 ? "1970-01-01T00:00:00.000Z" : "9999-12-31T23:59:59.000Z");
+}
 
 MetaColumnInfo::MetaColumnInfo() :
 		id_(UNDEF_COLUMNID),
@@ -76,7 +84,8 @@ MetaContainerInfo::CommonColumnInfo::CommonColumnInfo() :
 		dbNameColumn_(UNDEF_COLUMNID),
 		containerNameColumn_(UNDEF_COLUMNID),
 		partitionIndexColumn_(UNDEF_COLUMNID),
-		containerIdColumn_(UNDEF_COLUMNID) {
+		containerIdColumn_(UNDEF_COLUMNID),
+		dbIdColumn_(UNDEF_COLUMNID) {
 }
 
 
@@ -105,7 +114,9 @@ const util::NameCoderEntry<MetaType::ContainerMeta>
 	UTIL_NAME_CODER_ENTRY(CONTAINER_PARTITION_UNIT2),
 	UTIL_NAME_CODER_ENTRY(CONTAINER_PARTITION_DIVISION2),
 	UTIL_NAME_CODER_ENTRY(CONTAINER_CLUSTER_PARTITION),
-	UTIL_NAME_CODER_ENTRY(CONTAINER_EXPIRATION_TYPE)
+	UTIL_NAME_CODER_ENTRY(CONTAINER_EXPIRATION_TYPE),
+	UTIL_NAME_CODER_ENTRY(CONTAINER_PARTITION_INTERVAL_WORKER_GROUP),
+	UTIL_NAME_CODER_ENTRY(CONTAINER_PARTITION_INTERVAL_WORKER_GROUP_POSITION)
 };
 const util::NameCoderEntry<MetaType::ColumnMeta>
 		MetaType::Coders::LIST_COLUMN[] = {
@@ -178,6 +189,7 @@ const util::NameCoderEntry<MetaType::ErasableMeta>
 
 const util::NameCoderEntry<MetaType::EventMeta>
 		MetaType::Coders::LIST_EVENT[] = {
+	UTIL_NAME_CODER_ENTRY(EVENT_DATABASE_ID),
 	UTIL_NAME_CODER_ENTRY(EVENT_NODE_ADDRESS),
 	UTIL_NAME_CODER_ENTRY(EVENT_NODE_PORT),
 	UTIL_NAME_CODER_ENTRY(EVENT_START_TIME),
@@ -199,7 +211,8 @@ const util::NameCoderEntry<MetaType::SocketMeta>
 	UTIL_NAME_CODER_ENTRY(SOCKET_APPLICATION_NAME),
 	UTIL_NAME_CODER_ENTRY(SOCKET_CREATION_TIME),
 	UTIL_NAME_CODER_ENTRY(SOCKET_DISPATCHING_EVENT_COUNT),
-	UTIL_NAME_CODER_ENTRY(SOCKET_SENDING_EVENT_COUNT)
+	UTIL_NAME_CODER_ENTRY(SOCKET_SENDING_EVENT_COUNT),
+	UTIL_NAME_CODER_ENTRY(SOCKET_DATABASE_NAME)
 };
 
 const util::NameCoderEntry<MetaType::ContainerStatsMeta>
@@ -238,7 +251,8 @@ const util::NameCoderEntry<MetaType::PartitionMeta>
 	UTIL_NAME_CODER_ENTRY(PARTITION_NODE_ADDRESS),
 	UTIL_NAME_CODER_ENTRY(PARTITION_EXPIRED_START_TIME),
 	UTIL_NAME_CODER_ENTRY(PARTITION_EXPIRED_ERASABLE_TIME),
-	UTIL_NAME_CODER_ENTRY(PARTITION_STATUS)
+	UTIL_NAME_CODER_ENTRY(PARTITION_STATUS),
+	UTIL_NAME_CODER_ENTRY(PARTITION_WORKER_INDEX)
 };
 
 const util::NameCoderEntry<MetaType::ViewMeta>
@@ -259,6 +273,7 @@ const util::NameCoderEntry<MetaType::SQLMeta>
 	UTIL_NAME_CODER_ENTRY(SQL_SQL),
 	UTIL_NAME_CODER_ENTRY(SQL_QUERY_ID),
 	UTIL_NAME_CODER_ENTRY(SQL_JOB_ID),
+	UTIL_NAME_CODER_ENTRY(SQL_USER_NAME)
 };
 
 const util::NameCoderEntry<MetaType::PartitionStatsMeta>
@@ -270,6 +285,33 @@ const util::NameCoderEntry<MetaType::PartitionStatsMeta>
 	UTIL_NAME_CODER_ENTRY(PARTITION_STATS_NUM_ROWS),
 };
 
+const util::NameCoderEntry<MetaType::DatabaseStatsMeta>
+MetaType::Coders::LIST_DATABASE_STATS[] = {
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_DATABASE_ID),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_NODE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_NODE_PORT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_TRANSACTION_CONNECTION_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_TRANSACTION_REQUEST_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_CONNECTION_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_REQUEST_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_STORE_BLOCK_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_STORE_MEMORY_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_STORE_SWAP_READ_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_STORE_SWAP_WRITE_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_WORK_MEMORY_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_STORE_MEMORY_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_STORE_SWAP_READ_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_TASK_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_PENDING_JOB_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE)
+};
+
+const util::NameCoderEntry<MetaType::DatabaseMeta>
+MetaType::Coders::LIST_DATABASE[] = {
+	UTIL_NAME_CODER_ENTRY(DATABASE_DATABASE_ID),
+	UTIL_NAME_CODER_ENTRY(DATABASE_DATABASE_NAME)
+};
 
 const util::NameCoder<MetaType::ContainerMeta, MetaType::END_CONTAINER>
 		MetaType::Coders::CODER_CONTAINER(LIST_CONTAINER, 1);
@@ -299,6 +341,10 @@ const util::NameCoder<MetaType::SQLMeta, MetaType::END_SQL>
 const util::NameCoder<MetaType::PartitionStatsMeta, MetaType::END_PARTITION_STATS>
 		MetaType::Coders::CODER_PARTITION_STATS(LIST_PARTITION_STATS, 1);
 
+const util::NameCoder<MetaType::DatabaseStatsMeta, MetaType::END_DATABASE_STATS>
+		MetaType::Coders::CODER_DATABASE_STATS(LIST_DATABASE_STATS, 1);
+const util::NameCoder<MetaType::DatabaseMeta, MetaType::END_DATABASE>
+MetaType::Coders::CODER_DATABASE(LIST_DATABASE, 1);
 const util::NameCoderEntry<MetaType::StringConstants>
 		MetaType::Coders::LIST_STR[] = {
 	UTIL_NAME_CODER_ENTRY(STR_CONTAINER_NAME),
@@ -395,6 +441,25 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_STORE_USE),
 	UTIL_NAME_CODER_ENTRY(STR_STORE_OBJECT_USE),
 
+	UTIL_NAME_CODER_ENTRY(STR_PARTITION_INTERVAL_WORKER_GROUP),
+	UTIL_NAME_CODER_ENTRY(STR_PARTITION_INTERVAL_WORKER_GROUP_POSITION),
+	UTIL_NAME_CODER_ENTRY(STR_USER_NAME),
+	UTIL_NAME_CODER_ENTRY(STR_TYPE),
+	UTIL_NAME_CODER_ENTRY(STR_TRANSACTION_CONNECTION_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_TRANSACTION_REQUEST_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_CONNECTION_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_REQUEST_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_STORE_BLOCK_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_STORE_MEMORY_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_STORE_SWAP_READ_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_STORE_SWAP_WRITE_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_WORK_MEMORY_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_STORE_MEMORY_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_STORE_SWAP_READ_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_STORE_SWAP_WRITE_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_TASK_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_PENDING_JOB_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_SQL_SEND_MESSAGE_SIZE)
 };
 const util::NameCoder<MetaType::StringConstants, MetaType::END_STR>
 		MetaType::Coders::CODER_STR(LIST_STR, 1);
@@ -425,7 +490,9 @@ const MetaType::CoreColumns::Entry<MetaType::ContainerMeta>
 	of(CONTAINER_PARTITION_UNIT2).asString(true),
 	of(CONTAINER_PARTITION_DIVISION2).asInteger(true),
 	of(CONTAINER_CLUSTER_PARTITION).asInteger(),
-	of(CONTAINER_EXPIRATION_TYPE).asString(true)
+	of(CONTAINER_EXPIRATION_TYPE).asString(true),
+	of(CONTAINER_PARTITION_INTERVAL_WORKER_GROUP).asInteger(true),
+	of(CONTAINER_PARTITION_INTERVAL_WORKER_GROUP_POSITION).asInteger(true)
 };
 const MetaType::CoreColumns::Entry<MetaType::ColumnMeta>
 		MetaType::CoreColumns::COLUMNS_COLUMN[] = {
@@ -498,6 +565,7 @@ const MetaType::CoreColumns::Entry<MetaType::ErasableMeta>
 
 const MetaType::CoreColumns::Entry<MetaType::EventMeta>
 		MetaType::CoreColumns::COLUMNS_EVENT[] = {
+	of(EVENT_DATABASE_ID).asLong(true),
 	of(EVENT_NODE_ADDRESS).asString(),
 	of(EVENT_NODE_PORT).asString().asInteger(),
 	of(EVENT_START_TIME).asTimestamp(),
@@ -519,7 +587,8 @@ const MetaType::CoreColumns::Entry<MetaType::SocketMeta>
 	of(SOCKET_APPLICATION_NAME).asString(true),
 	of(SOCKET_CREATION_TIME).asTimestamp(),
 	of(SOCKET_DISPATCHING_EVENT_COUNT).asLong(),
-	of(SOCKET_SENDING_EVENT_COUNT).asLong()
+	of(SOCKET_SENDING_EVENT_COUNT).asLong(),
+	of(SOCKET_DATABASE_NAME).asString(true)
 };
 
 const MetaType::CoreColumns::Entry<MetaType::ContainerStatsMeta>
@@ -558,7 +627,8 @@ const MetaType::CoreColumns::Entry<MetaType::PartitionMeta>
 	of(PARTITION_NODE_ADDRESS).asString(),
 	of(PARTITION_EXPIRED_START_TIME).asString(true),
 	of(PARTITION_EXPIRED_ERASABLE_TIME).asString(true),
-	of(PARTITION_STATUS).asString()
+	of(PARTITION_STATUS).asString(),
+	of(PARTITION_WORKER_INDEX).asInteger()
 };
 
 
@@ -579,7 +649,8 @@ const MetaType::CoreColumns::Entry<MetaType::SQLMeta>
 	of(SQL_APPLICATION_NAME).asString(true),
 	of(SQL_SQL).asString(true),
 	of(SQL_QUERY_ID).asString(),
-	of(SQL_JOB_ID).asString(true)
+	of(SQL_JOB_ID).asString(true),
+	of(SQL_USER_NAME).asString(true)
 };
 
 const MetaType::CoreColumns::Entry<MetaType::PartitionStatsMeta>
@@ -591,7 +662,33 @@ const MetaType::CoreColumns::Entry<MetaType::PartitionStatsMeta>
 	of(PARTITION_STATS_NUM_ROWS).asLong(true)
 };
 
+const MetaType::CoreColumns::Entry<MetaType::DatabaseStatsMeta>
+		MetaType::CoreColumns::COLUMNS_DATABASE_STATS[] = {
+	of(DATABASE_STATS_DATABASE_ID).asLong(),
+	of(DATABASE_STATS_NODE_ADDRESS).asString(),
+	of(DATABASE_STATS_NODE_PORT).asInteger(),
+	of(DATABASE_STATS_TRANSACTION_CONNECTION_COUNT).asLong(),
+	of(DATABASE_STATS_TRANSACTION_REQUEST_COUNT).asLong(),
+	of(DATABASE_STATS_SQL_CONNECTION_COUNT).asLong(),
+	of(DATABASE_STATS_SQL_REQUEST_COUNT).asLong(),
+	of(DATABASE_STATS_STORE_BLOCK_SIZE).asLong(),
+	of(DATABASE_STATS_STORE_MEMORY_SIZE).asLong(),
+	of(DATABASE_STATS_STORE_SWAP_READ_SIZE).asLong(),
+	of(DATABASE_STATS_STORE_SWAP_WRITE_SIZE).asLong(),
+	of(DATABASE_STATS_SQL_WORK_MEMORY_SIZE).asLong(),
+	of(DATABASE_STATS_SQL_STORE_MEMORY_SIZE).asLong(),
+	of(DATABASE_STATS_SQL_STORE_SWAP_READ_SIZE).asLong(),
+	of(DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE).asLong(),
+	of(DATABASE_STATS_SQL_TASK_COUNT).asLong(),
+	of(DATABASE_STATS_SQL_PENDING_JOB_COUNT).asLong(),
+	of(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE).asLong()
+};
 
+const MetaType::CoreColumns::Entry<MetaType::DatabaseMeta>
+MetaType::CoreColumns::COLUMNS_DATABASE[] = {
+of(DATABASE_DATABASE_ID).asLong(),
+of(DATABASE_DATABASE_NAME).asString()
+};
 
 template<typename T>
 MetaType::CoreColumns::Entry<T> MetaType::CoreColumns::of(T id) {
@@ -676,6 +773,11 @@ MetaType::CoreColumns::Entry<T>::asContainerId() const {
 	return asCommon(COMMON_CONTAINER_ID);
 }
 
+template<typename T> MetaType::CoreColumns::Entry<T>
+MetaType::CoreColumns::Entry<T>::asDbId() const {
+	return asCommon(COMMON_DATABASE_ID);
+}
+
 
 const MetaType::RefColumns::Entry<MetaType::ContainerMeta>
 		MetaType::RefColumns::COLUMNS_CONTAINER[] = {
@@ -707,7 +809,9 @@ const MetaType::RefColumns::Entry<MetaType::ContainerMeta>
 	of(CONTAINER_PARTITION_DIVISION2, STR_SUBPARTITION_DIVISION_COUNT),
 
 	of(CONTAINER_CLUSTER_PARTITION, STR_CLUSTER_PARTITION_INDEX),
-	of(CONTAINER_EXPIRATION_TYPE, STR_EXPIRATION_TYPE)
+	of(CONTAINER_EXPIRATION_TYPE, STR_EXPIRATION_TYPE),
+	of(CONTAINER_PARTITION_INTERVAL_WORKER_GROUP, STR_PARTITION_INTERVAL_WORKER_GROUP),
+	of(CONTAINER_PARTITION_INTERVAL_WORKER_GROUP_POSITION, STR_PARTITION_INTERVAL_WORKER_GROUP_POSITION)
 };
 const MetaType::RefColumns::Entry<MetaType::ColumnMeta>
 		MetaType::RefColumns::COLUMNS_COLUMN[] = {
@@ -780,6 +884,7 @@ const MetaType::RefColumns::Entry<MetaType::ErasableMeta>
 
 const MetaType::RefColumns::Entry<MetaType::EventMeta>
 		MetaType::RefColumns::COLUMNS_EVENT[] = {
+	of(EVENT_DATABASE_ID, STR_DATABASE_ID),
 	of(EVENT_NODE_ADDRESS, STR_NODE_ADDRESS),
 	of(EVENT_NODE_PORT, STR_NODE_PORT),
 	of(EVENT_START_TIME, STR_START_TIME),
@@ -801,7 +906,8 @@ const MetaType::RefColumns::Entry<MetaType::SocketMeta>
 	of(SOCKET_APPLICATION_NAME, STR_APPLICATION_NAME),
 	of(SOCKET_CREATION_TIME, STR_CREATION_TIME),
 	of(SOCKET_DISPATCHING_EVENT_COUNT, STR_DISPATCHING_EVENT_COUNT),
-	of(SOCKET_SENDING_EVENT_COUNT, STR_SENDING_EVENT_COUNT)
+	of(SOCKET_SENDING_EVENT_COUNT, STR_SENDING_EVENT_COUNT),
+	of(SOCKET_DATABASE_NAME, STR_DATABASE_NAME)
 };
 
 const MetaType::RefColumns::Entry<MetaType::ContainerStatsMeta>
@@ -841,7 +947,8 @@ const MetaType::RefColumns::Entry<MetaType::PartitionMeta>
 	of(PARTITION_NODE_ADDRESS, STR_CLUSTER_NODE_ADDRESS),
 	of(PARTITION_EXPIRED_START_TIME, STR_PARTITION_EXPIRED_CHECK_TIME),
 	of(PARTITION_EXPIRED_ERASABLE_TIME, STR_PARTITION_EXPIRED_ERASABLE_TIME),
-	of(PARTITION_STATUS, STR_PARTITION_STATUS)
+	of(PARTITION_STATUS, STR_PARTITION_STATUS),
+	of(PARTITION_WORKER_INDEX, STR_WORKER_INDEX)
 };
 
 const MetaType::RefColumns::Entry<MetaType::ViewMeta>
@@ -860,7 +967,8 @@ const MetaType::RefColumns::Entry<MetaType::SQLMeta>
 	of(SQL_APPLICATION_NAME, STR_APPLICATION_NAME),
 	of(SQL_SQL, STR_SQL),
 	of(SQL_QUERY_ID, STR_QUERY_ID),
-	of(SQL_JOB_ID, STR_JOB_ID)
+	of(SQL_JOB_ID, STR_JOB_ID),
+	of(SQL_USER_NAME, STR_USER_NAME)
 };
 
 const MetaType::RefColumns::Entry<MetaType::PartitionStatsMeta>
@@ -871,6 +979,33 @@ const MetaType::RefColumns::Entry<MetaType::PartitionStatsMeta>
 	of(PARTITION_STATS_NUM_ROWS, STR_NUM_ROWS)
 };
 
+const MetaType::RefColumns::Entry<MetaType::DatabaseStatsMeta>
+	MetaType::RefColumns::COLUMNS_DATABASE_STATS[] = {
+	of(DATABASE_STATS_DATABASE_ID, STR_DATABASE_ID),
+	of(DATABASE_STATS_NODE_ADDRESS, STR_NODE_ADDRESS),
+	of(DATABASE_STATS_NODE_PORT, STR_NODE_PORT),
+	of(DATABASE_STATS_TRANSACTION_CONNECTION_COUNT, STR_TRANSACTION_CONNECTION_COUNT),
+	of(DATABASE_STATS_TRANSACTION_REQUEST_COUNT, STR_TRANSACTION_REQUEST_COUNT),
+	of(DATABASE_STATS_SQL_CONNECTION_COUNT, STR_SQL_CONNECTION_COUNT),
+	of(DATABASE_STATS_SQL_REQUEST_COUNT, STR_SQL_REQUEST_COUNT),
+	of(DATABASE_STATS_STORE_BLOCK_SIZE, STR_STORE_BLOCK_SIZE),
+	of(DATABASE_STATS_STORE_MEMORY_SIZE, STR_STORE_MEMORY_SIZE),
+	of(DATABASE_STATS_STORE_SWAP_READ_SIZE, STR_STORE_SWAP_READ_SIZE),
+	of(DATABASE_STATS_STORE_SWAP_WRITE_SIZE, STR_STORE_SWAP_WRITE_SIZE),
+	of(DATABASE_STATS_SQL_WORK_MEMORY_SIZE, STR_SQL_WORK_MEMORY_SIZE),
+	of(DATABASE_STATS_SQL_STORE_MEMORY_SIZE, STR_SQL_STORE_MEMORY_SIZE),
+	of(DATABASE_STATS_SQL_STORE_SWAP_READ_SIZE, STR_SQL_STORE_SWAP_READ_SIZE),
+	of(DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE, STR_SQL_STORE_SWAP_WRITE_SIZE),
+	of(DATABASE_STATS_SQL_TASK_COUNT, STR_SQL_TASK_COUNT),
+	of(DATABASE_STATS_SQL_PENDING_JOB_COUNT, STR_SQL_PENDING_JOB_COUNT),
+	of(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE, STR_SQL_SEND_MESSAGE_SIZE)
+};
+
+const MetaType::RefColumns::Entry<MetaType::DatabaseMeta>
+MetaType::RefColumns::COLUMNS_DATABASE[] = {
+of(DATABASE_DATABASE_ID, STR_DATABASE_ID),
+of(DATABASE_DATABASE_NAME, STR_DATABASE_NAME)
+};
 template<typename T>
 MetaType::RefColumns::Entry<T> MetaType::RefColumns::of(
 		T refId,
@@ -932,6 +1067,13 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_CORE[] = {
 	coreOf(
 			TYPE_PARTITION_STATS, "_core_table_partitions_stats",
 			CoreColumns::COLUMNS_PARTITION_STATS, Coders::CODER_PARTITION_STATS, 0),
+	toNodeDistribution(coreOf(
+			TYPE_DATABASE_STATS, "_core_database_stats",
+			CoreColumns::COLUMNS_DATABASE_STATS, Coders::CODER_DATABASE_STATS, 0)),
+
+	coreOf(
+			TYPE_DATABASE, "_core_databases",
+			CoreColumns::COLUMNS_DATABASE, Coders::CODER_DATABASE, 0),
 };
 
 const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
@@ -977,6 +1119,11 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
 	refOf(TYPE_PARTITION_STATS,
 			NULL, "container_partitions_stats", "table_partitions_stats",
 			RefColumns::COLUMNS_PARTITION_STATS, 0),
+	refOf(TYPE_DATABASE_STATS,
+			"database_stats", NULL, NULL,
+			RefColumns::COLUMNS_DATABASE_STATS, 0),
+	refOf(TYPE_DATABASE,
+			"databases", NULL, NULL, RefColumns::COLUMNS_DATABASE, 0),
 };
 
 MetaContainerId MetaType::Containers::typeToId(MetaContainerType type) {
@@ -1155,6 +1302,9 @@ void MetaType::Containers::setUpCommonColumnInfo(
 		break;
 	case COMMON_CONTAINER_ID:
 		commonInfo.containerIdColumn_ = id;
+		break;
+	case COMMON_DATABASE_ID:
+		commonInfo.dbIdColumn_ = id;
 		break;
 	default:
 		break;
@@ -1405,6 +1555,12 @@ void MetaProcessor::scan(
 		case MetaType::TYPE_PARTITION_STATS:
 			scanCore<PartitionStatsHandler>(txn, cxt);
 			break;
+		case MetaType::TYPE_DATABASE_STATS:
+			scanCore<DatabaseStatsHandler>(txn, cxt);
+			break;
+		case MetaType::TYPE_DATABASE:
+			scanCore<DatabaseHandler>(txn, cxt);
+			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 		}
@@ -1466,24 +1622,21 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 
 	if (info_.nodeDistribution_) {
 		HandlerType handler(cxt);
-		DataStoreV4 *dataStore = cxt.getSource().dataStore_;
-		BaseContainer *container = ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, dataStore);
 		handler(
-				txn, UNDEF_CONTAINERID, UNDEF_DBID,
-				CONTAINER_ATTR_ANY, *container);
+				txn, UNDEF_CONTAINERID, cxt.getSource().dbId_,
+				CONTAINER_ATTR_ANY, NULL);
 		setNextContainerId(UNDEF_CONTAINERID);
-		ALLOC_DELETE(txn.getDefaultAllocator(), container);
 		return;
 	}
 	bool isPartitionUnit = false;
-	isPartitionUnit = (isPartitionUnit || (info_.id_ == MetaType::TYPE_CLUSTER_PARTITION));
+	isPartitionUnit = (isPartitionUnit || (info_.id_ == MetaType::TYPE_CLUSTER_PARTITION) || (info_.id_ == MetaType::TYPE_DATABASE));
 	if (isPartitionUnit) {
 		HandlerType handler(cxt);
 		DataStoreV4 *dataStore = cxt.getSource().dataStore_;
 		BaseContainer *container = ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, dataStore);
 		handler(
-				txn, UNDEF_CONTAINERID, UNDEF_DBID,
-				CONTAINER_ATTR_ANY, *container);
+				txn, UNDEF_CONTAINERID, cxt.getSource().dbId_,
+				CONTAINER_ATTR_ANY, container);
 		setNextContainerId(UNDEF_CONTAINERID);
 		ALLOC_DELETE(txn.getDefaultAllocator(), container);
 		return;
@@ -1529,7 +1682,7 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 				(*itr)->containerId_,
 				dbId,
 				(*itr)->attribute_,
-				*baseContainer);
+				baseContainer);
 		}
 		if (!followingFound) {
 			setNextContainerId(UNDEF_CONTAINERID);
@@ -1558,7 +1711,7 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 
 			handler(
 					txn, container->getContainerId(), dbId, attribute,
-					*container);
+					container);
 		}
 		while (false);
 		setNextContainerId(UNDEF_CONTAINERID);
@@ -1769,8 +1922,10 @@ MetaProcessor::StoreCoreHandler::StoreCoreHandler(Context &cxt) :
 
 void MetaProcessor::StoreCoreHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer *targetContainer) const {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	BaseContainer& container = getBaseContainer(targetContainer);
 
 	if (attribute == CONTAINER_ATTR_SUB) {
 		cxt_.stepContainerListing(id);
@@ -1837,7 +1992,9 @@ MetaProcessor::Context& MetaProcessor::StoreCoreHandler::getContext() const {
 }
 
 Value MetaProcessor::StoreCoreHandler::makeString(util::StackAllocator& alloc, const char8_t* src) const {
-	return ValueUtils::makeString(alloc, src, cxt_.getSource().dataStore_->getConfig().getLimitSmallSize());
+	assert(cxt_.getSource().sqlExecutionManager_);
+	return ValueUtils::makeString(alloc, src,
+		cxt_.getSource().sqlExecutionManager_->getManagerSet()->dsConfig_->getLimitSmallSize());
 }
 
 void MetaProcessor::StoreCoreHandler::getNames(
@@ -1851,10 +2008,15 @@ void MetaProcessor::StoreCoreHandler::getNames(
 	containerName = nameStr->c_str();
 }
 
+bool MetaProcessor::StoreCoreHandler::enableAdministratorScan() const {
+	return (cxt_.getSource().isAdministrator_
+		&& cxt_.getSource().sqlService_->getScanMetaTableByAdmin());
+}
+
 
 MetaProcessor::RefHandler::RefHandler(
-		TransactionContext &txn, const MetaContainerInfo &refInfo,
-		RowHandler &rowHandler) :
+	TransactionContext& txn, const MetaContainerInfo& refInfo,
+	RowHandler& rowHandler) :
 		refInfo_(refInfo),
 		destValueList_(txn.getDefaultAllocator()),
 		rowHandler_(rowHandler) {
@@ -2083,7 +2245,35 @@ void MetaProcessor::ContainerHandler::execute(
 				ValueUtils::makeNull() : makeString(
 						alloc, expirationTypeToName(expirationType)));
 	}
+	bool setIntervalWorkerGroup = false;
+	bool setIntervalWorkerGroupPos = false;
+	if (partitioningInfo != NULL) {
+		PartitioningInfo* p = partitioningInfo;
+		if (p->getIntervalWorkerGroup() != UINT32_MAX) {
+			builder.set(
+				MetaType::CONTAINER_PARTITION_INTERVAL_WORKER_GROUP,
+				ValueUtils::makeInteger(p->getIntervalWorkerGroup()));
+			setIntervalWorkerGroup = true;
+			if (p->isSetSetIntervalWorkerGroupPosition()) {
+				builder.set(
+					MetaType::CONTAINER_PARTITION_INTERVAL_WORKER_GROUP_POSITION,
+					ValueUtils::makeInteger(p->getIntervalWorkerGroupPosition()));
+				setIntervalWorkerGroupPos = true;
+			}
+		}
+	}
+	if (!setIntervalWorkerGroup) {
+		builder.set(
+			MetaType::CONTAINER_PARTITION_INTERVAL_WORKER_GROUP,
+			ValueUtils::makeNull());
+	}
 
+	if (!setIntervalWorkerGroupPos) {
+		builder.set(
+			MetaType::CONTAINER_PARTITION_INTERVAL_WORKER_GROUP_POSITION,
+			ValueUtils::makeNull());
+	}
+	
 	getContext().getRowHandler()(txn, builder.build());
 }
 
@@ -2422,7 +2612,9 @@ MetaProcessor::ErasableHandler::ErasableHandler(Context &cxt) :
 
 void MetaProcessor::ErasableHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer* targetcontainer) const {
+
+	BaseContainer& container = getBaseContainer(targetcontainer);
 
 	const ExpireType expireType = container.getExpireType();
 	if (expireType != NO_EXPIRE) {
@@ -2594,72 +2786,92 @@ MetaProcessor::EventHandler::EventHandler(Context &cxt) :
 }
 
 void MetaProcessor::EventHandler::operator()(
-		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
-	ValueListBuilder<MetaType::EventMeta> builder(
-			getContext().getValueListSource());
-	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	TransactionContext& txn, ContainerId id, DatabaseId dbId,
+	ContainerAttribute attribute, BaseContainer* targetContainer) const {
 
-	PartitionTable *pt = getContext().getSource().partitionTable_;
-	NodeAddress &address = pt->getNodeAddress(0, SYSTEM_SERVICE);
+	ValueListBuilder<MetaType::EventMeta> builder(getContext().getValueListSource());
+	util::StackAllocator& alloc = txn.getDefaultAllocator();
+	bool isAdministrator = enableAdministratorScan();
 
-	EventMonitor &monitor = getContext().getSource().transactionManager_->getEventMonitor();
+	PartitionTable* pt = getContext().getSource().partitionTable_;
+	NodeAddress& address = pt->getNodeAddress(0, SYSTEM_SERVICE);
+
 	util::StackAllocator::Scope scope(alloc);
-	for (size_t pos = 0; pos < monitor.eventInfoList_.size(); pos++) {
-		EventMonitor::EventInfo &eventInfo = monitor.eventInfoList_[pos];
-		EventType eventType = eventInfo.eventType_;
-		if (eventInfo.eventType_ != UNDEF_EVENT_TYPE) {
-			builder.set(
+	std::vector<EventMonitor*> monitorList = { 
+		&getContext().getSource().transactionManager_->getEventMonitor(),
+		&getContext().getSource().sqlService_->getEventMonitor() };
+	std::vector<ServiceType> serviceList = { TRANSACTION_SERVICE, SQL_SERVICE };
+
+	for (size_t i = 0; i < monitorList.size(); i++) {
+		EventMonitor& monitor = *monitorList[i];
+		for (size_t pos = 0; pos < monitor.eventInfoList_.size(); pos++) {
+			EventMonitor::EventInfo& eventInfo = monitor.eventInfoList_[pos];
+			EventType currentEventType = eventInfo.eventType_;
+			DatabaseId currentDbId = eventInfo.dbId_;
+			PartitionId currentPId = eventInfo.pId_;
+			int64_t currentStartTime = eventInfo.startTime_;
+			int32_t currentSQLEventType = eventInfo.type_;
+			if (currentEventType != UNDEF_EVENT_TYPE
+				&& currentDbId != UNDEF_DBID && currentPId != UNDEF_PARTITIONID && currentStartTime > 0) {
+				if (!isAdministrator && currentDbId != dbId) {
+					continue;
+				}
+				if (eventInfo.dbId_ != UNDEF_DBID) {
+					builder.set(
+						MetaType::EVENT_DATABASE_ID,
+						ValueUtils::makeLong(currentDbId));
+				}
+				else {
+					builder.set(
+						MetaType::EVENT_DATABASE_ID,
+						ValueUtils::makeNull());
+				}
+
+				builder.set(
 					MetaType::EVENT_NODE_ADDRESS,
 					makeString(alloc, address.dump(false).c_str()));
-			builder.set(
+
+				builder.set(
 					MetaType::EVENT_NODE_PORT,
 					ValueUtils::makeInteger(address.port_));
 
-			builder.set(
+				builder.set(
 					MetaType::EVENT_START_TIME,
 					ValueUtils::makeTimestamp(
-							eventInfo.startTime_));
+						currentStartTime));
 
-			std::string applicationName;
-			builder.set(
+				builder.set(
 					MetaType::EVENT_APPLICATION_NAME,
 					ValueUtils::makeNull());
 
-			const char *serviceName;
-			if (eventType < TXN_SHORTTERM_SYNC_REQUEST) {
-				serviceName = "TRANSACTION";
-			}
-			else if (eventType < PARTITION_GROUP_START) {
-				serviceName = "SYNC";
-			}
-			else if (eventType < SQL_NOTIFY_CLIENT) {
-				serviceName = "CHECKPOINT";
-			}
-			else if (eventType < RECV_NOTIFY_MASTER) {
-				serviceName = "SQL";
-			}
-			else {
-				serviceName = "TRANSACTION_SERVICE";
-			}
+				const char* serviceName = CommonUtility::getServiceTypeNameByEvent(
+					currentEventType, (serviceList[i] == TRANSACTION_SERVICE));
 
-			builder.set(
+				builder.set(
 					MetaType::EVENT_SERVICE_TYPE,
 					makeString(alloc, serviceName));
 
-			builder.set(
-					MetaType::EVENT_EVENT_TYPE,
-					makeString(alloc, getEventTypeName(eventType)));
+				if (serviceList[i] == SQL_SERVICE) {
+					builder.set(
+						MetaType::EVENT_EVENT_TYPE,
+						makeString(alloc, SQLType::Coder()(static_cast<SQLType::Id>(currentSQLEventType), "UNDEF_SQL_EVENT")));
+				}
+				else {
+					builder.set(
+						MetaType::EVENT_EVENT_TYPE,
+						makeString(alloc, EventTypeUtility::getEventTypeName(currentEventType)));
+				}
 
-			builder.set(
+				builder.set(
 					MetaType::EVENT_WORKER_INDEX,
 					ValueUtils::makeInteger(pos));
 
-			builder.set(
+				builder.set(
 					MetaType::EVENT_CLUSTER_PARTITION_INDEX,
-					ValueUtils::makeInteger(eventInfo.pId_));
+					ValueUtils::makeInteger(currentPId));
 
-			getContext().getRowHandler()(txn, builder.build());
+				getContext().getRowHandler()(txn, builder.build());
+			}
 		}
 	}
 }
@@ -2671,15 +2883,15 @@ MetaProcessor::SocketHandler::SocketHandler(Context &cxt) :
 
 void MetaProcessor::SocketHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
 	static_cast<void>(id);
 	static_cast<void>(dbId);
 	static_cast<void>(attribute);
-	static_cast<void>(container);
+	static_cast<void>(targetContainer);
 
-	ValueListBuilder<MetaType::SocketMeta> builder(
-			getContext().getValueListSource());
+	ValueListBuilder<MetaType::SocketMeta> builder(getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	bool isAdministrator = enableAdministratorScan();
 
 	if (getContext().getSource().transactionService_ == NULL) {
 		assert(false);
@@ -2741,8 +2953,29 @@ void MetaProcessor::SocketHandler::operator()(
 					alloc);
 			ValueUtils::toUpperString(ndTypeStr);
 
+			util::String dbName(alloc);
 			util::String applicationName(alloc);
-			findApplicationName(info.nd_, applicationName);
+			if (!info.nd_.isEmpty()) {
+				if (info.nd_.getType() == NodeDescriptor::ND_TYPE_CLIENT) {
+					StatementHandler::ConnectionOption& connOption = info.nd_.getUserData<StatementHandler::ConnectionOption>();
+					if (isAdministrator || dbId == connOption.dbId_) {
+						connOption.getDbApplicationName(dbName, applicationName);
+					}
+					else {
+						continue;
+					}
+				}
+				else {
+					if (!isAdministrator) {
+						continue;
+					}
+				}
+			}
+			else {
+				if (!isAdministrator) {
+					continue;
+				}
+			}
 
 			builder.set(
 					MetaType::SOCKET_TYPE, ndTypeSpecified ?
@@ -2776,6 +3009,12 @@ void MetaProcessor::SocketHandler::operator()(
 			builder.set(
 					MetaType::SOCKET_SENDING_EVENT_COUNT,
 					ValueUtils::makeLong(stats.sendingEventCount_));
+
+			builder.set(
+				MetaType::SOCKET_DATABASE_NAME,
+				dbName.empty() ?
+				ValueUtils::makeNull() :
+				makeString(alloc, dbName.c_str()));
 
 			getContext().getRowHandler()(txn, builder.build());
 		}
@@ -2849,10 +3088,12 @@ void MetaProcessor::ContainerStatsHandler::execute(
 	builder.set(
 			MetaType::CONTAINER_STATS_NAME,
 			makeString(alloc, name));
+
 	OId groupId = container.getBaseGroupId();
 	builder.set(
 			MetaType::CONTAINER_STATS_GROUPID,
 			ValueUtils::makeLong(groupId));
+
 	builder.set(
 			MetaType::CONTAINER_STATS_NUM_ROWS,
 			attribute == CONTAINER_ATTR_LARGE ?
@@ -2877,11 +3118,12 @@ const char *MetaProcessor::ClusterPartitionHandler::chunkCategoryList[] = {
 
 void MetaProcessor::ClusterPartitionHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
 
 	ValueListBuilder<MetaType::ClusterPartitionMeta> builder(
 			getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	BaseContainer& container = getBaseContainer(targetContainer);
 
 	PartitionTable *pt = getContext().getSource().partitionTable_;
 
@@ -2914,6 +3156,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 		PartitionRole role;
 		pt->getPartitionRole(pId, role);
 		NodeAddress &address = pt->getNodeAddress(role.getOwner(), SYSTEM_SERVICE);
+		
 		builder.set(
 			MetaType::CLUSTER_PARTITION_NODE_ADDRESS,
 			makeString(alloc, address.dump(false).c_str()));
@@ -2971,21 +3214,20 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 }
 
 
-
 MetaProcessor::PartitionHandler::PartitionHandler(Context &cxt) :
 		StoreCoreHandler(cxt) {
 }
 
 void MetaProcessor::PartitionHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+
 	if (attribute != CONTAINER_ATTR_LARGE) {
 		getContext().stepContainerListing(id);
 		return;
 	}
-
-	ValueListBuilder<MetaType::PartitionMeta> builder(
-			getContext().getValueListSource());
+	BaseContainer& container = getBaseContainer(targetContainer);
+	ValueListBuilder<MetaType::PartitionMeta> builder(getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
 	const char8_t *dbName;
@@ -3005,11 +3247,8 @@ void MetaProcessor::PartitionHandler::operator()(
 	typedef TablePartitioningInfo<util::StackAllocator> PartitioningInfo;
 	PartitioningInfo partitioningInfo(alloc);
 
-	EventContext *eventContext =
-			getContext().getSource().eventContext_;
-	assert(eventContext != NULL);
-	const int64_t emNow =
-			eventContext->getHandlerStartMonotonicTime();
+	EventContext *eventContext = getContext().getSource().eventContext_;
+	const int64_t emNow = eventContext->getHandlerStartMonotonicTime();
 
 	try {
 		decodeLargeRow(
@@ -3022,15 +3261,10 @@ void MetaProcessor::PartitionHandler::operator()(
 		return;
 	}
 
-	TransactionManager *transactionManager =
-			getContext().getSource().transactionManager_;
-	assert(transactionManager != NULL);
-
+	TransactionManager *transactionManager = getContext().getSource().transactionManager_;
 	const int64_t clusterPartitionCount =
 			transactionManager->getPartitionGroupConfig().getPartitionCount();
-	if (clusterPartitionCount <= 0) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
+
 	const uint8_t partitionType = partitioningInfo.partitionType_;
 	const bool forInterval = SyntaxTree::isRangePartitioningType(partitionType);
 	const bool forTimestamp = (forInterval &&
@@ -3102,8 +3336,14 @@ void MetaProcessor::PartitionHandler::operator()(
 			util::String boundaryStr(alloc);
 			if (forTimestamp) {
 				const int64_t &tsValue = *valueIt;
-				boundaryStr = SQLProcessor::ValueUtils::toString(
+				try {
+					boundaryStr = SQLProcessor::ValueUtils::toString(
 						alloc, TupleValue(&tsValue, TupleList::TYPE_TIMESTAMP));
+				}
+				catch (std::exception& e) {
+					UTIL_TRACE_EXCEPTION_WARNING(SQL_SERVICE, e, "");
+					boundaryStr = getLimitTime(tsValue);
+				}
 			}
 			else {
 				int64_t tmpValue = *valueIt;
@@ -3125,7 +3365,7 @@ void MetaProcessor::PartitionHandler::operator()(
 					break;
 				}
 				boundaryStr = SQLProcessor::ValueUtils::toString(
-						alloc, TupleValue(tmpValue));
+					alloc, TupleValue(tmpValue));
 			}
 			boundary = makeString(alloc, boundaryStr.c_str());
 
@@ -3142,25 +3382,42 @@ void MetaProcessor::PartitionHandler::operator()(
 				MetaType::PARTITION_NODE_AFFINITY,
 				ValueUtils::makeLong(affinity));
 
-		const int32_t clusterPartition =
-				static_cast<int32_t>(affinity % clusterPartitionCount);
+		const int32_t clusterPartition = static_cast<int32_t>(affinity % clusterPartitionCount);
 		builder.set(
 				MetaType::PARTITION_CLUSTER_PARTITION_INDEX,
 				ValueUtils::makeInteger(clusterPartition));
+
+		const int32_t workerIndex = transactionManager->getPartitionGroupConfig().getPartitionGroupId(clusterPartition);
+		builder.set(
+			MetaType::PARTITION_WORKER_INDEX,
+			ValueUtils::makeInteger(workerIndex));
 
 		if (partitioningInfo.isTableExpiration()) {
 			int64_t erasableTime = 0;
 			int64_t startTime = 0;
 			partitioningInfo.getIntervalInfo(currentTime, affinityPos, erasableTime, startTime);
-			builder.set(
-				MetaType::PARTITION_EXPIRED_START_TIME,
-				makeString(alloc,
-					SQLProcessor::ValueUtils::toString(alloc, TupleValue(&currentErasableTimestamp, TupleList::TYPE_TIMESTAMP)).c_str()));
-
-			builder.set(
-				MetaType::PARTITION_EXPIRED_ERASABLE_TIME,
-				makeString(alloc,
-					SQLProcessor::ValueUtils::toString(alloc, TupleValue(&erasableTime, TupleList::TYPE_TIMESTAMP)).c_str()));
+			try {
+				builder.set(
+					MetaType::PARTITION_EXPIRED_START_TIME,
+					makeString(alloc,
+						SQLProcessor::ValueUtils::toString(alloc, TupleValue(&currentErasableTimestamp, TupleList::TYPE_TIMESTAMP)).c_str()));
+			}
+			catch (std::exception& e) {
+				builder.set(
+					MetaType::PARTITION_EXPIRED_START_TIME,
+					makeString(alloc, getLimitTime(currentErasableTimestamp)));
+			}
+			try {
+				builder.set(
+					MetaType::PARTITION_EXPIRED_ERASABLE_TIME,
+					makeString(alloc,
+						SQLProcessor::ValueUtils::toString(alloc, TupleValue(&erasableTime, TupleList::TYPE_TIMESTAMP)).c_str()));
+			}
+			catch (std::exception& e) {
+				builder.set(
+					MetaType::PARTITION_EXPIRED_ERASABLE_TIME,
+					makeString(alloc, getLimitTime(erasableTime)));
+			}
 		}
 		else {
 			builder.set(
@@ -3179,8 +3436,7 @@ void MetaProcessor::PartitionHandler::operator()(
 		if (owner != UNDEF_NODEID) {
 			builder.set(
 					MetaType::PARTITION_NODE_ADDRESS,
-					makeString(alloc, pt->dumpNodeAddress(
-							owner, SQL_SERVICE).c_str()));
+					makeString(alloc, pt->dumpNodeAddress(owner, SQL_SERVICE).c_str()));
 		}
 		else {
 			const char *nodeStr = "UNDEF";
@@ -3205,14 +3461,14 @@ MetaProcessor::ViewHandler::ViewHandler(Context &cxt) :
 
 void MetaProcessor::ViewHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer *targetContainer) const {
+
 	if (attribute != CONTAINER_ATTR_VIEW) {
 		getContext().stepContainerListing(id);
 		return;
 	}
-
-	ValueListBuilder<MetaType::ViewMeta> builder(
-			getContext().getValueListSource());
+	BaseContainer& container = getBaseContainer(targetContainer);
+	ValueListBuilder<MetaType::ViewMeta> builder(getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
 	const char8_t *dbName;
@@ -3221,8 +3477,7 @@ void MetaProcessor::ViewHandler::operator()(
 
 	ViewInfo viewInfo(alloc);
 
-	EventContext *eventContext =
-			getContext().getSource().eventContext_;
+	EventContext *eventContext = getContext().getSource().eventContext_;
 	assert(eventContext != NULL);
 	const int64_t emNow =
 			eventContext->getHandlerStartMonotonicTime();
@@ -3261,16 +3516,16 @@ MetaProcessor::SQLHandler::SQLHandler(Context &cxt) :
 }
 
 void MetaProcessor::SQLHandler::operator()(
-		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
-	ValueListBuilder<MetaType::SQLMeta> builder(
-			getContext().getValueListSource());
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+
+	ValueListBuilder<MetaType::SQLMeta> builder(getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	bool isAdministrator = enableAdministratorScan();
 
 	PartitionTable *pt = getContext().getSource().partitionTable_;
 	NodeAddress &address = pt->getNodeAddress(0, SYSTEM_SERVICE);
-	SQLExecutionManager *executionManager
-			= getContext().getSource().sqlExecutionManager_;
+	SQLExecutionManager *executionManager = getContext().getSource().sqlExecutionManager_;
 	if (executionManager == NULL) {
 		return;
 	}
@@ -3282,6 +3537,10 @@ void MetaProcessor::SQLHandler::operator()(
 		SQLExecution *execution = latch.get();
 		if (execution) {
 			const SQLExecution::SQLExecutionContext &sqlContext = execution->getContext();
+			DatabaseId currentDbId = sqlContext.getDBId();
+			if (!isAdministrator && currentDbId != dbId) {
+				continue;
+			}
 
 			builder.set(
 					MetaType::SQL_DATABASE_NAME,
@@ -3301,24 +3560,36 @@ void MetaProcessor::SQLHandler::operator()(
 							sqlContext.getStartTime()));
 
 			builder.set(
-					MetaType::SQL_APPLICATION_NAME,
-					makeString(alloc, sqlContext.getApplicationName()));
+				MetaType::SQL_APPLICATION_NAME,
+				sqlContext.isSetApplicationName() ?
+				makeString(alloc, sqlContext.getApplicationName()) : ValueUtils::makeNull());
 
 			builder.set(
 					MetaType::SQL_SQL,
-					makeString(alloc, sqlContext.getQuery()));
+					sqlContext.isSetQuery() ?  makeString(alloc, sqlContext.getQuery()) : ValueUtils::makeNull());
+
 			builder.set(
 					MetaType::SQL_QUERY_ID,
 					makeString(alloc, sqlContext.getId().dump(alloc).c_str()));
 
+			JobId currentJobId;
+			execution->getContext().getCurrentJobId(currentJobId);
+
 			builder.set(
 					MetaType::SQL_JOB_ID,
-					ValueUtils::makeNull());
+				currentJobId.isValid() ? makeString(alloc, currentJobId.dump(alloc).c_str())
+				: ValueUtils::makeNull());
+
+			builder.set(
+				MetaType::SQL_USER_NAME,
+				!sqlContext.getUserName().empty() ?
+				makeString(alloc, sqlContext.getUserName().c_str()) :
+				ValueUtils::makeNull());
+
 			getContext().getRowHandler()(txn, builder.build());
 		}
 	}
-	JobManager *jobManager
-			= getContext().getSource().sqlExecutionManager_->getJobManager();
+	JobManager *jobManager = getContext().getSource().sqlExecutionManager_->getJobManager();
 	util::Vector<JobId> jobIdList(alloc);
 	jobManager->getCurrentJobList(jobIdList);
 
@@ -3326,9 +3597,14 @@ void MetaProcessor::SQLHandler::operator()(
 		JobManager::Latch latch(jobIdList[pos], "MetaProcessor::SQLHandler::operator()", jobManager);
 		Job *job = latch.get();
 		if (job) {
+			DatabaseId currentDbId = job->getDbId();
+			if (!isAdministrator && currentDbId != dbId) {
+				continue;
+			}
+
 			builder.set(
-					MetaType::SQL_DATABASE_NAME,
-					ValueUtils::makeNull());
+				MetaType::SQL_DATABASE_NAME,
+				makeString(alloc, job->getDbName()));
 
 			builder.set(
 				MetaType::SQL_NODE_ADDRESS,
@@ -3345,6 +3621,7 @@ void MetaProcessor::SQLHandler::operator()(
 
 			builder.set(
 					MetaType::SQL_APPLICATION_NAME,
+					job->getAppName() ? makeString(alloc, job->getAppName()) :
 					ValueUtils::makeNull());
 
 			builder.set(
@@ -3358,6 +3635,11 @@ void MetaProcessor::SQLHandler::operator()(
 					MetaType::SQL_JOB_ID,
 					makeString(alloc, jobIdList[pos].dump(alloc, false).c_str()));
 
+			builder.set(
+				MetaType::SQL_USER_NAME,
+				job->getUserName() ? makeString(alloc, job->getUserName()) :
+				ValueUtils::makeNull());
+
 			getContext().getRowHandler()(txn, builder.build());
 		}
 	}
@@ -3370,14 +3652,14 @@ MetaProcessor::PartitionStatsHandler::PartitionStatsHandler(Context &cxt) :
 
 void MetaProcessor::PartitionStatsHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
-		ContainerAttribute attribute, BaseContainer &container) const {
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+
 	if (attribute != CONTAINER_ATTR_SUB) {
 		getContext().stepContainerListing(id);
 		return;
 	}
-
-	ValueListBuilder<MetaType::PartitionStatsMeta> builder(
-			getContext().getValueListSource());
+	BaseContainer& container = getBaseContainer(targetContainer);
+	ValueListBuilder<MetaType::PartitionStatsMeta> builder(getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
 	builder.set(
@@ -3423,9 +3705,6 @@ void MetaProcessor::PartitionStatsHandler::operator()(
 
 	getContext().stepContainerListing(id);
 }
-
-
-
 
 
 MetaProcessor::KeyRefHandler::KeyRefHandler(
@@ -3810,4 +4089,272 @@ MetaContainer* MetaStore::getContainer(
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	return ALLOC_NEW(alloc) MetaContainer(
 			txn, &dataStore_, dbId, id, containerNamingType, columnNamingType);
+}
+
+MetaProcessor::DatabaseStatsHandler::DatabaseStatsHandler(Context& cxt) :
+	StoreCoreHandler(cxt) {
+}
+
+void MetaProcessor::DatabaseStatsHandler::operator()(
+	TransactionContext& txn, ContainerId id, DatabaseId dbId,
+	ContainerAttribute attribute, BaseContainer*  targetContainer) const {
+
+	ValueListBuilder<MetaType::DatabaseStatsMeta> builder(getContext().getValueListSource());
+	util::StackAllocator& alloc = txn.getDefaultAllocator();
+	DatabaseManager& dbManager = getContext().getSource().transactionManager_->getDatabaseManager();
+	bool isAdministrator = enableAdministratorScan();
+	PartitionTable* pt = getContext().getSource().partitionTable_;
+	NodeAddress& address = pt->getNodeAddress(0, SYSTEM_SERVICE);
+
+	DatabaseId specifiedDbId = dbId;
+	if (isAdministrator) {
+		specifiedDbId = UNDEF_DBID;
+	}
+
+	DatabaseStatsMap statsMapScope(alloc);
+	util::Map<DatabaseId, DatabaseStats*>& statsMap = statsMapScope.get();
+
+	dbManager.getStats(alloc, statsMap);
+
+	EventEngine* eeList[] = {
+		getContext().getSource().transactionService_->getEE(),
+		getContext().getSource().sqlService_->getEE(),
+		NULL
+	};
+
+	int32_t ssPos = 0;
+	for (EventEngine** eeIt = eeList; *eeIt != NULL; ++eeIt, ssPos++) {
+		typedef EventEngine::SocketInfo Info;
+		typedef EventEngine::SocketStats Stats;
+		typedef util::Vector< std::pair<Info, Stats> > StatsList;
+
+		EventEngine& ee = **eeIt;
+
+		StatsList statsList(alloc);
+		ee.getSocketStats(statsList);
+		for (StatsList::const_iterator it = statsList.begin();
+			it != statsList.end(); ++it) {
+			const NodeDescriptor& nd = it->first.nd_;
+			const Stats& stats = it->second;
+			if (!nd.isEmpty() && nd.getType() == NodeDescriptor::ND_TYPE_CLIENT) {
+				const StatementHandler::ConnectionOption& connOption = nd.getUserData<StatementHandler::ConnectionOption>();
+				DatabaseId currentDbId = connOption.dbId_;
+				if (isAdministrator || (specifiedDbId == currentDbId)) {
+					auto stats = statsMap.find(currentDbId);
+					if (stats == statsMap.end()) {
+						statsMap[currentDbId] = ALLOC_NEW(alloc) DatabaseStats;
+					}
+					if (ssPos == 0) {
+						statsMap[currentDbId]->connectionStats_.nosqlConnectionCount_++;
+					}
+					else {
+						statsMap[currentDbId]->connectionStats_.sqlConnectionCount_++;
+					}
+				}
+			}
+		}
+	}
+
+	EventMonitor& monitor = getContext().getSource().transactionManager_->getEventMonitor();
+	for (size_t pos = 0; pos < monitor.eventInfoList_.size(); pos++) {
+		EventMonitor::EventInfo& eventInfo = monitor.eventInfoList_[pos];
+		EventType eventType = eventInfo.eventType_;
+		DatabaseId currentDbId = eventInfo.dbId_;
+		bool clientRequest = eventInfo.clientRequest_;
+		if (eventInfo.eventType_ != UNDEF_EVENT_TYPE && currentDbId != UNDEF_DBID && clientRequest) {
+			if (!isAdministrator && currentDbId != dbId) {
+				continue;
+			}
+			auto stats = statsMap.find(currentDbId);
+			if (stats == statsMap.end()) {
+				statsMap[currentDbId] = ALLOC_NEW(alloc) DatabaseStats;
+			}
+			statsMap[currentDbId]->connectionStats_.nosqlRequestCount_++;
+		}
+	}
+
+	SQLExecutionManager* executionManager = getContext().getSource().sqlExecutionManager_;
+	executionManager->getDatabaseStats(alloc, specifiedDbId, statsMap, isAdministrator);
+
+	JobManager* jobManager = executionManager->getJobManager();
+	jobManager->getDatabaseStats(alloc, specifiedDbId, statsMap, isAdministrator);
+
+	const uint32_t chunkSize = PartitionList::Config::getChunkSize(*jobManager->getExecutionManager()->getManagerSet()->config_);
+
+	LocalTempStore& store = jobManager->getStore();
+	const uint32_t sqlTmpBlockSize = store.getDefaultBlockSize();
+	
+	for (auto& dbInfo : statsMap) {
+		DatabaseStats& stats = *dbInfo.second;
+		DatabaseId currentDbId = dbInfo.first;
+		if (currentDbId == GS_SYSTEM_DB_ID) continue;
+
+		if (!isAdministrator && currentDbId != dbId) {
+			continue;
+		}
+
+		builder.set(
+			MetaType::DATABASE_STATS_DATABASE_ID,
+			ValueUtils::makeLong(dbInfo.first));
+
+		builder.set(
+			MetaType::DATABASE_STATS_NODE_ADDRESS,
+			makeString(alloc, address.dump(false).c_str()));
+
+		builder.set(
+			MetaType::DATABASE_STATS_NODE_PORT,
+			ValueUtils::makeInteger(address.port_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_TRANSACTION_CONNECTION_COUNT,
+			ValueUtils::makeLong(stats.connectionStats_.nosqlConnectionCount_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_TRANSACTION_REQUEST_COUNT,
+			ValueUtils::makeLong(stats.connectionStats_.nosqlRequestCount_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_CONNECTION_COUNT,
+			ValueUtils::makeLong(stats.connectionStats_.sqlConnectionCount_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_REQUEST_COUNT,
+			ValueUtils::makeLong(stats.connectionStats_.sqlRequestCount_));
+
+		int64_t storeMemory = (chunkSize * stats.chunkStats_.table_(
+			ChunkGroupStats::GROUP_STAT_USE_BLOCK_COUNT).get());
+		builder.set(
+			MetaType::DATABASE_STATS_STORE_BLOCK_SIZE,
+			ValueUtils::makeLong(storeMemory));
+
+		int64_t storeBuffer = (chunkSize * stats.chunkStats_.table_(
+			ChunkGroupStats::GROUP_STAT_USE_BUFFER_COUNT).get());
+		builder.set(
+			MetaType::DATABASE_STATS_STORE_MEMORY_SIZE,
+			ValueUtils::makeLong(storeBuffer));
+
+		int64_t storeSwapReadSize = (chunkSize * stats.chunkStats_.table_(
+			ChunkGroupStats::GROUP_STAT_SWAP_READ_COUNT).get());
+		builder.set(
+			MetaType::DATABASE_STATS_STORE_SWAP_READ_SIZE,
+			ValueUtils::makeLong(storeSwapReadSize));
+
+		int64_t storeSwapWriteSize = (chunkSize * stats.chunkStats_.table_(
+			ChunkGroupStats::GROUP_STAT_SWAP_WRITE_COUNT).get());
+		builder.set(
+			MetaType::DATABASE_STATS_STORE_SWAP_WRITE_SIZE,
+			ValueUtils::makeLong(storeSwapWriteSize));
+
+		int64_t sqlWorkMemory = (stats.jobStats_.allocateMemorySize_);
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_WORK_MEMORY_SIZE,
+			ValueUtils::makeLong(sqlWorkMemory));
+
+		int64_t sqlStoreMemory = (sqlTmpBlockSize * stats.jobStats_.sqlStoreSize_);
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_STORE_MEMORY_SIZE,
+			ValueUtils::makeLong(sqlStoreMemory));
+
+		int64_t sqlStoreSwapReadSize = (sqlTmpBlockSize * stats.jobStats_.sqlStoreSwapReadSize_);
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_STORE_SWAP_READ_SIZE,
+			ValueUtils::makeLong(sqlStoreSwapReadSize));
+
+		int64_t sqlStoreSwapWriteSize = (sqlTmpBlockSize * stats.jobStats_.sqlStoreSwapWriteSize_);
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE,
+			ValueUtils::makeLong(sqlStoreSwapWriteSize));
+
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_TASK_COUNT,
+			ValueUtils::makeLong(stats.jobStats_.taskCount_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_PENDING_JOB_COUNT,
+			ValueUtils::makeLong(stats.jobStats_.pendingJobCount_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_SEND_MESSAGE_SIZE,
+			ValueUtils::makeLong(stats.jobStats_.pendingJobCount_));
+
+		getContext().getRowHandler()(txn, builder.build());
+	}
+}
+
+MetaProcessor::DatabaseHandler::DatabaseHandler(Context& cxt) :
+	StoreCoreHandler(cxt) {
+}
+
+void MetaProcessor::DatabaseHandler::operator()(
+	TransactionContext& txn, ContainerId id, DatabaseId dbId,
+	ContainerAttribute attribute, BaseContainer* targetContainer) const {
+
+	util::StackAllocator& alloc = txn.getDefaultAllocator();
+	PartitionId pId = txn.getPartitionId();
+	PartitionTable* pt = getContext().getSource().partitionTable_;
+	if (pId != 0 || !pt->isOwner(0)) return;
+	BaseContainer& container = getBaseContainer(targetContainer);
+	TransactionManager* transactionManager = getContext().getSource().transactionManager_;
+	ClusterService* clusterService = getContext().getSource().sqlService_->getClusterService();
+	util::TimeZone timeZone;
+
+	const TransactionManager::ContextSource src(UNDEF_EVENT_TYPE,
+		UNDEF_STATEMENTID, UNDEF_CONTAINERID,
+		TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
+		TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+		false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
+
+	TransactionContext& tmpTxn = transactionManager->put(
+		alloc, 0, TXN_EMPTY_CLIENTID, src, 0, 0);
+	const FullContainerKey containerKey(
+		alloc, KeyConstraint::getNoLimitKeyConstraint(), GS_SYSTEM_DB_ID,
+		GS_DATABASES, static_cast<uint32_t>(strlen(GS_DATABASES)));
+	bool isCaseSensitive = false;
+
+	Partition &partition = getContext().getSource().sqlExecutionManager_->getManagerSet()->partitionList_->partition(0);
+	DataStoreV4* dataStore = static_cast<DataStoreV4*>(&partition.dataStore());
+	KeyDataStoreValue keyStoreValue = dataStore->getKeyDataStore()->get(tmpTxn,
+		containerKey, isCaseSensitive);
+	DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
+	DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(dataStore->exec(&tmpTxn, &keyStoreValue, &input));
+	BaseContainer* dbContainer = ret->container_;
+	util::Vector<DatabaseId> dbIdList(alloc);
+	util::XArray<StatementHandler::DatabaseInfo*> dbInfoList(alloc);
+	if (dbContainer) {
+		const DataStoreBase::Scope dsScope(&tmpTxn, dataStore, clusterService);
+		ResultSet* rs = dataStore->getResultSetManager()->create(
+			txn, dbContainer->getContainerId(), dbContainer->getVersionId(), 0, NULL);
+		const ResultSetGuard rsGuard(tmpTxn, *dataStore, *rs);
+
+		util::NormalOStringStream queryStr;
+		queryStr << "select *";
+		util::String query(queryStr.str().c_str(), alloc);
+
+		QueryProcessor::executeTQL(
+			tmpTxn, *dbContainer, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
+		rs->setResultType(RESULT_ROWSET);
+		DbUserHandler::makeDatabaseInfoList(dataStore->getConfig(), tmpTxn, alloc, *dbContainer, *rs, dbInfoList, &dbIdList);
+	}
+	dbInfoList.push_back(ALLOC_NEW(alloc) StatementHandler:: DatabaseInfo(alloc));
+	dbInfoList.back()->dbName_ = GS_PUBLIC;
+	dbIdList.push_back(GS_PUBLIC_DB_ID);
+
+	ValueListBuilder<MetaType::DatabaseMeta> builder(getContext().getValueListSource());
+	bool isAdminiStrator = getContext().getSource().isAdministrator_;
+
+	for (size_t pos = 0; pos < dbInfoList.size(); pos++) {
+		if (!isAdminiStrator &&  dbIdList[pos] != dbId) {
+			continue;
+		}
+
+		builder.set(
+			MetaType::DATABASE_DATABASE_ID,
+			ValueUtils::makeLong(dbIdList[pos]));
+
+		builder.set(
+			MetaType::DATABASE_DATABASE_NAME,
+			makeString(alloc,  dbInfoList[pos]->dbName_.c_str()));
+
+		getContext().getRowHandler()(txn, builder.build());
+	}
 }

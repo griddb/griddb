@@ -21,6 +21,23 @@
 #include "base_index.h"
 #include "schema.h"
 
+BaseIndex::SearchContextPool::SearchContextPool(
+		util::StackAllocator &alloc, util::StackAllocator &settingAlloc) :
+		condValuePool_(alloc),
+		indexData_(createIndexData(alloc)),
+		settingAlloc_(settingAlloc) {
+}
+
+IndexData& BaseIndex::SearchContextPool::createIndexData(
+		util::StackAllocator &alloc) {
+	IndexData *indexData = ALLOC_NEW(alloc) IndexData(alloc);
+	return *indexData;
+}
+
+void BaseIndex::SearchContextPool::clearIndexData(IndexData &indexData) {
+	indexData.clear();
+}
+
 void BaseIndex::SearchContext::getConditionList(
 	util::Vector<TermCondition> &condList, ConditionType condType) {
 	util::Vector<size_t>::iterator itr;
@@ -109,7 +126,6 @@ void BaseIndex::SearchContext::copy(util::StackAllocator &alloc, SearchContext &
 	dest.setSuspendRowId(suspendRowId_);
 }
 
-
 std::string BaseIndex::SearchContext::dump() {
 	util::NormalOStringStream strstrm;
 	strstrm << "\"BaseIndex_SearchContext\" : {";
@@ -176,9 +192,13 @@ BaseIndex::Setting::Setting(ColumnType keyType, bool isCaseSensitive, TreeFuncIn
 	}
 }
 
-void BaseIndex::Setting::initialize(util::StackAllocator &alloc, SearchContext &sc,
-	OutputOrder outputOrder)
-{
+void BaseIndex::Setting::initialize(
+		util::StackAllocator &alloc, SearchContext &sc,
+		OutputOrder outputOrder, bool *initializedForNext) {
+	if (initializedForNext != NULL) {
+		*initializedForNext = false;
+	}
+
 	const size_t UNDEF_POS = SIZE_MAX;
 	ColumnSchema *columnSchema = funcInfo_ != NULL ? funcInfo_->getColumnSchema() : NULL;
 	if (columnSchema == NULL || columnSchema->getColumnNum() == 1) {
@@ -198,6 +218,7 @@ void BaseIndex::Setting::initialize(util::StackAllocator &alloc, SearchContext &
 				assert(false);
 			}
 		}
+		bool arranged = false;
 		if (sc.getSuspendKey() != NULL) {
 			if (startCondition_ != NULL && startCondition_->opType_ == DSExpression::EQ) {
 			} else {
@@ -212,7 +233,11 @@ void BaseIndex::Setting::initialize(util::StackAllocator &alloc, SearchContext &
 						DSExpression::LE, sc.getScColumnId(),
 						sc.getSuspendKey(), sc.getSuspendKeySize());
 				}
+				arranged = true;
 			}
+		}
+		if (!arranged && initializedForNext != NULL) {
+			*initializedForNext = true;
 		}
 	} else {
 		TermCondition *restartCond = NULL;

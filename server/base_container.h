@@ -69,52 +69,54 @@ public:
 
 	class ValueMap {
 	public:
-		ValueMap(TransactionContext &txn, BaseContainer *container, IndexData &indexData)
-			: container_(container), valueMap_(NULL), nullMap_(NULL),
-			alloc_(txn.getDefaultAllocator()), indexData_(indexData) {
+		ValueMap(
+				TransactionContext &txn, BaseContainer *container,
+				IndexData &indexData) :
+				container_(container),
+				alloc_(txn.getDefaultAllocator()),
+				indexData_(indexData) {
 		}
-		~ValueMap() {
-			ALLOC_DELETE((alloc_), valueMap_);
-			ALLOC_DELETE((alloc_), nullMap_);
-		}
+
 		BaseIndex *getValueMap(TransactionContext &txn, bool forNull) {
 			if (forNull) {
-				if (nullMap_ == NULL) {
-					nullMap_ = container_->getIndex(txn, indexData_, forNull);
+				if (nullMap_.get() == NULL) {
+					container_->getIndex(txn, indexData_, forNull, nullMap_);
 				}
-				return nullMap_;
-			} else {
-				if (valueMap_ == NULL) {
-					valueMap_ = container_->getIndex(txn, indexData_, forNull);
+				return nullMap_.get();
+			}
+			else {
+				if (valueMap_.get() == NULL) {
+					container_->getIndex(txn, indexData_, forNull, valueMap_);
 				}
-				assert(valueMap_ != NULL);
-				return valueMap_;
+				assert(valueMap_.get() != NULL);
+				return valueMap_.get();
 			}
 		};
 		BaseIndex *putValueMap(TransactionContext &txn, bool forNull) {
 			if (forNull) {
-				if (nullMap_ == NULL) {
+				if (nullMap_.get() == NULL) {
 					if (indexData_.oIds_.nullOId_ == UNDEF_OID) {
 						container_->createNullIndexData(txn, indexData_);
 					}
-					nullMap_ = container_->getIndex(txn, indexData_, forNull);
+					container_->getIndex(txn, indexData_, forNull, nullMap_);
 				}
-				assert(nullMap_ != NULL);
-				return nullMap_;
-			} else {
-				if (valueMap_ == NULL) {
-					valueMap_ = container_->getIndex(txn, indexData_, forNull);
+				assert(nullMap_.get() != NULL);
+				return nullMap_.get();
+			}
+			else {
+				if (valueMap_.get() == NULL) {
+					container_->getIndex(txn, indexData_, forNull, valueMap_);
 				}
-				assert(valueMap_ != NULL);
-				return valueMap_;
+				assert(valueMap_.get() != NULL);
+				return valueMap_.get();
 			}
 		};
 		void updateIndexData(TransactionContext &txn) {
-			if (valueMap_ != NULL) {
-				indexData_.oIds_.mainOId_ = valueMap_->getBaseOId();
+			if (valueMap_.get() != NULL) {
+				indexData_.oIds_.mainOId_ = valueMap_.get()->getBaseOId();
 			}
-			if (nullMap_ != NULL) {
-				indexData_.oIds_.nullOId_ = nullMap_->getBaseOId();
+			if (nullMap_.get() != NULL) {
+				indexData_.oIds_.nullOId_ = nullMap_.get()->getBaseOId();
 			}
 			container_->updateIndexData(txn, indexData_);
 		}
@@ -129,8 +131,8 @@ public:
 		}
 	private:
 		BaseContainer *container_;
-		BaseIndex *valueMap_;
-		BaseIndex *nullMap_;
+		IndexAutoPtr valueMap_;
+		IndexAutoPtr nullMap_;
 		util::StackAllocator &alloc_;
 		IndexData &indexData_;
 	};
@@ -920,21 +922,10 @@ protected:
 
 	void putRowList(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowData, uint64_t numRow, PutStatus &status);
-	BaseIndex *getIndex(
-		TransactionContext &txn, const IndexData &indexData, bool forNull = false) {
-		return indexSchema_->getIndex(txn, indexData, forNull, this);
-	}
-
-	BaseIndex *getIndex(
-		TransactionContext &txn, MapType mapType, util::Vector<ColumnId> &columnIds, bool forNull = false) {
-		bool withUncommitted = true;
-		IndexData indexData(txn.getDefaultAllocator());
-		if (getIndexData(txn, columnIds, mapType, withUncommitted, indexData)) {
-			return getIndex(txn, indexData, forNull);
-		}
-		else {
-			return NULL;
-		}
+	void getIndex(
+			TransactionContext &txn, const IndexData &indexData, bool forNull,
+			IndexAutoPtr &indexPtr) {
+		return indexSchema_->getIndex(txn, indexData, forNull, this, indexPtr);
 	}
 
 	BtreeMap *getRowIdMap(TransactionContext &txn) const {
@@ -944,10 +935,23 @@ protected:
 				NULL, rowIdFuncInfo_);
 	}
 
-	BtreeMap *getMvccMap(TransactionContext &txn) const {
-		return ALLOC_NEW(txn.getDefaultAllocator())
-			BtreeMap(txn, *getObjectManager(), baseContainerImage_->mvccMapOId_,
-				*const_cast<AllocateStrategy*>(&mapAllocateStrategy_), NULL, mvccFuncInfo_);
+	void getMvccMap(
+			TransactionContext &txn, const IndexData &indexData,
+			BaseIndexStorage::AutoPtr<BtreeMap> &mvccMap) const {
+		IndexStorageSet *storageSet = indexData.storageSet_;
+		assert(storageSet != NULL);
+
+		BaseIndexStorage *&indexStorage = storageSet->mvccIndexStorage_;
+		mvccMap.initialize(indexStorage, getMvccMap(txn, &indexStorage));
+	}
+
+	BtreeMap* getMvccMap(
+			TransactionContext &txn, BaseIndexStorage **indexStorage = NULL) const {
+		return BaseIndexStorage::create<BtreeMap>(
+				txn, *getObjectManager(), MAP_TYPE_BTREE,
+				baseContainerImage_->mvccMapOId_,
+				*const_cast<AllocateStrategy*>(&mapAllocateStrategy_), NULL,
+				mvccFuncInfo_, indexStorage);
 	}
 
 	void setCreateRowId(TransactionContext &txn, RowId rowId);
@@ -1247,6 +1251,9 @@ protected:
 
 	virtual void lockIdList(TransactionContext &txn, util::XArray<OId> &oIdList,
 		util::XArray<RowId> &idList) = 0;
+
+	static bool hasTermConditionUpdator(BtreeMap::SearchContext &sc);
+	static bool hasTermConditionUpdator(RtreeMap::SearchContext &sc);
 };
 
 /*!

@@ -41,6 +41,7 @@ struct DataStoreConfig;
 
 template <class L> class LogManager;
 class TransactionManager;
+class ResultSetManager;
 class ClusterService;
 class TransactionContext;
 class KeyDataStoreValue;
@@ -205,6 +206,7 @@ private:
 	util::StackAllocator chunkStackAlloc_;
 	DataStoreBase* dataStore_;
 	DataStoreBase* keyStore_;
+	UTIL_UNIQUE_PTR<ResultSetManager> rsManager_;
 
 	LogManager<MutexLocker>* defaultLogManager_;
 	FixedMemoryPool logMemoryPool_;
@@ -289,7 +291,7 @@ public:
 	void endCheckpoint(EndCheckpointMode x);
 	LogIterator<MutexLocker> endCheckpointPrepareRelaseBlock();
 	void endCheckpointReleaseBlock(const Log* log);
-	void removeLogFiles();
+	void removeLogFiles(int32_t range);
 	int64_t postCheckpoint(
 			int32_t mode, UtilBitmap& bitmap, const std::string& path,
 			bool enableDuplicateLog, bool skipBaseLine);
@@ -353,9 +355,9 @@ struct PartitionListStats;
 */
 class PartitionList {
 public:
-	static const int32_t INITIAL_X_WAL_BUFFER_SIZE = 256 * 1024;
-	static const int32_t INITIAL_CP_WAL_BUFFER_SIZE = 4 * 1024;
-	static const int32_t INITIAL_AFFINITY_MANAGER_SIZE = 1024;
+	static const int32_t INITIAL_X_WAL_BUFFER_SIZE;
+	static const int32_t INITIAL_CP_WAL_BUFFER_SIZE;
+	static const int32_t INITIAL_AFFINITY_MANAGER_SIZE;
 	static const std::string CLUSTER_SNAPSHOT_INFO_FILE_NAME;
 
 	PartitionList(::ConfigTable& config, TransactionManager* txnMgr,
@@ -554,6 +556,7 @@ class PartitionListStats::SetUpHandler : public StatTable::SetUpHandler {
 	@brief データストア取得
 */
 inline DataStoreBase& Partition::dataStore() {
+	assert(isActive() && dataStore_ != NULL);
 	return *dataStore_;
 }
 
@@ -561,6 +564,7 @@ inline DataStoreBase& Partition::dataStore() {
 	@brief キーストア取得
 */
 inline DataStoreBase& Partition::keyStore() {
+	assert(keyStore_ != NULL);
 	return *keyStore_;
 }
 
@@ -568,12 +572,14 @@ inline DataStoreBase& Partition::keyStore() {
 	@brief ログマネージャ取得
 */
 inline LogManager<MutexLocker>& Partition::logManager() {
+	assert(defaultLogManager_ != NULL);
 	return *defaultLogManager_;
 }
 /*!
 	@brief チャンクマネージャ取得
 */
 inline ChunkManager& Partition::chunkManager() {
+	assert(chunkManager_ != NULL);
 	return *chunkManager_;
 }
 

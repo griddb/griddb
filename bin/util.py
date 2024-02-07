@@ -19,7 +19,7 @@ from typing import Optional
 def checkserver(option, opt_str, value, parser):
     m = re.match(r"^([^:]+?)(?::(\d+))?$", value)
     if m is None:
-        raise OptionValueError("A00001: If you use %s option, specify HOST or HOST:PORT style." % opt_str)
+        raise OptionValueError("A00001: Specify %s option in the format HOST:PORT." % opt_str)
     parser.values.server = m.group(1)
     if m.group(2) is not None:
         parser.values.port = m.group(2)
@@ -27,7 +27,7 @@ def checkserver(option, opt_str, value, parser):
 def checkuser(option, opt_str, value, parser):
     m = re.match(r"(.+?)/(.+)$", value)
     if m is None:
-        raise OptionValueError("A00002: If you use %s option, specify USER/PASS style." % opt_str)
+        raise OptionValueError("A00002: Specify %s option in the format USER/PASS." % opt_str)
     parser.values.username = m.group(1)
     parser.values.password = m.group(2)
 
@@ -36,14 +36,14 @@ CLIENT_OPTIONS_USAGE = "[-s HOST[:PORT] | -p PORT] -u USER/PASS"
 def add_client_options(parser):
     parser.add_option("-s", "--server", metavar="HOST[:PORT]", type="string",
                       action="callback", callback=checkserver,
-                      help='host name or IP address with port number ' +
-                           '(default value is 127.0.0.1:10040)')
+                      help='The host name  or the server name (address) and port number.' +
+                           'The value "localhost (127.0.0.1):10040" is used by default.')
     parser.add_option("-p", "--port", type="int", dest="port",
-                      help='port number (default value is 10040)')
+                      help='The server port number (The value 10040 is used by default.)')
     parser.set_defaults(server="127.0.0.1", port="10040")
     parser.add_option("-u", "--user", metavar="USER/PASS", type="string",
                       action="callback", callback=checkuser,
-                      help='user name and password')
+                      help='Specify the user and password.')
     parser.set_defaults(username=None, password=None)
             
 def request_rest(method, path, data, options, log):
@@ -63,12 +63,12 @@ def request_rest(method, path, data, options, log):
     urllib.request.install_opener(opener)
     
     httperr_msg_dict = {
-        100: "A01100: Specified cluster name is wrong.",
-        101: "A01101: Specified cluster name is wrong.",
-        102: "A01101: Specified cluster name is wrong.",
-        204: "A30124: Shutdown is already in progress.",
-        205: "A30125: You can't use both modes.",
-        400: "A01102: You can't execute the command because during recovery."
+        100: "A01100: The specified cluster name is invalid..",
+        101: "A01101: The specified cluster name is invalid.",
+        102: "A01101: The specified cluster name is invalid.",
+        204: "A30124: Shutdown process is already running.",
+        205: "A30125: The modes cannot be specify at same time.",
+        400: "A01102: The request cannot be executed in recovery processing."
     }
 
     try:
@@ -100,30 +100,30 @@ def request_rest(method, path, data, options, log):
                     err_reason = res_json.get("reason")
                     err_message = httperr_msg_dict.get(err_status)
             if err_message is None:
-                err_message = "A00100: Failed request."
+                err_message = "A00100: Request error occurred."
             print(err_message)
             # log.error(str(e) + " status: " + str(err_status) + " reason: " + err_reason)
             log.error(str(e) + " reason: " + str(err_reason))
         elif e.code == 401:
             if hasattr(options, "silent"):
-                print("A00101: Stops without wait, because authentication error occurred.")
+                print("A00101: Authentication failed, and suspended to wait.")
                 return (None, e.code)
-            print("A00102: Authentication error occurred.")
-            print("Confirm user name and password.")
+            print("A00102: Authentication failed.")
+            print("Check the username and password.")
             log.error(str(e))
         elif e.code == 403 or e.code == 503:
-            print("A00110: Confirm network setting. (" + str(e) + ")")
+            print("A00110: Check the network setting. (" + str(e) + ")")
             log.error(str(e))
         else:
-            print("A00103: Error occurred (" + str(e) + ").")
+            print("A00103: The error occurred. (" + str(e) + ")")
             log.error(str(e))
         return (None, e.code)
 
     except urllib.error.URLError as e:
         if hasattr(options, "silent"):
             return (None, 0)
-        print("A00104: Failed to connect node. (node="+options.server+":"+str(options.port)+")")
-        print("Confirm node is started.")
+        print("A00104: Failed to connect to the GridDB node.(node="+options.server+":"+str(options.port)+")")
+        print("Check the node status.")
         print("URLError", e)
         log.error("URLError " + str(e)+ " (node="+options.server+":"+str(options.port)+")")
         return (None, 0)
@@ -144,7 +144,7 @@ def check_variables():
     if "GS_LOG" not in os.environ:
         err_envs.append("GS_LOG")
     if err_envs:
-        print("A00105: %s environment variable not set." % ", ".join(err_envs))
+        print("A00105: Specify an environment variable for the operating commands. (%s)" % ", ".join(err_envs))
         return True
 
     homedir = os.environ["GS_HOME"]
@@ -155,7 +155,7 @@ def check_variables():
     if not os.path.exists(logdir):
         err_envs.append("GS_LOG")
     if err_envs:
-        print("A00106: Directory of %s environment variable does not exist." % ", ".join(err_envs))
+        print("A00106: Specify an environment variable for the operating commands. (%s)" % ", ".join(err_envs))
         return True
 
     return False
@@ -340,9 +340,9 @@ def wait_error_case(e,log,msg):
     if e == 0:
         print(msg)
     if e == 1:
-        print("\nA00107: Confirm node status.")
+        print("\nA00107: Check the status of the node.")
     if e == 2:
-        print("\nA00108: Timeout occurred. Confirm node status.")
+        print("\nA00108: Timeout expired. Check the status of the node.")
         log.error("TimeoutError")
         
 addr_type_list = ["system", "cluster", "transaction", "sync"]
@@ -353,7 +353,7 @@ def check_addr_type(option, opt_str, value, parser):
         parser.values.addr_type = value
         return 0
     else:
-        print("A00109: The value of address-type option must be %s. (" % "/".join(map(str, addr_type_list)) +opt_str+"="+value+")") 
+        print("A00109: The %s can be specified to address type. " % "/".join(map(str, addr_type_list)) +opt_str+"="+value+")") 
         sys.exit(2)
 
 def write_pidfile(pidfile):
@@ -364,6 +364,23 @@ def write_pidfile(pidfile):
         return True
     finally:
         fp.close()
+
+
+# Get /node/stat/checkpoint
+def get_cp_stats(options,log):
+    (res, code) = request_rest("GET", "/node/stat", None, options, log)
+    if res is None:
+        return None
+    nodestat = json.loads(res)
+    return nodestat.get("checkpoint")
+
+# Wait for some cp operation to complete
+def is_cp_completed(options, log, cp_type, cp_count):
+    cp_stats = get_cp_stats(options, log)
+    latest_cp_count = cp_stats.get(cp_type)
+    return latest_cp_count > cp_count
+
+
 
 def bytesToStr(value) -> Optional[str]:
     rval = value

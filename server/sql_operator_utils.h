@@ -32,6 +32,7 @@ class TransactionService;
 class ClusterService;
 class PartitionTable;
 class PartitionList;
+struct DataStoreConfig;
 class ResourceSet {
 public:
 	virtual SQLService* getSQLService() const = 0;
@@ -39,8 +40,8 @@ public:
 	virtual TransactionService* getTransactionService() const = 0;
 	virtual ClusterService* getClusterService() const = 0;
 	virtual PartitionTable* getPartitionTable() const = 0;
-	virtual DataStoreV4* getDataStore() const = 0;
 	virtual PartitionList* getPartitionList() const = 0;
+	virtual const DataStoreConfig* getDataStoreConfig() const = 0;
 };
 
 struct SQLOpUtils {
@@ -78,6 +79,7 @@ struct SQLOpUtils {
 	struct AnalysisOptimizationInfo;
 	struct AnalysisIndexCondition;
 	struct AnalysisIndexInfo;
+	struct AnalysisPartialInfo;
 
 	class CustomOpProjectionRegistrar;
 	template<bool Enabled> class ConditionalVarContextScope;
@@ -101,7 +103,7 @@ public:
 
 	virtual bool isOnTransactionService() = 0;
 	virtual double getStoreMemoryAgingSwapRate() = 0;
-
+	virtual bool isAdministrator() = 0;
 	virtual uint32_t getTotalWorkerId() = 0;
 };
 
@@ -127,9 +129,9 @@ public:
 	static void applyJoinTypeTo(
 			SQLType::JoinType type, SQLExprs::ExprFactoryContext &cxt);
 
-	OpConfig& createConfig();
+	OpConfig& createConfig(const OpConfig *src = NULL);
 
-	ContainerLocation& createContainerLocation();
+	ContainerLocation& createContainerLocation(const ContainerLocation &src);
 	SQLExprs::IndexConditionList& createIndexConditionList();
 
 	SQLValues::CompColumnList& createCompColumnList();
@@ -183,6 +185,8 @@ public:
 			OpCode &code, bool withFilter, bool withLimit,
 			Projection **distinctProj);
 	SQLExprs::Expression& arrangePredicate(const SQLExprs::Expression &src);
+
+	void replaceColumnToConstExpr(Projection &proj);
 
 	const SQLExprs::Expression* extractJoinKeyColumns(
 			const SQLExprs::Expression *srcExpr,
@@ -483,6 +487,72 @@ private:
 	OpLatchKeeperManager &manager_;
 };
 
+class SQLOps::OpSimulator {
+public:
+	enum PointType {
+		PONIT_INIT,
+		POINT_SCAN_MAIN,
+		POINT_SCAN_OID,
+		END_POINT
+	};
+
+	enum ActionType {
+		ACTION_INTERRUPT,
+		ACTION_INDEX_LOST,
+		ACTION_UPDATE_ROW,
+		ACTION_UPDATE_LIST_INVALID,
+		END_ACTION
+	};
+
+	struct Entry {
+		Entry();
+
+		UTIL_OBJECT_CODER_MEMBERS(
+				UTIL_OBJECT_CODER_ENUM(point_, POINT_CODER),
+				UTIL_OBJECT_CODER_ENUM(action_, ACTION_CODER),
+				param_);
+
+		PointType point_;
+		ActionType action_;
+		int64_t param_;
+	};
+
+	explicit OpSimulator(SQLValues::VarAllocator &varAlloc);
+
+	void addEntry(const Entry &entry);
+
+	static void handlePoint(OpSimulator *simulator, PointType point);
+	void handlePoint(PointType point);
+
+	bool findAction(ActionType action) const;
+	bool nextAction(ActionType action, int64_t *param, bool once);
+
+	bool nextInterruptionAction(int64_t &interval);
+
+	void acceptTupleId(int64_t tupleId);
+	bool getLastTupleId(int64_t &tupleId);
+
+private:
+	typedef std::vector< Entry, util::StdAllocator<Entry, void> > EntryList;
+
+	typedef util::NameCoderEntry<PointType> PointEntry;
+	typedef util::NameCoder<PointType, END_POINT> PointCoder;
+
+	typedef util::NameCoderEntry<ActionType> ActionEntry;
+	typedef util::NameCoder<ActionType, END_ACTION> ActionCoder;
+
+	static const PointEntry POINT_LIST[];
+	static const PointCoder POINT_CODER;
+
+	static const ActionEntry ACTION_LIST[];
+	static const ActionCoder ACTION_CODER;
+
+	EntryList inactiveList_;
+	EntryList activeList_;
+
+	int64_t lastTupleId_;
+};
+
 class SQLOps::OpProfilerId {
 private:
 	friend class OpProfiler;
@@ -525,12 +595,16 @@ public:
 
 	static AnalysisInfo getAnalysisInfo(OpProfiler *profiler, LocalInfo &src);
 	static OptimizationList* getOptimizations(LocalInfo &src);
-	static AnalysisIndexInfo getAnalysisIndexInfo(LocalIndexInfo &src);
+	static bool findAnalysisIndexInfo(
+			LocalIndexInfo &src, AnalysisIndexInfo &dest);
 
 	static uint64_t nanoTimeToMillis(uint64_t nanoTime);
 
 private:
 	LocalInfo& createInfo(SQLOpTypes::Type type);
+
+	static void reduceNoopInfo(util::AllocVector<AnalysisInfo> &subInfo);
+	static bool isNoopInfo(const AnalysisInfo &info);
 
 	util::StdAllocator<void, void> alloc_;
 	SQLValues::SharedIdManager idManager_;
@@ -592,7 +666,7 @@ public:
 	AnalysisInfo get();
 
 	OpProfilerOptimizationEntry& getOptimizationEntry();
-	OpProfilerIndexEntry& getIndexEntry();
+	OpProfilerIndexEntry& getIndexEntry(uint32_t ordinal);
 
 private:
 	util::Stopwatch executionWatch_;
@@ -622,14 +696,31 @@ private:
 
 class SQLOps::OpProfilerIndexEntry {
 	typedef OpProfiler::LocalIndexInfo LocalIndexInfo;
+	typedef OpProfiler::LocalIndexInfoList LocalIndexInfoList;
 	typedef SQLOpUtils::AnalysisIndexCondition AnalysisIndexCondition;
 	typedef SQLOpUtils::AnalysisIndexInfo AnalysisIndexInfo;
 public:
+	enum ModificationType {
+		MOD_UPDATE_ROW,
+		MOD_REMOVE_ROW,
+		MOD_REMOVE_ROW_ARRAY,
+		MOD_REMOVE_CHUNK,
+
+		END_MOD
+	};
+
+	struct Coders {
+		static const util::NameCoderEntry<ModificationType> MOD_LIST[];
+		static const util::NameCoder<ModificationType, END_MOD> MOD_CODER;
+	};
+
 	OpProfilerIndexEntry(
 			const util::StdAllocator<void, void> &alloc,
-			LocalIndexInfo *localInfo);
+			LocalIndexInfoList *localInfoList);
 
 	bool isEmpty();
+
+	void setModificationType(ModificationType modification);
 
 	const char8_t* findIndexName();
 	void setIndexName(const char8_t *name);
@@ -643,6 +734,9 @@ public:
 	void startSearch();
 	void finishSearch();
 
+	void addHitCount(int64_t count, bool onMvcc);
+
+	void updateOrdinal(uint32_t ordinal);
 	void update();
 
 private:
@@ -651,13 +745,21 @@ private:
 	OpProfilerIndexEntry(const OpProfilerIndexEntry&);
 	OpProfilerIndexEntry& operator=(const OpProfilerIndexEntry&);
 
+	LocalIndexInfo& getLocalInfo();
+
 	util::Stopwatch searchWatch_;
 	int64_t executionCount_;
 
-	LocalIndexInfo *localInfo_;
+	LocalIndexInfoList *localInfoList_;
+	uint32_t localInfoOrdinal_;
 
 	util::StdAllocator<void, void> alloc_;
 	ColumnNameMap nameMap_;
+
+	ModificationType modification_;
+	int64_t bulk_;
+	int64_t hit_;
+	int64_t mvccHit_;
 };
 
 struct SQLOpUtils::AnalysisInfo {
@@ -672,7 +774,8 @@ struct SQLOpUtils::AnalysisInfo {
 			actualTime_,
 			optimization_,
 			index_,
-			op_);
+			op_,
+			partial_);
 
 	static const util::NameCoderEntry<SQLOpTypes::Type> OP_TYPE_LIST[];
 	static const util::NameCoder<
@@ -686,6 +789,7 @@ struct SQLOpUtils::AnalysisInfo {
 	util::AllocVector<AnalysisOptimizationInfo> *optimization_;
 	util::AllocVector<AnalysisIndexInfo> *index_;
 	util::AllocVector<AnalysisInfo> *op_;
+	AnalysisPartialInfo *partial_;
 
 	uint64_t actualNanoTime_;
 };
@@ -740,20 +844,33 @@ struct SQLOpUtils::AnalysisIndexCondition {
 };
 
 struct SQLOpUtils::AnalysisIndexInfo {
+	typedef SQLOps::OpProfilerIndexEntry IndexProfiler;
+
 	AnalysisIndexInfo();
 
 	UTIL_OBJECT_CODER_MEMBERS(
+			UTIL_OBJECT_CODER_ENUM(
+					modification_, IndexProfiler::END_MOD,
+					IndexProfiler::Coders::MOD_CODER),
 			name_,
 			columnList_,
 			conditionList_,
+			UTIL_OBJECT_CODER_OPTIONAL(bulk_, 0),
 			executionCount_,
-			actualTime_);
+			actualTime_,
+			UTIL_OBJECT_CODER_OPTIONAL(hit_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(mvccHit_, 0));
 
+	IndexProfiler::ModificationType modification_;
 	util::AllocString *name_;
 	util::AllocVector<util::AllocString*> *columnList_;
 	util::AllocVector<AnalysisIndexCondition> *conditionList_;
+	int64_t bulk_;
+
 	int64_t executionCount_;
 	int64_t actualTime_;
+	int64_t hit_;
+	int64_t mvccHit_;
 };
 
 class SQLOpUtils::CustomOpProjectionRegistrar :

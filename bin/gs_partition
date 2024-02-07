@@ -1,0 +1,154 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import log
+import os
+import json
+from optparse import OptionParser, SUPPRESS_HELP
+
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
+
+#
+# Convert partitions to goal
+#
+def to_goal(partitions):
+    for p in partitions:
+        del p["status"], p["maxLsn"], p["catchup"]
+        if p.get("owner"):
+            del p["owner"]["lsn"]
+        if p.get("backup"):
+            for backup in p.get("backup"):
+                del backup["lsn"]
+    return partitions
+
+#
+# Check whether the partitions placement is the goal on master node
+#
+def is_goal(options, log):
+    method = "GET"
+    path = "/node/partition"
+    data = None
+    (res, code) = util_client.request_rest(method, path, data, options, log)
+    if res is None:
+        print("B30105: Failed to obtain partitios of the master node.")
+        return False
+    partitions = json.loads(res)
+    method = "GET"
+    path = "/cluster/loadBalance"
+    data = None
+    (res, code) = util_client.request_rest(method, path, data, options, log)
+    if res is None:
+        print("B30106: Failed to obtain goal of the master node.")
+        return False
+    goal = json.loads(res)
+    partitions = to_goal(partitions)
+    return goal == partitions
+
+parser = OptionParser(usage="%prog [-n PARTITION_ID] [--loss]" + util_client.CLIENT_OPTIONS_USAGE,
+                      description="Obtain the partition information of the GridDB node.",
+                      version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
+parser.add_option("-a", "--address-type", type="string",
+        action="callback", callback=util_client.check_addr_type, dest="addr_type",
+        help="Specify the service type of the address and the port to display.\
+                            ADDR_TYPE\
+                            system\
+                            cluster\
+                            transaction\
+                            sync")
+parser.add_option("-n", "--partitionId", dest="partition_id",
+                  type="int", default=None,
+                  help='Specify the partition ID to display the data.  ' +
+                       '(All data is displayed by default.)')
+parser.add_option("--loss", dest="loss",
+                  action="store_true", default=False,
+                  help="The missing partition data is displayed.")
+parser.add_option("--isGoal", dest="is_goal",
+                  action="store_true", default=False,
+                  help=SUPPRESS_HELP)
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("B30001: Specify a user name and a password."+" (-u USER/PASS)")
+    sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.debug("%s start." % (__file__))
+log.debug("options: %s %s" % (options, args))
+
+method = "GET"
+path = "/node/partition"
+data = {}
+
+if options.addr_type is not None:
+    data["addressType"] = options.addr_type
+
+if options.partition_id is not None:
+    data["partitionNo"] = options.partition_id
+
+if options.loss:
+    data["loss"] = "true"
+    c = util_client.is_active_cluster(options, log)
+    if c is None:
+        print("B30101: Check the status of the node.")
+        log.debug("%s end." % (__file__))
+        sys.exit(1)
+    elif not c:
+        print("B30102: The GridDB cluster does not start.")
+        log.debug("%s end." % (__file__))
+        sys.exit(3)
+    
+    (options.server,options.port) = util_client.get_master_addr(options,log)
+    if options.server is None:
+        print("B30103: Failed to obtain address of the master node.")
+        log.error("B30103: Failed to obtain address of the master node.")
+        log.debug("%s end." % (__file__))
+        sys.exit(1)
+    
+    a_num = util_client.get_active_num(options, log)
+    d_num = util_client.get_designated_num(options, log)
+    if a_num is None or d_num is None:
+        print("B30104: Check the status of the node.")
+        log.error("B30104: Check the status of the node.")
+        log.debug("%s end." % (__file__))
+        sys.exit(1)
+
+if options.is_goal:
+    c = util_client.is_active_cluster(options, log)
+    if c is None:
+        print("B30107: Check the status of the node.")
+        log.debug("%s end." % (__file__))
+        sys.exit(1)
+    elif not c:
+        print("B30108: The GridDB cluster does not start.")
+        log.debug("%s end." % (__file__))
+        sys.exit(3)
+
+    (options.server,options.port) = util_client.get_master_addr(options,log)
+    if options.server is None:
+        print("B30109: Failed to obtain address of the master node.")
+        log.error("B30109: Failed to obtain address of the master node.")
+        log.debug("%s end." % (__file__))
+        sys.exit(1)
+    if not is_goal(options, log):
+        print("B3010A: Partitions placement of the master node is still not goal.")
+        log.debug("%s end." % (__file__))
+        sys.exit(1)
+    print("Partitions placement of the master node is goal.")
+    log.debug("%s end." % (__file__))
+    sys.exit(0)
+
+
+(res, code) = util_client.request_rest(method, path, data, options, log)
+if res is not None:
+    print(json.dumps(json.loads(res), sort_keys=True, indent=4))
+
+log.debug("%s end." % (__file__))
+
+if code != 200:
+    sys.exit(1)

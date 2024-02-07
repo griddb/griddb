@@ -33,6 +33,8 @@
 #include "sql_common.h"
 #include "container_key.h"
 #include "schema.h"
+class DatabaseManager;
+struct ManagerSet;
 
 class BaseContainer;
 
@@ -44,71 +46,71 @@ UTIL_TRACER_DECLARE(TRANSACTION_MANAGER);
 class EventStart;
 class EventMonitor {
 public:
-	
-	EventMonitor(uint32_t concurrency) {
-		eventInfoList_.assign(concurrency, EventInfo());
+	static const int32_t UNDEF_TYPE = -1;
+
+	EventMonitor(const PartitionGroupConfig& pgConfig) : pgConfig_(pgConfig) {
+		eventInfoList_.assign(pgConfig.getPartitionGroupCount(),  EventInfo());
 	}
-	void initialize(uint32_t concurrency) {
-		eventInfoList_.assign(concurrency, EventInfo());
-	}
-	void set(EventStart &eventStart);
+	void set(EventStart &eventStart, DatabaseId dbId, bool clientRequest);
+	void setType(PartitionGroupId pgId, int32_t typeDetail);
+
 	void reset(EventStart &eventStart);
 	std::string dump();
-		struct EventInfo {
+	void  dump(util::NormalOStringStream& strstrm);
+
+	struct EventInfo {
 		void init() {
 			eventType_ = UNDEF_EVENT_TYPE;
 			pId_ = UNDEF_PARTITIONID;
+			dbId_ = UNDEF_DBID;
 			startTime_ = 0;
+			type_ = UNDEF_TYPE;
+			clientRequest_ = false;
 		}
 		EventInfo() {
 			init();
 		}
+		void  dump(util::NormalOStringStream& strstrm, size_t pos);
+
 		PartitionId pId_;
 		EventType eventType_;
 		int64_t startTime_;
+		DatabaseId dbId_;
+		int32_t type_;
+		bool clientRequest_;
 	};
+
+	void setType(int32_t workerId, int32_t type) {
+		eventInfoList_[workerId].type_ = type;
+	}
+
+	util::Mutex mutex_;
 	std::vector<EventInfo> eventInfoList_;
-	std::vector<util::String> applicationNameList_;
+	const PartitionGroupConfig &pgConfig_;
 };
 
 class EventStart {
 public:
-	
-	EventStart(EventContext &ec, Event &ev, EventMonitor &monitor,
-			bool check = true) :
-					ec_(ec), ev_(ev),
-					monitor_(monitor),
-					check_(check) {
+	EventStart(EventContext& ec, Event& ev, EventMonitor& monitor, DatabaseId dbId, bool isClient);
+	~EventStart();
 
-		if (check_) {
-			monitor_.set(*this);
-		}
-	}
-	
-	~EventStart() {
-
-		if (check_) {
-			monitor_.reset(*this);
-		}
-	}
-
-	EventContext &getEventContext() {
+	EventContext& getEventContext() {
 		return ec_;
 	}
-	
-	Event &getEvent() {
+	Event& getEvent() {
 		return ev_;
 	}
 
+	void setType(int32_t type);
+
 private:
-	
-	EventContext &ec_;
-	Event &ev_;
+	EventContext& ec_;
+	Event& ev_;
 	EventMonitor &monitor_;
-	bool check_;
 };
 
-#define EVENT_START(ec, ev, sv) EventStart start(ec, ev, sv->getEventMonitor());
+#define EVENT_START(ec, ev, sv, dbId, clientRequest) EventStart eventStart(ec, ev, sv->getEventMonitor(), dbId, clientRequest);
+#define EVENT_SET_TYPE(t) eventStart.setType(t);
 
 /*!
 	@brief Exception class to notify duplicated statement execution
@@ -375,8 +377,10 @@ public:
 	*/
 	enum ReplicationMode { REPLICATION_ASYNC, REPLICATION_SEMISYNC };
 
-	TransactionManager(ConfigTable &config, bool isSQL = false);
+	TransactionManager(ConfigTable &config, bool isSQL);
 	~TransactionManager();
+
+	void initialize(const ManagerSet &mgrSet);
 
 	void createPartition(PartitionId pId);
 
@@ -568,6 +572,10 @@ public:
 
 	EventMonitor &getEventMonitor() {
 		return eventMonitor_;
+	}
+
+	DatabaseManager& getDatabaseManager() {
+		return *databaseManager_;
 	}
 
 private:
@@ -861,6 +869,7 @@ private:
 
 	std::vector<int32_t> ptLock_;
 	util::Mutex *ptLockMutex_;
+	DatabaseManager *databaseManager_;
 
 	void finalize();
 

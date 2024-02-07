@@ -69,12 +69,14 @@ struct SQLAlgorithmUtils::SortConfig {
 	SortConfig() :
 			interval_(std::numeric_limits<ptrdiff_t>::max()),
 			limit_(-1),
-			unique_(false) {
+			unique_(false),
+			orderedUnique_(false) {
 	}
 
 	ptrdiff_t interval_;
 	int64_t limit_;
 	bool unique_;
+	bool orderedUnique_;
 };
 
 template<typename It>
@@ -351,7 +353,7 @@ public:
 	bool operator()(
 			const HeapElement<T> &e1, const HeapElement<T> &e2) const;
 
-	const Pred& getBase() { return base_; }
+	const Pred& getBase() const { return base_; }
 
 private:
 	Pred base_;
@@ -511,6 +513,9 @@ public:
 	bool mergeUnique(A &action);
 
 	template<typename A>
+	bool mergeOrderedUnique(A &action);
+
+	template<typename A>
 	bool mergeLimited(A &action);
 
 	template<typename A>
@@ -530,7 +535,9 @@ private:
 	template<typename U, typename A> bool mergeUniqueAt(A &action);
 	template<typename U, typename A> bool mergeLimitedAt(A &action);
 
-	typedef util::Vector<Element> ElementList;
+	typedef typename Alloc::template rebind<Element>::other ElementAlloc;
+	typedef util::Vector<Element, ElementAlloc> ElementList;
+
 	ElementList elemList_;
 	HeapPredicate<T, Pred> pred_;
 	bool predEmpty_;
@@ -1867,10 +1874,16 @@ bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortOptional(const U&) {
 		bool sorted;
 		if (config.unique_) {
 			SortUnique op(*this);
-			sorted = pred.getTypeSwitcher().toUnordered().template get<
-					SortUnique>()(op);
+			if (config.orderedUnique_) {
+				sorted = pred.getTypeSwitcher().template get<SortUnique>()(op);
+			}
+			else {
+				sorted = pred.getTypeSwitcher().toUnordered().template get<
+						SortUnique>()(op);
+			}
 		}
 		else {
+			assert(!config.orderedUnique_);
 			SortLimited op(*this);
 			sorted = pred.getTypeSwitcher().template get<SortLimited>()(op);
 		}
@@ -1898,7 +1911,7 @@ bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortGroup(
 		const Pred &pred = (primary ? predPair_.first : predPair_.second);
 
 		const SortConfig &config = base_.getConfig();
-		assert(config.unique_);
+		assert(!config.orderedUnique_);
 		static_cast<void>(config);
 
 		typedef SortGroup<Action> Op;
@@ -1925,6 +1938,7 @@ bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isOptional() const {
 			config.limit_ < endAt(false) - beginAt(false))) {
 		return true;
 	}
+	assert(!config.orderedUnique_);
 
 	return false;
 }
@@ -2149,7 +2163,7 @@ inline bool SQLAlgorithmUtils::HeapElement<T>::next() const {
 template<typename T>
 template<typename U>
 inline bool SQLAlgorithmUtils::HeapElement<T>::nextAt() const {
-	return value_.nextAt<U>();
+	return value_.template nextAt<U>();
 }
 
 
@@ -2232,6 +2246,18 @@ bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUnique(A &action) {
 	Op op(*this, action);
 	return pred_.getBase().getTypeSwitcher().toUnordered(
 			).template getWithOptions<Op>()(op);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeOrderedUnique(
+		A &action) {
+	if (isEmpty()) {
+		return true;
+	}
+	typedef MergeUnique<A> Op;
+	Op op(*this, action);
+	return pred_.getBase().getTypeSwitcher().template getWithOptions<Op>()(op);
 }
 
 template<typename T, typename Pred, typename Alloc>

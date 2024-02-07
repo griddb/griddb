@@ -31,6 +31,7 @@
 #define SQL_PROCESSOR_CONFIG_MANAGER_ENABLED 1
 #define SQL_PROCESSOR_PROFILER_MANAGER_ENABLED 1
 
+struct DataStoreConfig;
 class DataStoreV4;
 class ClusterService;
 class TransactionManager;
@@ -278,8 +279,10 @@ public:
 	const Event* getEvent() const;
 	void setEvent(const Event *ev);
 
-	DataStoreV4* getDataStore(PartitionId pId = 0) const;
-	void setDataStore(PartitionList *partitionList);
+	void setDataStoreConfig(const DataStoreConfig *dsConfig);
+	const DataStoreConfig* getDataStoreConfig() const;
+
+	void setPartitionList(PartitionList *partitionList);
 	PartitionList* getPartitionList() const;
 
 	ClusterService* getClusterService() const;
@@ -304,14 +307,14 @@ public:
 	void setClientId(ClientId *clientId);
 
 	void setExecId(ExecId execId) {
-			execId_ = execId;
+		execId_ = execId;
 	}
 	ExecId getExecId() {
 		return execId_;
 	}
 
 	void setVersionId(uint8_t versionId) {
-			versionId_ = versionId;
+		versionId_ = versionId;
 	}
 	uint8_t getVersionId() {
 		return versionId_;
@@ -322,6 +325,13 @@ public:
 
 	Timestamp getJobStartTime() const;
 	void setJobStartTime(Timestamp jobStartTime);
+
+	void setAdministrator(bool isAdministrator) {
+		isAdministrator_ = isAdministrator;
+	}
+	bool isAdministrator() const {
+		return isAdministrator_;
+	}
 
 	void setProcessorGroup(TupleList::Group *group) {
 		setGroup_ = true;
@@ -378,16 +388,9 @@ public:
 		return tableLatch_;
 	}
 
-
-
-	void setAdministrator() {
-		isAdministrator_ = true;
-	}
-
 	bool isPartialMonitorRestricted() const;
 	void setPartialMonitorRestricted(bool restricted);
 
-	bool isAdministrator();
 	double getStoreMemoryAgingSwapRate() const;
 	void setStoreMemoryAgingSwapRate(double storeMemoryAgingSwapRate);
 
@@ -406,6 +409,7 @@ private:
 	InterruptionChecker::CheckHandler *interruptionHandler_;
 
 	const Event *event_;
+	const DataStoreConfig *dsConfig_;
 	PartitionList *partitionList_;
 	ClusterService *clusterService_;
 	TransactionManager *transactionManager_;
@@ -432,9 +436,9 @@ private:
 	bool partialMonitorRestricted_;
 	double storeMemoryAgingSwapRate_;
 	util::TimeZone timeZone_;
-	bool isAdministrator_;
 	bool setGroup_;
 	LocalTempStore::GroupId groupId_;
+	bool isAdministrator_;
 };
 
 /**
@@ -619,6 +623,10 @@ public:
 	bool isForAnalysis() const;
 
 	static const Profiler& getEmptyProfiler();
+
+	static void mergeResultToPlan(
+			util::StackAllocator &alloc, TaskProfiler &profiler,
+			picojson::value &plan);
 
 	template<typename Base>
 	static typename util::CustomObjectCoder<

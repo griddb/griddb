@@ -19,7 +19,6 @@
 #include "sql_expression_base.h"
 #include "query_function.h"
 
-
 SQLExprs::ExprRewriter::ExprRewriter(util::StackAllocator &alloc) :
 		alloc_(alloc),
 		localEntry_(alloc),
@@ -481,7 +480,7 @@ void SQLExprs::ExprRewriter::normalizeCompColumnList(
 SQLValues::CompColumnList& SQLExprs::ExprRewriter::remapCompColumnList(
 		ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
 		uint32_t input, bool front, bool keyOnly,
-		const util::Set<uint32_t> *keyPosSet) const {
+		const util::Set<uint32_t> *keyPosSet, bool inputMapping) const {
 	assert(!keyOnly || (keyPosSet != NULL && keyPosSet->size() == src.size()));
 	static_cast<void>(keyPosSet);
 
@@ -489,10 +488,17 @@ SQLValues::CompColumnList& SQLExprs::ExprRewriter::remapCompColumnList(
 	SQLValues::CompColumnList &dest =
 			*(ALLOC_NEW(alloc) SQLValues::CompColumnList(alloc));
 
+	bool destFront = front;
+	if (inputMapping) {
+		const uint32_t destInput = resolveMappedInput(input);
+		assert(destInput == 0 || destInput == 1);
+		destFront = (destInput == 0);
+	}
+
 	uint32_t keyOnlyPos = 0;
 	if (isIdUsed(input)) {
 		SQLValues::CompColumn key;
-		key.setColumnPos(getMappedIdColumn(input), front);
+		key.setColumnPos(getMappedIdColumn(input), destFront);
 		key.setOrdering(true);
 		dest.push_back(key);
 		keyOnlyPos++;
@@ -512,7 +518,7 @@ SQLValues::CompColumnList& SQLExprs::ExprRewriter::remapCompColumnList(
 		}
 
 		SQLValues::CompColumn key;
-		key.setColumnPos(pos, front);
+		key.setColumnPos(pos, destFront);
 		key.setOrdering(it->isOrdering());
 		dest.push_back(key);
 	}
@@ -814,6 +820,22 @@ SQLExprs::ExprRewriter::compColumnListToKeyFilterPredicate(
 	}
 
 	return createExprTree(cxt, SQLType::EXPR_AND, condList);
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::replaceColumnToConstExpr(
+		ExprFactoryContext &cxt, Expression &src) {
+	const ExprCode &code = src.getCode();
+	if (code.getType() == SQLType::EXPR_COLUMN) {
+		return createEmptyConstExpr(cxt, code.getColumnType());
+	}
+
+	for (Expression::ModIterator it(src); it.exists(); it.next()) {
+		Expression &sub = it.get();
+		it.remove();
+		it.insert(replaceColumnToConstExpr(cxt, sub));
+	}
+
+	return src;
 }
 
 SQLExprs::Expression& SQLExprs::ExprRewriter::retainSingleInputPredicate(
@@ -4114,6 +4136,8 @@ SQLExprs::IndexCondition::IndexCondition() :
 		andOrdinal_(0),
 		compositeAndCount_(1),
 		compositeAndOrdinal_(0),
+		bulkOrCount_(1),
+		bulkOrOrdinal_(0),
 		specId_(0) {
 }
 
@@ -4160,6 +4184,10 @@ bool SQLExprs::IndexCondition::isAndTop() const {
 	return andOrdinal_ == 0;
 }
 
+bool SQLExprs::IndexCondition::isBulkTop() const {
+	return (bulkOrOrdinal_ == 0 && isAndTop());
+}
+
 bool SQLExprs::IndexCondition::isBinded() const {
 	return inColumnPair_.first == EMPTY_IN_COLUMN &&
 			inColumnPair_.second == EMPTY_IN_COLUMN;
@@ -4188,6 +4216,7 @@ SQLExprs::IndexSelector::IndexSelector(
 		indexAvailable_(true),
 		placeholderAffected_(false),
 		multiAndConditionEnabled_(false),
+		bulkGrouping_(false),
 		complexReordering_(false),
 		completed_(false),
 		cleared_(false),
@@ -4289,6 +4318,10 @@ void SQLExprs::IndexSelector::setMultiAndConditionEnabled(
 	multiAndConditionEnabled_ = enabled;
 }
 
+void SQLExprs::IndexSelector::setBulkGrouping(bool enabled) {
+	bulkGrouping_ = enabled;
+}
+
 bool SQLExprs::IndexSelector::matchIndexList(
 		const int32_t *indexList, size_t size) const {
 	if (indexList_.size() != size) {
@@ -4367,6 +4400,11 @@ void SQLExprs::IndexSelector::select(const Expression &expr) {
 		if (it->specId_ > 0) {
 			it->spec_ = specList_[static_cast<size_t>(it->specId_ - 1)];
 		}
+	}
+
+	if (bulkGrouping_) {
+		BulkRewriter rewriter;
+		rewriter.rewrite(condList_);
 	}
 }
 
@@ -4471,7 +4509,7 @@ bool SQLExprs::IndexSelector::bindCondition(
 	}
 
 	if (subCondCount > 1) {
-		cond = makeNallower(subCondList[0], subCondList[1]);
+		cond = makeNarrower(subCondList[0], subCondList[1]);
 	}
 	else {
 		cond = subCondList[0];
@@ -4538,6 +4576,23 @@ size_t SQLExprs::IndexSelector::nextCompositeConditionDistance(
 		}
 		if (cond.compositeAndOrdinal_ != prevCond.compositeAndOrdinal_) {
 			break;
+		}
+	}
+	return static_cast<size_t>(it - beginIt);
+}
+
+size_t SQLExprs::IndexSelector::nextBulkConditionDistance(
+		ConditionList::const_iterator beginIt,
+		ConditionList::const_iterator endIt) {
+	ConditionList::const_iterator it = beginIt;
+	if (it != endIt) {
+		assert(it->bulkOrCount_ > 0);
+		assert(it->isBulkTop());
+		for (size_t i = it->bulkOrCount_; i > 0; --i) {
+			assert(it != endIt);
+			const size_t size = nextOrConditionDistance(it, endIt);
+			assert(size > 0 && size <= static_cast<size_t>(endIt - it));
+			it += size;
 		}
 	}
 	return static_cast<size_t>(it - beginIt);
@@ -4669,7 +4724,7 @@ void SQLExprs::IndexSelector::narrowSimpleCondition(
 				condList_.begin() + simpleRange.first();
 				it1 != endIt1; ++it1) {
 			Condition cond;
-			if (tryMakeNallower(*it1, *it2, cond)) {
+			if (tryMakeNarrower(*it1, *it2, cond)) {
 				if (cond.isStatic()) {
 					if (cond.equals(true)) {
 						trueFound = true;
@@ -4964,14 +5019,14 @@ void SQLExprs::IndexSelector::moveTailConditionToFront(
 }
 
 SQLExprs::IndexSelector::Condition
-SQLExprs::IndexSelector::makeNallower(
+SQLExprs::IndexSelector::makeNarrower(
 		const Condition &cond1, const Condition &cond2) {
 	Condition retCond;
-	tryMakeNallower(cond1, cond2, retCond);
+	tryMakeNarrower(cond1, cond2, retCond);
 	return retCond;
 }
 
-bool SQLExprs::IndexSelector::tryMakeNallower(
+bool SQLExprs::IndexSelector::tryMakeNarrower(
 		const Condition &cond1, const Condition &cond2, Condition &retCond) {
 	int32_t levelList[] = { 0, 0 };
 	for (size_t i = 0; i < 2; i++) {
@@ -5004,13 +5059,13 @@ bool SQLExprs::IndexSelector::tryMakeNallower(
 		return false;
 	}
 
-	retCond = makeRangeNallower(
+	retCond = makeRangeNarrower(
 			toRangeCondition(cond1), toRangeCondition(cond2));
 	return true;
 }
 
 SQLExprs::IndexSelector::Condition
-SQLExprs::IndexSelector::makeRangeNallower(
+SQLExprs::IndexSelector::makeRangeNarrower(
 		const Condition &cond1, const Condition &cond2) {
 	assert(cond1.column_ == cond2.column_);
 
@@ -5821,7 +5876,8 @@ bool SQLExprs::IndexSelector::getAvailableIndex(
 
 		bool foundLocal = false;
 		if (cond.opType_ == SQLType::EXPR_BETWEEN) {
-			if ((flags & (1 << SQLType::INDEX_TREE_RANGE)) != 0) {
+			if ((flags & (1 << SQLType::INDEX_TREE_RANGE)) != 0 &&
+					(cond.isBinded() || !bulkGrouping_)) {
 				foundType = SQLType::INDEX_TREE_RANGE;
 				foundLocal = true;
 			}
@@ -6023,6 +6079,334 @@ bool SQLExprs::IndexSelector::IndexMatch::operator<(
 	}
 
 	return specId_ < another.specId_;
+}
+
+
+inline SQLExprs::IndexSelector::BulkPosition::BulkPosition(size_t pos) :
+		pos_(pos) {
+}
+
+inline size_t SQLExprs::IndexSelector::BulkPosition::get() const {
+	return pos_;
+}
+
+inline bool SQLExprs::IndexSelector::BulkPosition::operator<(
+		const BulkPosition &another) const {
+	return BulkRewriter::comparePosition(*this, another) < 0;
+}
+
+
+SQLExprs::IndexSelector::BulkRewriter::BulkRewriter() {
+}
+
+void SQLExprs::IndexSelector::BulkRewriter::rewrite(
+		ConditionList &condList) const {
+	util::StackAllocator &alloc = getAllocator(condList);
+	util::StackAllocator::Scope scope(alloc);
+
+	PositionList posList(alloc);
+	generateInitialPositions(condList, posList);
+	arrangeBulkPositions(condList, posList);
+	applyBulkPositions(posList, condList);
+}
+
+int32_t SQLExprs::IndexSelector::BulkRewriter::comparePosition(
+		const BulkPosition &pos1, const BulkPosition &pos2) {
+	return compareUIntValue(pos1.get(), pos2.get());
+}
+
+int32_t SQLExprs::IndexSelector::BulkRewriter::compareBulkCondition(
+		const ConditionList &condList, const BulkPosition &pos1,
+		const BulkPosition &pos2) {
+	int32_t comp;
+	do {
+		if ((comp = compareBulkTarget(condList, pos1, pos2)) != 0) {
+			break;
+		}
+		if (!isBulkTarget(condList, pos1)) {
+			comp = comparePosition(pos1, pos2);
+			break;
+		}
+
+		if ((comp = compareBulkSpec(condList, pos1, pos2)) != 0) {
+			break;
+		}
+		if ((comp = compareBulkValue(condList, pos1, pos2)) != 0) {
+			break;
+		}
+		comp = comparePosition(pos1, pos2);
+	}
+	while (false);
+	return comp;
+}
+
+void SQLExprs::IndexSelector::BulkRewriter::generateInitialPositions(
+		const ConditionList &condList, PositionList &posList) {
+	assert(posList.empty());
+	for (size_t i = 0; i < condList.size();) {
+		const BulkPosition pos(i);
+		const size_t size = getBulkUnitSize(condList, pos);
+
+		posList.push_back(pos);
+		i += size;
+	}
+}
+
+void SQLExprs::IndexSelector::BulkRewriter::arrangeBulkPositions(
+		const ConditionList &condList, PositionList &posList) {
+	PositionList basePosList = posList;
+	posList.clear();
+
+	std::sort(
+			basePosList.begin(), basePosList.end(),
+			BulkConditionLess(condList));
+
+	PositionPairList topPosList(getAllocator(posList));
+	for (size_t offset = 0; offset < basePosList.size();) {
+		const size_t count =
+				getGroupPositionCount(condList, basePosList, offset);
+		BulkPosition topPos = basePosList[offset];
+		for (size_t i = 1; i < count; i++) {
+			const BulkPosition &subPos = basePosList[offset + i];
+			if (comparePosition(subPos, topPos) < 0) {
+				topPos = subPos;
+			}
+		}
+
+		assert(offset < basePosList.size());
+		const PositionPair posToOffset(topPos, BulkPosition(offset));
+
+		topPosList.push_back(posToOffset);
+		offset += count;
+	}
+	std::sort(topPosList.begin(), topPosList.end());
+
+	for (PositionPairList::const_iterator it = topPosList.begin();
+			it != topPosList.end(); ++it) {
+		const size_t offset = it->second.get();
+		const size_t count =
+				getGroupPositionCount(condList, basePosList, offset);
+		posList.insert(
+				posList.end(),
+				basePosList.begin() + offset,
+				basePosList.begin() + offset + count);
+	}
+}
+
+void SQLExprs::IndexSelector::BulkRewriter::applyBulkPositions(
+		const PositionList &posList, ConditionList &condList) {
+	ConditionList baseCondList = condList;
+	condList.clear();
+
+	size_t skipSize = 0;
+	size_t lastGroupOffset = 0;
+	for (PositionList::const_iterator it = posList.begin();
+			it != posList.end(); ++it) {
+		const BulkPosition &pos = *it;
+		const size_t size = getBulkUnitSize(baseCondList, pos);
+
+		if (it != posList.begin()) {
+			const BulkPosition &prevPos = *(it - 1);
+			if (!isSameGroup(baseCondList, prevPos, pos)) {
+				fillGroupOrdinals(condList, lastGroupOffset);
+				lastGroupOffset = condList.size();
+			}
+			else if (compareBulkValue(baseCondList, prevPos, pos) == 0) {
+				skipSize += size;
+				continue;
+			}
+		}
+
+		condList.insert(
+				condList.end(),
+				baseCondList.begin() + pos.get(),
+				baseCondList.begin() + pos.get() + size);
+	}
+
+	fillGroupOrdinals(condList, lastGroupOffset);
+
+	if (condList.size() + skipSize != baseCondList.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+int32_t SQLExprs::IndexSelector::BulkRewriter::compareBulkTarget(
+		const ConditionList &condList, const BulkPosition &pos1,
+		const BulkPosition &pos2) {
+	const int32_t value1 = (isBulkTarget(condList, pos1) ? 1 : 0);
+	const int32_t value2 = (isBulkTarget(condList, pos2) ? 1 : 0);
+	return (value1 - value2);
+}
+
+int32_t SQLExprs::IndexSelector::BulkRewriter::compareBulkSpec(
+		const ConditionList &condList, const BulkPosition &pos1,
+		const BulkPosition &pos2) {
+	assert(isBulkTarget(condList, pos1));
+	assert(isBulkTarget(condList, pos2));
+
+	int32_t comp;
+	do {
+		const Condition &cond1 = getCondition(condList, pos1);
+		const Condition &cond2 = getCondition(condList, pos2);
+		if ((comp = compareUIntValue(cond1.specId_, cond2.specId_)) != 0) {
+			break;
+		}
+		if ((comp = compareUIntValue(cond1.column_, cond2.column_)) != 0) {
+			break;
+		}
+		comp = compareUIntValue(
+				getBulkUnitSize(condList, pos1),
+				getBulkUnitSize(condList, pos2));
+	}
+	while (false);
+	return comp;
+}
+
+int32_t SQLExprs::IndexSelector::BulkRewriter::compareBulkValue(
+		const ConditionList &condList, const BulkPosition &pos1,
+		const BulkPosition &pos2) {
+	assert(compareBulkSpec(condList, pos1, pos2) == 0);
+
+	const size_t size = getBulkUnitSize(condList, pos1);
+	int32_t comp;
+	do {
+		for (size_t i = 0; i < size; i++) {
+			const Condition &cond1 = getCondition(condList, pos1.get() + i);
+			const Condition &cond2 = getCondition(condList, pos2.get() + i);
+
+			if ((comp = compareUIntValue(
+					cond1.column_, cond2.column_)) != 0) {
+				break;
+			}
+
+			const TupleValue &value1 = cond1.valuePair_.first;
+			const TupleValue &value2 = cond2.valuePair_.first;
+			if ((comp = compareValue(value1, value2)) != 0) {
+				break;
+			}
+		}
+	}
+	while (false);
+	return comp;
+}
+
+int32_t SQLExprs::IndexSelector::BulkRewriter::compareUIntValue(
+		uint64_t value1, uint64_t value2) {
+	return SQLValues::ValueUtils::compareRawValue(value1, value2);
+}
+
+bool SQLExprs::IndexSelector::BulkRewriter::isBulkTarget(
+		const ConditionList &condList, const BulkPosition &pos) {
+	const size_t size = getBulkUnitSize(condList, pos);
+
+	for (size_t i = 0; i < size; i++) {
+		const Condition &cond = getCondition(condList, pos.get() + i);
+		if (cond.compositeAndCount_ > 1 || cond.opType_ != SQLType::OP_EQ ||
+				!cond.isBinded()) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+size_t SQLExprs::IndexSelector::BulkRewriter::getBulkUnitSize(
+		const ConditionList &condList, const BulkPosition &pos) {
+	assert(pos.get() < condList.size());
+
+	const size_t size = nextOrConditionDistance(
+			condList.begin() + pos.get(), condList.end());
+	assert(size > 0);
+
+	return size;
+}
+
+void SQLExprs::IndexSelector::BulkRewriter::fillGroupOrdinals(
+		ConditionList &condList, size_t offset) {
+	assert(offset <= condList.size());
+
+	size_t orCount = 0;
+	for (size_t i = offset; i < condList.size();) {
+		orCount++;
+		i += getBulkUnitSize(condList, BulkPosition(i));
+	}
+
+	size_t rest = 0;
+	size_t orOrdinal = 0;
+	for (size_t i = offset; i < condList.size(); i++) {
+		if (rest == 0) {
+			rest = getBulkUnitSize(condList, BulkPosition(i));
+			if (i != offset) {
+				orOrdinal++;
+			}
+		}
+		rest--;
+
+		assert(orCount > 0);
+
+		Condition &cond = condList[i];
+		cond.bulkOrCount_ = orCount;
+		cond.bulkOrOrdinal_ = orOrdinal;
+	}
+}
+
+size_t SQLExprs::IndexSelector::BulkRewriter::getGroupPositionCount(
+		const ConditionList &condList, const PositionList &posList,
+		size_t offset) {
+	assert(offset < posList.size());
+
+	size_t i = offset;
+	while (++i < posList.size()) {
+		const BulkPosition &pos1 = posList[i - 1];
+		const BulkPosition &pos2 = posList[i];
+		if (!isSameGroup(condList, pos1, pos2)) {
+			break;
+		}
+	}
+
+	return i - offset;
+}
+
+bool SQLExprs::IndexSelector::BulkRewriter::isSameGroup(
+		const ConditionList &condList, const BulkPosition &pos1,
+		const BulkPosition &pos2) {
+	return (
+			isBulkTarget(condList, pos1) &&
+			isBulkTarget(condList, pos2) &&
+			compareBulkSpec(condList, pos1, pos2) == 0);
+}
+
+const SQLExprs::IndexSelector::Condition&
+SQLExprs::IndexSelector::BulkRewriter::getCondition(
+		const ConditionList &condList, const BulkPosition &pos) {
+	return getCondition(condList, pos.get());
+}
+
+const SQLExprs::IndexSelector::Condition&
+SQLExprs::IndexSelector::BulkRewriter::getCondition(
+		const ConditionList &condList, size_t pos) {
+	assert(pos < condList.size());
+	return condList[pos];
+}
+
+template<typename T>
+util::StackAllocator& SQLExprs::IndexSelector::BulkRewriter::getAllocator(
+		util::Vector<T> &src) {
+	util::StackAllocator *alloc = src.get_allocator().base();
+	assert(alloc != NULL);
+	return *alloc;
+}
+
+
+SQLExprs::IndexSelector::BulkConditionLess::BulkConditionLess(
+		const ConditionList &condList) :
+		condList_(condList) {
+}
+
+bool SQLExprs::IndexSelector::BulkConditionLess::operator()(
+		const BulkPosition &pos1, const BulkPosition &pos2) const {
+	return (BulkRewriter::compareBulkCondition(condList_, pos1, pos2) < 0);
 }
 
 

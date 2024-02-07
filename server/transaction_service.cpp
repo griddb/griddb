@@ -1,4 +1,4 @@
-/*
+﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify

@@ -31,7 +31,6 @@
 
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_DETAIL);
-UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 #define TRACE_REVISION(rev1, rev2) \
 		"next=" << rev1.toString() << ", current=" << rev2.toString()
@@ -867,6 +866,7 @@ void SyncManager::setLongGetSyncChunk(
 	syncRequestInfo.setSearchLsnRange(catchuplsn, catchuplsn);
 
 	util::Stopwatch chunkWatch;
+	context->start(chunkWatch);
 	try {
 		if (syncRequestInfo.getChunks(
 			alloc, pId, pt_, cpSvc_, &partitionList_->partition(pId),
@@ -882,10 +882,11 @@ void SyncManager::setLongGetSyncChunk(
 		GS_RETHROW_SYNC_ERROR(
 			e, context, "[OWNER] Long term chunk sync failed, get chunk", "");
 	}
+	context->endChunk(chunkWatch);
 	if (syncRequestInfo.getChunkList().size() == 0) {
 		return;
 	}
-	context->endChunk(chunkWatch);
+
 	context->setSyncCheckpointPending(true);
 	int32_t prevCount = context->getProcessedChunkNum() %
 		getExtraConfig().getLongtermDumpChunkInterval();
@@ -1457,6 +1458,7 @@ SyncContext::SyncContext() :
 	nextEmptyChain_(NULL),
 	isDump_(false),
 	isSendReady_(false),
+	isExecuteRecoveryChecpoint_(false),
 	processedChunkNum_(0),
 	logBuffer_(NULL),
 	logBufferSize_(0),
@@ -1478,8 +1480,7 @@ SyncContext::SyncContext() :
 	longSyncType_(NOT_LONG_TERM_SYNC),
 	invalidCount_(0),
 	prevProcessedChunkNum_(0),
-	prevProcessedLogNum_(0),
-	isExecuteRecoveryChecpoint_(false) {
+	prevProcessedLogNum_(0) {
 }
 
 SyncContext::~SyncContext() {

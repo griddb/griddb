@@ -148,11 +148,12 @@ void DuplicateLogMode::applyDuplicateStatus(
 /*!
 	@brief コンストラクタ
 */
-WALBuffer::WALBuffer(PartitionId pId, LogManagerStats &stats)
-: pId_(pId), bufferSize_(1000), logFile_(NULL), duplicateFile_(NULL),
-  stopOnDuplicateError_(false),
-  duplicateStatus_(DuplicateLogMode::DUPLICATE_LOG_DISABLE),
-  position_(0), needFlush_(false), stats_(stats) {
+WALBuffer::WALBuffer(PartitionId pId, LogManagerStats &stats) :
+		pId_(pId), bufferSize_(1000), logFile_(NULL), duplicateFile_(NULL),
+		stopOnDuplicateError_(false),
+		duplicateStatus_(DuplicateLogMode::DUPLICATE_LOG_DISABLE),
+		position_(0),
+		needFlush_(false), stats_(stats) {
 	buffer_.reset(UTIL_NEW uint8_t[bufferSize_]);
 }
 
@@ -332,8 +333,9 @@ bool WALBuffer::checkNeedFlush() {
 
 /*!
 	@brief バッファ書き込み＆フラッシュ
+	@note 物理ファイルsync中は排他を外す
 */
-bool WALBuffer::flush(LogFlushMode x, bool byCP) {
+bool WALBuffer::flush(LockGuardVariant<Locker>* guard, LogFlushMode x, bool byCP) {
 	bool flushed = false;
 	if (logFile_ != NULL) {
 		switch (x) {
@@ -355,6 +357,9 @@ bool WALBuffer::flush(LogFlushMode x, bool byCP) {
 			{
 				bool doFlush = needFlush_.exchange(false);
 				if (doFlush) {
+					if (guard) { 
+						guard->release();
+					}
 					flush(*logFile_, byCP, stats_);
 					if (duplicateFile_) {
 						try {
@@ -364,6 +369,9 @@ bool WALBuffer::flush(LogFlushMode x, bool byCP) {
 						}
 					}
 					flushed = true;
+					if (guard) {
+						guard->acquire();
+					}
 				}
 				break;
 			}
@@ -409,8 +417,9 @@ double WALBuffer::getActivity() const {
 */
 bool WALBuffer::resize(int32_t capacity) {
 	const bool byCP = false;
-	flush(LOG_WRITE_WAL_BUFFER, byCP);
-	flush(LOG_FLUSH_FILE, byCP);
+
+	flush(NULL, LOG_WRITE_WAL_BUFFER, byCP);
+	flush(NULL, LOG_FLUSH_FILE, byCP);
 
 	bufferSize_ = (int32_t)capacity;
 	buffer_.reset(UTIL_NEW uint8_t[bufferSize_]);

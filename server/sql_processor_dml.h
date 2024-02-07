@@ -218,8 +218,8 @@ private:
 	InputId currentPos_;
 	ClientId clientId_;
 	bool isTimeSeries_;
-	PartitionTable* pt_;
 	PartitioningInfo* partitioningInfo_;
+	PartitionTable* pt_;
 	SQLExecutionManager* executionManager_;
 	static const Registrar deleteRegistrar_;
 	static const Registrar updateRegistrar_;
@@ -244,7 +244,6 @@ public:
 	*/
 	BulkManager(DMLProcessor* processor, util::StackAllocator& jobStackAlloc, SQLVariableSizeGlobalAllocator& globalVarAlloc,
 		DMLProcessor::DmlType dmlType, SQLExecutionManager* executionManager) :
-		processor_(processor),
 		jobStackAlloc_(jobStackAlloc), globalVarAlloc_(globalVarAlloc), type_(dmlType),
 		partitioningColumnId_(UNDEF_COLUMNID), partitioningNum_(0),
 		columnCount_(0), columnList_(NULL), nosqlColumnList_(NULL),
@@ -252,7 +251,8 @@ public:
 		bulkEntryList_(jobStackAlloc), bulkEntryListMap_(jobStackAlloc),
 		insertColumnMap_(NULL), targetColumnId_(0),
 		currentPos_(0), prevPos_(-1), prevStore_(NULL),
-		partitioningType_(0), executionManager_(executionManager) {}
+		partitioningType_(0), executionManager_(executionManager),
+		processor_(processor) {}
 	/*!
 		@brief デストラクタ
 	*/
@@ -278,7 +278,7 @@ public:
 		PartitioningInfo* partitioningInfo,
 		TupleList::Column* inputColumnList, int32_t inputColumnSize,
 		ColumnInfo* columnList, int32_t columnSize,
-		InsertColumnMap* insertColumnMap, bool isReplace
+		const InsertColumnMap* insertColumnMap, bool isReplace
 	);
 
 	/*!
@@ -373,16 +373,16 @@ private:
 	int64_t execCount_;
 	BulkEntryArray bulkEntryList_;
 	util::Map<NodeAffinityNumber, BulkEntry*> bulkEntryListMap_;
-	uint8_t partitioningType_;
 	PartitioningInfo* partitioningInfo_;
 	InsertColumnMap* insertColumnMap_;
 	int32_t targetColumnId_;
 	bool isInsertReplace_;
 	size_t currentPos_;
 	size_t prevPos_;
-
 	BulkEntry* prevStore_;
+
 	int32_t partitionNum_;
+	uint8_t partitioningType_;
 	SQLExecutionManager* executionManager_;
 	DMLProcessor* processor_;
 };
@@ -705,7 +705,6 @@ public:
 	}
 
 private:
-	BulkManager* bulkManager_;
 	util::StackAllocator& eventStackAlloc_;
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	OperationArray entries_;
@@ -714,6 +713,7 @@ private:
 	DmlType type_;
 	int32_t partitionNum_;
 	int32_t sizeLimit_;
+	BulkManager* bulkManager_;
 	NodeAffinityNumber affinity_;
 };
 

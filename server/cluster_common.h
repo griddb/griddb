@@ -23,8 +23,11 @@
 #define CLUSTER_COMMON_H_
 
 #include "data_type.h"
+#include "cluster_event_type.h"
 
 #include "lru_cache.h"
+#include <numeric>
+
 typedef int64_t EventMonotonicTime;
 struct UserValue;
 
@@ -191,6 +194,19 @@ public:
 	}
 
 	template <class T>
+	static void dumpValueSet(util::NormalOStringStream& oss, T& list) {
+		oss << "(";
+		size_t size = list.size();
+		size_t count = 0;
+		for (auto& entry : list) {
+			oss << entry;
+			if (count != size - 1) oss << ",";
+			count++;
+		}
+		oss << ")";
+	}
+
+	template <class T>
 	static double average(T& list) {
 		size_t size = list.size();
 		if (size == 0) return -1;
@@ -214,6 +230,35 @@ public:
 		if (size == 0) return -1;
 		return std::sqrt(variance(list));
 	}
+
+	static const char* getServiceTypeNameByEvent(EventType eventType, bool isTransaction) {
+		EventType categoryEventType = EventTypeUtility::getCategoryEventType(eventType);
+		switch (categoryEventType) {
+		case V_1_1_STATEMENT_START:
+		case CONNECT:
+		case GET_USERS:
+		case PUT_LARGE_CONTAINER:
+		case REPLICATION_LOG:
+		case TXN_COLLECT_TIMEOUT_RESOURCE:
+		case AUTHENTICATION:
+			return "TRANSACTION_SERVICE";
+		case SQL_EXECUTE_QUERY:
+		case SQL_NOTIFY_CLIENT:
+			return isTransaction ? "TRANSACTION_SERVICE" : "SQL_SERVICE";
+		case CS_HEARTBEAT:
+		case RECV_NOTIFY_MASTER:
+			return "CLUSTER_SERVICE";
+		case TXN_SHORTTERM_SYNC_REQUEST:
+		case SYC_SHORTTERM_SYNC_LOG:
+			return "SYNC_SERVICE";
+		case PARTITION_GROUP_START:
+			return "CHECKPOINT_SERVICE";
+		case SYS_EVENT_SIMULATE_FAILURE:
+			return "SYSTEM_SERVICE";
+		default:
+			return "UNDEF_SERVICE";
+		}
+	}
 };
 
 #define TRACE_CLUSTER_NORMAL_OPERATION(level, str) \
@@ -229,7 +274,7 @@ public:
 		const uint32_t lap = watch.elapsedMillis();              \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT, \
-				"eventType=" << getEventTypeName(eventType) << ", pgId=" << pgId << ", elapsedMillis=" << lap);  \
+				"eventType=" << EventTypeUtility::getEventTypeName(eventType) << ", pgId=" << pgId << ", elapsedMillis=" << lap);  \
 		}                                                        \
 	}
 
@@ -238,7 +283,7 @@ public:
 		const uint32_t lap = watch.elapsedMillis();                     \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {        \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,        \
-				"eventType=" << getEventTypeName(eventType) << ", pId=" << pId            \
+				"eventType=" << EventTypeUtility::getEventTypeName(eventType) << ", pId=" << pId            \
 							<< ", pgId=" << pgId << ", elapsedMillis=" << lap); \
 		}                                                               \
 	}
@@ -246,5 +291,8 @@ public:
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 #define GS_TRACE_CLUSTER_INFO(s) \
 	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
+
+UTIL_TRACER_DECLARE(CLUSTER_DUMP);
+
 
 #endif

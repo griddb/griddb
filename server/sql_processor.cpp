@@ -835,23 +835,27 @@ SQLContext::SQLContext(
 		clientId_(NULL),
 		stmtId_(UNDEF_STATEMENTID),
 		jobStartTime_(-1),
+		tableSchema_(NULL),
+		tableLatch_(NULL),
 		finished_(false),
 		fetchComplete_(false),
 		execId_(-1),
+		versionId_(0),
 		config_(config),
-		tableSchema_(NULL),
-		tableLatch_(NULL),
 		isDmlTimeSeries_(false),
 		jobCheckComplete_(false),
 		partialMonitorRestricted_(false),
 		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
-		timeZone_(util::TimeZone()),
-		isAdministrator_(false)
+		timeZone_(util::TimeZone())
 		,
 		setGroup_(false),
 		groupId_(LocalTempStore::UNDEF_GROUP_ID)
+		,
+		isAdministrator_(false)
 {
 	setAllocator(alloc);
+	static_cast<void>(valloc);
+	static_cast<void>(task);
 }
 
 SQLContext::SQLContext(
@@ -864,6 +868,7 @@ SQLContext::SQLContext(
 		localDest_(NULL),
 		interruptionHandler_(NULL),
 		event_(NULL),
+		dsConfig_(NULL),
 		partitionList_(NULL),
 		clusterService_(NULL),
 		transactionManager_(NULL),
@@ -885,11 +890,12 @@ SQLContext::SQLContext(
 		jobCheckComplete_(false),
 		partialMonitorRestricted_(false),
 		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
-		timeZone_(util::TimeZone()),
-		isAdministrator_(false)
+		timeZone_(util::TimeZone())
 		,
 		setGroup_(false),
 		groupId_(LocalTempStore::UNDEF_GROUP_ID)
+		,
+		isAdministrator_(false)
 {
 	setAllocator(alloc);
 }
@@ -943,19 +949,21 @@ util::StackAllocator& SQLContext::getEventAllocator() const {
 	return eventContext->getAllocator();
 }
 
-DataStoreV4* SQLContext::getDataStore(PartitionId pId) const {
-	DataStoreBase& dsBase = partitionList_->partition(pId).dataStore();
-	return reinterpret_cast<DataStoreV4*>(&dsBase);
+void SQLContext::setDataStoreConfig(const DataStoreConfig *dsConfig) {
+	dsConfig_ = dsConfig;
 }
 
-void SQLContext::setDataStore(PartitionList *partitionList) {
+const DataStoreConfig* SQLContext::getDataStoreConfig() const {
+	return dsConfig_;
+}
+
+void SQLContext::setPartitionList(PartitionList *partitionList) {
 	partitionList_ = partitionList;
 }
 
 PartitionList* SQLContext::getPartitionList() const {
 	return partitionList_;
 }
-
 
 ClusterService* SQLContext::getClusterService() const {
 	return clusterService_;
@@ -1043,10 +1051,6 @@ void SQLContext::setPartialMonitorRestricted(bool restricted) {
 	partialMonitorRestricted_ = restricted;
 }
 
-bool SQLContext::isAdministrator()  {
-	return isAdministrator_;
-}
-
 double SQLContext::getStoreMemoryAgingSwapRate() const {
 	return storeMemoryAgingSwapRate_;
 }
@@ -1131,6 +1135,35 @@ const SQLProcessor::Profiler& SQLProcessor::Profiler::getEmptyProfiler() {
 	static std::allocator<char> alloc;
 	static const Profiler profiler(alloc);
 	return profiler;
+}
+
+void SQLProcessor::Profiler::mergeResultToPlan(
+		util::StackAllocator &alloc, TaskProfiler &profiler,
+		picojson::value &plan) {
+	picojson::value src;
+
+	JsonUtils::OutStream profileOut(src);
+	makeProfilerCoder(alloc, util::ObjectCoder()).encode(profileOut, profiler);
+
+	picojson::object *srcObj = JsonUtils::find<picojson::object>(src);
+	if (srcObj == NULL) {
+		assert(false);
+		return;
+	}
+
+	picojson::object *planObj = JsonUtils::find<picojson::object>(plan);
+	if (planObj == NULL) {
+		assert(false);
+		return;
+	}
+
+	picojson::value &dest = planObj->insert(
+			std::make_pair(u8string("profile"), picojson::value())).first->second;
+	if (!dest.is<picojson::object>()) {
+		dest = picojson::value(picojson::object());
+	}
+	picojson::object &destObj = dest.get<picojson::object>();
+	destObj.insert(srcObj->begin(), srcObj->end());
 }
 
 SQLProcessor::Profiler::Profiler(

@@ -3501,7 +3501,7 @@ private:
 		const MainSwitcherType switcher = MainSwitcherType(
 				base_.initialComparatorAt(base_.columnList_.begin(), Ordering),
 				base_.nullIgnorable_).withProfile(profile_);
-		return switcher.getWith<
+		return switcher.template getWith<
 				Op, typename OpTraitsAt<Traits, DigestOnly, FixedDigest>::Type>();
 	}
 

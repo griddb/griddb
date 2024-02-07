@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 5.3.1
+%define griddb_ver 5.5.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -62,6 +62,13 @@ install -c -m 750 bin/gs_startnode                    %{buildroot}%{griddb_instd
 install -c -m 750 bin/gs_stat                         %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stopcluster                  %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stopnode                     %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_checkpoint                   %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_config                       %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_logconf                      %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_logs                         %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_paramconf                    %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_partition                    %{buildroot}%{griddb_instdir}/bin
+install -c -m 640 bin/util_client.py                  %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/log.py                          %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/util.py                         %{buildroot}%{griddb_instdir}/bin
 install -c -m 644 bin/gridstore.jar                   %{buildroot}%{griddb_instdir}/bin/gridstore-%{version}.jar
@@ -120,6 +127,14 @@ ln -sf %{griddb_instdir}/bin/gs_startnode          %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stat               %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stopcluster        %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stopnode           %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_checkpoint         %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_config             %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_logconf            %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_logs               %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_paramconf          %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_partition          %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/log.py                %{buildroot}%{griddb_instdir}/bin/logs.py
+ln -sf %{griddb_instdir}/bin/util_client.py        %{buildroot}%{griddb_instdir}/bin/util_server.py
 ln -sf %{griddb_instdir}/bin/gridstore             %{buildroot}/usr/griddb/bin
 ln -sf %{griddb_instdir}/bin/gridstore-%{version}.jar         %{buildroot}/usr/share/java/gridstore.jar
 ln -sf %{griddb_instdir}/bin/gridstore-conf-%{version}.jar    %{buildroot}/usr/share/java/gridstore-conf.jar
@@ -328,6 +343,15 @@ fi
 %{griddb_instdir}/bin/gs_stat
 %{griddb_instdir}/bin/gs_stopcluster
 %{griddb_instdir}/bin/gs_stopnode
+%{griddb_instdir}/bin/gs_checkpoint
+%{griddb_instdir}/bin/gs_config
+%{griddb_instdir}/bin/gs_logconf
+%{griddb_instdir}/bin/gs_logs
+%{griddb_instdir}/bin/gs_paramconf
+%{griddb_instdir}/bin/gs_partition
+%{griddb_instdir}/bin/logs.py
+%{griddb_instdir}/bin/util_client.py
+%{griddb_instdir}/bin/util_server.py
 %{griddb_instdir}/bin/log.py
 %{griddb_instdir}/bin/util.py
 %{griddb_instdir}/bin/gridstore
@@ -377,12 +401,20 @@ fi
 /usr/bin/gs_stat
 /usr/bin/gs_stopcluster
 /usr/bin/gs_stopnode
+/usr/bin/gs_checkpoint
+/usr/bin/gs_config
+/usr/bin/gs_logconf
+/usr/bin/gs_logs
+/usr/bin/gs_paramconf
+/usr/bin/gs_partition
 /usr/share/java/gridstore.jar
 /usr/share/java/gridstore-conf.jar
 /usr/lib/systemd/system/gridstore.service
 /usr/griddb/bin/gridstore
 
 %changelog
+* Mon Nov 13 2023 Toshiba Digital Solutions Corporation
+- 5.3.1
 * Mon Jun 12 2023 Toshiba Digital Solutions Corporation
 - 5.3.0
 * Tue Oct 25 2022 Toshiba Digital Solutions Corporation

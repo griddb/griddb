@@ -14,19 +14,19 @@ import fcntl
 import stat
 from optparse import OptionParser
 
-import util
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+import util_server
+util_server.install_sigint_handler()
+(homedir,logdir) = util_server.get_required_env()
 
 parser = OptionParser(usage="%prog USERNAME [-p PASSWORD]",
-                      description="Change an administrator's password.",
-            version="%prog [V2.8.00]")
+                      description="Change the GridDB administrator's password.",
+            version="%prog [V5.0.00]")
 parser.add_option("-p", "--password", dest="password",
-                  help='specify password. not display prompt')
+                  help='A password prompt does not display.')
 (options, args) = parser.parse_args()
 
 if len(args) < 1:
-    parser.error("AB0001: Specify USERNAME.")
+    parser.error("AB0001: Specify the USERNAME.")
 username = args[0]
 
 filename = os.path.join(homedir, "conf/password")
@@ -34,7 +34,7 @@ with open(filename, 'r+') as file:
     try:
         fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except(IOError):
-        print("AB0101: Failed to lock file '" + filename + "'.")
+        print("AB0101: Failed to lock file." +filename)
         sys.exit(1)
 
     csvReader = csv.reader(file)
@@ -43,7 +43,7 @@ with open(filename, 'r+') as file:
         allPassword[row[0]] = row[1]
 
     if username not in allPassword:
-        print("AB0102: USERNAME '" + username + "' does not exist.")
+        print("AB0102: The USERNAME '" + username + "' does not exist.")
         sys.exit(1)
 
     if options.password is not None:
@@ -56,13 +56,13 @@ with open(filename, 'r+') as file:
             print("")
             sys.exit(0)
         if password != password2:
-            print("AB0103: Password mismatch.")
+            print("AB0103: The password mismatch.")
             sys.exit(1)
 
     if password == "":
-        print("AB0104: Password cannnot include space")
+        print("AB0104: The password cannnot contain any spaces.")
         sys.exit(1)
-    digest = hashlib.sha256(util.strToBytes(password)).hexdigest()
+    digest = hashlib.sha256(util_server.strToBytes(password)).hexdigest()
     allPassword[username] = digest
 
     os.umask(0)

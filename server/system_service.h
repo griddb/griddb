@@ -215,11 +215,16 @@ public:
 			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
 
 	bool setGoalPartitions(util::StackAllocator &alloc,
+		const ServiceTypeInfo& addressType,
 		const picojson::value *request, picojson::value &result);
 
 	void getGoalPartitions(
 			util::StackAllocator &alloc, const ServiceTypeInfo &addressType,
 			picojson::value &result);
+
+	void getDatabaseContraint(
+		util::StackAllocator& alloc, const ServiceTypeInfo& addressType,
+		DatabaseId dbId, picojson::value& result);
 
 	void getLogs(
 			picojson::value &result, std::string &searchStr,
@@ -419,6 +424,8 @@ private:
 		void setAuthError();
 		void setBadRequestError();
 		void setInternalServerError();
+		void setError(int32_t errorNo, const char* reason, uint32_t status);
+		bool checkParamValue(const char* paramName, int64_t& value, bool isInteger);
 
 		void setJson(const picojson::value &value);
 		void setJson(const std::string &callback, const picojson::value &value);

@@ -305,7 +305,7 @@ public class ColumnInfo {
 
 	/**
 	 * <div lang="ja">
-	 * このカラムの日時型における精度を取得します。
+	 * このカラムの日時精度を取得します。
 	 *
 	 * <p>コンテナを定義する際に、現バージョンにて使用できる組み合わせは、以下
 	 * のみです。</p>
@@ -370,8 +370,8 @@ public class ColumnInfo {
 	 * <div lang="ja">
 	 * {@link ColumnInfo}を構築するためのビルダーです。
 	 *
-	 * <p>{@link ColumnInfo}を通じて参照できるすべての要素について、それぞれ
-	 * 必要に応じて設定し、{@link ColumnInfo}を構築することができます。</p>
+	 * <p>{@link ColumnInfo}を通じて参照できる各項目のうち、必要とする項目
+	 * のみを設定し、{@link ColumnInfo}を構築することができます。</p>
 	 *
 	 * @since 5.3
 	 * </div><div lang="en">
@@ -396,7 +396,7 @@ public class ColumnInfo {
 
 		/**
 		 * <div lang="ja">
-		 * すべての要素が未設定状態のビルダーを構築します。
+		 * すべての項目が未設定状態のビルダーを構築します。
 		 * </div><div lang="en">
 		 * </div>
 		 */
@@ -405,9 +405,10 @@ public class ColumnInfo {
 
 		/**
 		 * <div lang="ja">
-		 * 指定の{@link ColumnInfo}のすべての要素を設定したビルダーを構築します。
+		 * 指定の{@link ColumnInfo}に含まれる、すべての項目が設定された
+		 * ビルダーを構築します。
 		 *
-		 * @param info 設定元のカラム情報
+		 * @param info ビルダーに設定する内容を含むカラム情報
 		 * @throws NullPointerException 引数に{@code null}が指定された場合
 		 * </div><div lang="en">
 		 * </div>
@@ -418,13 +419,13 @@ public class ColumnInfo {
 
 		/**
 		 * <div lang="ja">
-		 * 指定の{@link ColumnInfo}のすべての要素を設定します。
+		 * 指定の{@link ColumnInfo}に含まれる、すべての項目を設定します。
 		 *
-		 * <p>指定の{@link ColumnInfo}に未設定状態の要素が含まれる場合、
-		 * このビルダーの元の設定内容に関係なく、該当する要素は未設定状態と
-		 * なります。</p>
+		 * <p>指定の{@link ColumnInfo}に未設定状態の項目が含まれる場合、この
+		 * ビルダーでの対応する項目についても、元の設定内容に関係なく未設定
+		 * 状態となります。</p>
 		 *
-		 * @param info 設定元のカラム情報
+		 * @param info ビルダーに設定する内容を含むカラム情報
 		 * @throws NullPointerException 引数に{@code null}が指定された場合
 		 * @return このビルダー
 		 * </div><div lang="en">

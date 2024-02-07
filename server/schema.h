@@ -29,7 +29,9 @@
 
 
 class TransactionContext;
+class TreeFuncInfo;
 class BaseIndex;
+class BaseIndexStorage;
 class BtreeMap;
 class RtreeMap;
 class MessageSchema;
@@ -638,27 +640,93 @@ typedef uint8_t DDLStatus;
 static const DDLStatus DDL_READY = 0;
 static const DDLStatus DDL_UNDER_CONSTRUCTION = 1;
 
+struct IndexStorageSet {
+	IndexStorageSet() :
+			indexStorage_(NULL),
+			nullIndexStorage_(NULL),
+			mvccIndexStorage_(NULL),
+			funcInfo_(NULL),
+			nullFuncInfo_(NULL) {
+	}
+
+	void clear() {
+	}
+
+	BaseIndexStorage *indexStorage_;
+	BaseIndexStorage *nullIndexStorage_;
+	BaseIndexStorage *mvccIndexStorage_;
+
+	TreeFuncInfo *funcInfo_;
+	TreeFuncInfo *nullFuncInfo_;
+};
+
 /*!
 	@brief Information of an index
 */
 struct IndexData {
+	IndexData(util::StackAllocator &alloc) :
+			oIds_(UNDEF_MAP_OIDS),
+			optionOId_(UNDEF_OID),
+			columnIds_(ALLOC_NEW(alloc) util::Vector<ColumnId>(alloc)),
+			mapType_(MAP_TYPE_DEFAULT),
+			status_(DDL_READY),
+			cursor_(MAX_ROWID),
+			storageSet_(ALLOC_NEW(alloc) IndexStorageSet()) {
+	}
+
+	void clear() {
+		oIds_ = UNDEF_MAP_OIDS;
+		optionOId_ = UNDEF_OID;
+		columnIds_->clear();
+		mapType_ = MAP_TYPE_DEFAULT;
+		status_ = DDL_READY;
+		cursor_ = MAX_ROWID;
+		storageSet_->clear();
+	}
+
+	bool isComposite() {
+		return columnIds_->size() > 1;
+	}
+
 	MapOIds oIds_;
 	OId optionOId_;
 	util::Vector<ColumnId> *columnIds_;
 	MapType mapType_;
 	DDLStatus status_;
 	RowId cursor_;
-	IndexData(util::StackAllocator &alloc) {
-		oIds_ = UNDEF_MAP_OIDS;
-		optionOId_ = UNDEF_OID;
-		columnIds_ = ALLOC_NEW(alloc) util::Vector<ColumnId>(alloc);
-		mapType_ = MAP_TYPE_DEFAULT;
-		status_ = DDL_READY;
-		cursor_ = MAX_ROWID;
+	IndexStorageSet *storageSet_;
+};
+
+class IndexAutoPtr {
+public:
+	IndexAutoPtr() :
+			storage_(NULL),
+			index_(NULL) {
 	}
-	bool isComposite() {
-		return columnIds_->size() > 1;
+
+	~IndexAutoPtr() {
+		clear();
 	}
+
+	void initialize(BaseIndexStorage *&storage, BaseIndex *index) {
+		assert(storage != NULL && index != NULL);
+		clear();
+		storage_ = &storage;
+		index_ = index;
+	}
+
+	void clear() throw();
+
+	BaseIndex* get() {
+		return index_;
+	}
+
+private:
+	IndexAutoPtr(const IndexAutoPtr&);
+	IndexAutoPtr& operator=(const IndexAutoPtr&);
+
+	BaseIndexStorage **storage_;
+	BaseIndex *index_;
 };
 
 /*!
@@ -728,9 +796,9 @@ public:
 		util::Vector<ColumnId> &columnIds, bool withPartialMatch) const;
 	IndexTypes getIndexTypes(TransactionContext &txn, ColumnId columnId) const;
 
-	BaseIndex *getIndex(
+	void getIndex(
 		TransactionContext &txn, const IndexData &indexData, bool forNull,
-		BaseContainer *container) const;
+		BaseContainer *container, IndexAutoPtr &indexPtr) const;
 	void updateIndexData(
 		TransactionContext &txn, const IndexData &indexData);
 	void commit(TransactionContext &txn, IndexCursor &indexCursor);

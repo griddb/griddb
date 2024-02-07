@@ -875,13 +875,21 @@ struct StreamErrors {
 typedef ByteStream<util::ArrayInStream> ArrayByteInStream;
 
 
+class NameCoderOptions {
+public:
+	NameCoderOptions();
+
+	void setCaseSensitive(bool value);
+	bool isCaseSensitive() const;
+
+private:
+	bool caseSensitive_;
+};
+
 namespace detail {
 struct NameCoderImpl {
+public:
 	typedef std::pair<const char8_t*, int32_t> Entry;
-
-	struct EntryPred {
-		bool operator()(const Entry &entry1, const Entry &entry2) const;
-	};
 
 	static void initialize(
 			const char8_t **nameList, Entry *entryList, size_t count);
@@ -891,10 +899,23 @@ struct NameCoderImpl {
 			const char8_t *defaultName);
 
 	static const Entry* findEntry(
-			const Entry *entryList, size_t count, const char8_t *name);
+			const Entry *entryList, size_t count, const char8_t *name,
+			const NameCoderOptions &options);
 
 	static const char8_t* removePrefix(
 			const char8_t *name, size_t prefixWordCount);
+
+private:
+	struct EntryPred;
+};
+
+struct NameCoderImpl::EntryPred {
+public:
+	explicit EntryPred(const NameCoderOptions *options);
+	bool operator()(const Entry &entry1, const Entry &entry2) const;
+
+private:
+	const NameCoderOptions *options_;
 };
 } 
 
@@ -913,7 +934,10 @@ public:
 	NameCoder(const Entry (&entryList)[Count], size_t prefixWordCount);
 
 	const char8_t* operator()(T id, const char8_t *defaultName = NULL) const;
-	bool operator()(const char8_t *name, T &id) const;
+
+	bool operator()(
+			const char8_t *name, T &id,
+			const NameCoderOptions &options = NameCoderOptions()) const;
 
 	size_t getSize() const { return Count; }
 
@@ -1395,7 +1419,11 @@ private:
 			const Traits&, const TypeTag<TYPE_OPTIONAL>&);
 	template<typename C, typename S, typename T, typename Traits>
 	static void decodeInternal(
-			C &coder, S &stream, T &value, const Attribute &attr,
+			C &coder, S &stream, const T *&value, const Attribute &attr,
+			const Traits&, const TypeTag<TYPE_OPTIONAL_OBJECT>&);
+	template<typename C, typename S, typename T, typename Traits>
+	static void decodeInternal(
+			C &coder, S &stream, T *&value, const Attribute &attr,
 			const Traits&, const TypeTag<TYPE_OPTIONAL_OBJECT>&);
 	template<typename C, typename S, typename T, typename Traits>
 	static void decodeInternal(
@@ -2094,7 +2122,11 @@ private:
 	friend class AbstractObjectInStream;
 	friend class AbstractObjectOutStream;
 
+#ifdef _WIN32
+	typedef uint64_t StreamStorage[10];
+#else
 	typedef uint64_t StreamStorage[8];
+#endif
 
 	static void* getRawAddress(void *ptr);
 	static const void* getRawAddress(const void *ptr);
@@ -2175,7 +2207,11 @@ protected:
 	friend class AbstractObjectStream::Scope<AbstractObjectInStream>;
 
 	typedef AbstractObjectStream::StreamStorage StreamStorage;
+#ifdef _WIN32
+	typedef uint64_t LocatorStorage[5];
+#else
 	typedef uint64_t LocatorStorage[4];
+#endif
 
 	virtual void duplicate(StreamStorage &storage) const = 0;
 
@@ -4083,6 +4119,18 @@ inline ByteStream<S, F>& ByteStream<S, F>::put(
 
 
 
+inline NameCoderOptions::NameCoderOptions() : caseSensitive_(true) {
+}
+
+inline void NameCoderOptions::setCaseSensitive(bool value) {
+	caseSensitive_ = value;
+}
+
+inline bool NameCoderOptions::isCaseSensitive() const {
+	return caseSensitive_;
+}
+
+
 template<typename T, size_t Count>
 NameCoder<T, Count>::NameCoder(
 		const Entry (&entryList)[Count], size_t prefixWordCount) {
@@ -4105,8 +4153,9 @@ const char8_t* NameCoder<T, Count>::operator()(
 }
 
 template<typename T, size_t Count>
-bool NameCoder<T, Count>::operator()(const char8_t *name, T &id) const {
-	const BaseEntry *entry = Impl::findEntry(entryList_, Count, name);
+bool NameCoder<T, Count>::operator()(
+		const char8_t *name, T &id, const NameCoderOptions &options) const {
+	const BaseEntry *entry = Impl::findEntry(entryList_, Count, name, options);
 
 	if (entry == NULL) {
 		id = T();
@@ -4789,7 +4838,7 @@ inline void ObjectCoder::Impl::decodeInternal(
 	value.reserve(size);
 
 	for (size_t r = size; r > 0; r--) {
-		value.push_back(coder.create<ElementType>());
+		value.push_back(coder.template create<ElementType>());
 		coder.decodeBy(
 				coder, scope.stream(), value.back(), attr,
 				filterTraitsForMembers(Traits()));
@@ -4831,7 +4880,26 @@ void ObjectCoder::Impl::decodeInternal(
 
 template<typename C, typename S, typename T, typename Traits>
 void ObjectCoder::Impl::decodeInternal(
-		C &coder, S &stream, T &value, const Attribute &attr,
+		C &coder, S &stream, const T *&value, const Attribute &attr,
+		const Traits&, const TypeTag<TYPE_OPTIONAL_OBJECT>&) {
+	Type type;
+	typename S::ValueScope scope(stream, type, attr);
+
+	if (type == TYPE_NULL) {
+		value = NULL;
+		return;
+	}
+
+	T *localValue = coder.template create<T*>();
+
+	coder.template decodeBy(
+			coder, scope.stream(), *localValue, attr, OptionalObjectCoding());
+	value = localValue;
+}
+
+template<typename C, typename S, typename T, typename Traits>
+void ObjectCoder::Impl::decodeInternal(
+		C &coder, S &stream, T *&value, const Attribute &attr,
 		const Traits&, const TypeTag<TYPE_OPTIONAL_OBJECT>&) {
 	Type type;
 	typename S::ValueScope scope(stream, type, attr);
@@ -4839,10 +4907,11 @@ void ObjectCoder::Impl::decodeInternal(
 	coder.remove(value);
 
 	if (type == TYPE_NULL) {
+		value = NULL;
 		return;
 	}
 
-	value = coder.create<T>();
+	value = coder.template create<T*>();
 
 	coder.decodeBy(
 			coder, scope.stream(), *value, attr, OptionalObjectCoding());

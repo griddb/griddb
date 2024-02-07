@@ -84,6 +84,8 @@ struct SQLOps {
 	class OpLatchKeeperManager;
 	class OpLatchKeeper;
 
+	class OpSimulator;
+
 	class OpProfilerId;
 	class OpProfiler;
 	class OpProfilerEntry;
@@ -119,12 +121,29 @@ private:
 struct SQLOps::ContainerLocation {
 	ContainerLocation();
 
+	UTIL_OBJECT_CODER_MEMBERS(
+			UTIL_OBJECT_CODER_ENUM(
+					type_, SQLType::TABLE_CONTAINER, SQLType::Coder()),
+			UTIL_OBJECT_CODER_OPTIONAL(dbVersionId_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(id_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(schemaVersionId_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(partitioningVersionId_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(approxSize_, -1),
+			indexFirstColumns_,
+			UTIL_OBJECT_CODER_OPTIONAL(expirable_, false),
+			UTIL_OBJECT_CODER_OPTIONAL(indexActivated_, false),
+			UTIL_OBJECT_CODER_OPTIONAL(multiIndexActivated_, false));
+
 	SQLType::TableType type_;
+
 	int64_t dbVersionId_;
 	uint64_t id_;
-	int32_t schemaVersionId_;
+	uint32_t schemaVersionId_;
 	int64_t partitioningVersionId_;
-	bool schemaVersionSpecified_;
+
+	int64_t approxSize_;
+	const util::Vector<uint32_t> *indexFirstColumns_;
+
 	bool expirable_;
 	bool indexActivated_;
 	bool multiIndexActivated_;
@@ -489,6 +508,11 @@ private:
 
 class SQLOps::OpCursor {
 public:
+	enum CursorFlag {
+		FLAG_NO_EXEC = 1 << 0,
+		FLAG_PRETEND_SUSPEND = 1 << 1
+	};
+
 	class Source;
 	struct State;
 
@@ -558,6 +582,8 @@ private:
 	bool compiling_;
 	bool suspended_;
 	bool released_;
+
+	uint32_t flags_;
 };
 
 class SQLOps::OpCursor::Source {
@@ -565,6 +591,7 @@ public:
 	Source(const OpStoreId &id, OpStore &store, OpContext *parentCxt);
 
 	void setExtContext(ExtOpContext *extCxt);
+	void setFlags(uint32_t flags);
 
 private:
 	friend class OpCursor;
@@ -573,6 +600,7 @@ private:
 	OpStore &store_;
 	OpContext *parentCxt_;
 	ExtOpContext *extCxt_;
+	uint32_t flags_;
 };
 
 struct SQLOps::OpCursor::State {
@@ -636,8 +664,14 @@ public:
 	const OpConfig& getConfig();
 	void setConfig(const OpConfig &config);
 
+	int64_t getLastInterruptionCheckCount();
+	void setLastInterruptionCheckCount(int64_t count);
+
 	OpAllocatorManager& getAllocatorManager();
 	OpLatchKeeperManager& getLatchKeeperManager(ExtOpContext &cxt);
+
+	OpSimulator* getSimulator();
+	void setSimulator(OpSimulator *simulator);
 
 	OpProfiler* getProfiler();
 	void activateProfiler();
@@ -685,8 +719,10 @@ private:
 	const OpFactory *opFactory_;
 
 	OpConfig config_;
+	int64_t lastInterruptionCheckCount_;
 	OpAllocatorManager &allocManager_;
 	OpLatchKeeperManager *latchKeeperManager_;
+	OpSimulator *simulator_;
 	util::AllocUniquePtr<OpProfiler> profiler_;
 	TotalStatsElement lastTempStoreUsage_;
 };
@@ -896,6 +932,8 @@ public:
 
 	bool tryLatch(ExtOpContext &cxt, uint64_t maxSize, bool hot);
 	void adjustLatch(uint64_t size);
+
+	OpSimulator* getSimulator();
 
 	OpProfilerEntry* getProfiler();
 	void activateProfiler(const OpProfilerId &id);
@@ -1132,11 +1170,15 @@ public:
 	bool tryLatch(uint64_t maxSize, bool hot);
 	void adjustLatch(uint64_t size);
 
+	OpSimulator* getSimulator();
+
+	bool isProfiling();
+
 	SQLValues::ValueProfile* getValueProfile();
 	SQLExprs::ExprProfile* getExprProfile();
 
 	OpProfilerOptimizationEntry* getOptimizationProfiler();
-	OpProfilerIndexEntry* getIndexProfiler();
+	OpProfilerIndexEntry* getIndexProfiler(uint32_t ordinal);
 
 
 	uint32_t getInputCount();
@@ -1209,7 +1251,9 @@ private:
 	OpContext(const OpContext&);
 	OpContext& operator=(const OpContext&);
 
-	static int64_t getInitialInterruptionCheckCount(OpStore &store);
+	static int64_t getInitialInterruptionCheckCount(
+			OpStore &store, bool withLast);
+	void saveInterruptionCheckCount();
 
 	bool checkSuspendedDetail();
 

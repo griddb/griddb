@@ -35,7 +35,7 @@
 #include "sql_service.h"
 #include "sql_execution.h"
 #include "sql_command_manager.h"
-
+#include "database_manager.h"
 #include "picojson.h"
 
 
@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 3;
-const int32_t GS_REVISION = 1;
-const int32_t GS_BUILD_NO = 39942;
+const int32_t GS_MINOR_VERSION = 5;
+const int32_t GS_REVISION = 0;
+const int32_t GS_BUILD_NO = 40191;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -87,9 +87,7 @@ static class MainConfigSetUpHandler : public ConfigTable::SetUpHandler {
 } g_mainConfigSetUpHandler;
 
 static void setUpTrace(const ConfigTable *param, bool checkOnly, bool longArchive = false);
-static void setUpAuditTrace(const ConfigTable *param);
 static void setUpAllocator();
-
 
 /*!
 	@brief Handler for failure of memory allocation at the StackAllocator
@@ -306,7 +304,6 @@ int main(int argc, char **argv) {
 		MainTraceHandler traceHandler(config);
 		setUpTrace(&config, checkOnly, longArchive);
 		config.setTraceEnabled(true);
-        setUpAuditTrace(&config);
 
 		AUDIT_TRACE_INFO(AUDIT_SYSTEM, GS_TRACE_SC_WEB_API_CALLED, 
 				"", "", "", "", "", "", "SYSTEM", "GS_START_NODE", "", "", "");
@@ -412,7 +409,7 @@ int main(int argc, char **argv) {
 
 		SyncManager syncMgr(config, &pt);
 
-		TransactionManager txnMgr(config);
+		TransactionManager txnMgr(config, false);
 
 		util::FixedSizeAllocator<util::Mutex> resultSetPool(
 			util::AllocatorInfo(ALLOCATOR_GROUP_TXN_RESULT, "resultSetPool"),
@@ -444,8 +441,6 @@ int main(int argc, char **argv) {
 		EventEngine::Config eeConfig;
 		EventEngine::Source source(eeVarSizeAlloc, fixedSizeAlloc);
 
-#ifndef _WIN32
-#endif
 		int32_t cacheSize = config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_SIZE);
 		int32_t cacheUpdateInterval = config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL);
 		UserCache userCache(cacheSize, varSizeAlloc, cacheUpdateInterval);
@@ -498,13 +493,17 @@ int main(int argc, char **argv) {
 		SQLExecutionManager executionManager(config, valloc);
 		JobManager jobManager(valloc, store, config);
 
+		DatabaseManager dbMgr(config, varSizeAlloc, txnMgr.getPartitionGroupConfig());
+
 		ManagerSet mgrSet(&clsSvc, &syncSvc, &txnSvc, &cpSvc, &sysSvc,
 			&pt, &partitionList, &clsMgr, &syncMgr, &txnMgr,
 			&recoveryMgr, &fixedSizeAlloc, &varSizeAlloc, &exeSvc,
 			&config, &stats
 			, &newSqlSvc, &executionManager, &jobManager
 			, pUserCache 
+			, NULL
 			, &dsConfig
+			,&dbMgr
 		);
 
 
@@ -606,7 +605,9 @@ int main(int argc, char **argv) {
 							 " See message logs"
 						  << std::endl;
 			}
-
+			if (!systemErrorOccurred) {
+				systemErrorOccurred = clsMgr.isAutoShutdown();
+			}
 		}
 		catch (std::exception &e) {
 			systemErrorOccurred = true;
@@ -997,10 +998,6 @@ void setUpTrace(const ConfigTable *config, bool checkOnly, bool longArchive) {
 		manager.setOutputType(static_cast<util::TraceOption::OutputType>(
 			config->get<int32_t>(CONFIG_TABLE_TRACE_OUTPUT_TYPE)));
 	}
-}
-
-void setUpAuditTrace(const ConfigTable *config) {
-
 }
 
 void setUpAllocator() {

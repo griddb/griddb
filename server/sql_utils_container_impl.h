@@ -28,6 +28,7 @@
 #include "query_processor.h"
 #include "result_set.h"
 #include "meta_store.h"
+#include "btree_map_ext.h"
 
 #include "sql_expression_core.h"
 #include "sql_operator_utils.h" 
@@ -37,7 +38,6 @@ class Expr;
 
 
 struct SQLContainerImpl {
-
 	typedef SQLType::Id ExpressionType;
 	typedef SQLType::IndexType IndexType;
 
@@ -45,7 +45,9 @@ struct SQLContainerImpl {
 
 	typedef ::ColumnType ContainerColumnType;
 
+	typedef BaseIndex::SearchContextPool SearchContextPool;
 	typedef BtreeMap::SearchContext BtreeSearchContext;
+	typedef BtreeMap::TermConditionUpdator BtreeConditionUpdator;
 
 	typedef BaseContainer::RowArray RowArray;
 	typedef BaseContainer::RowArrayType RowArrayType;
@@ -69,10 +71,16 @@ struct SQLContainerImpl {
 	typedef SQLOps::OpStore OpStore;
 	typedef SQLOps::OpContext OpContext;
 	typedef SQLOps::Projection Projection;
+	typedef SQLOps::OpSimulator OpSimulator;
 
 	typedef SQLOps::ExtOpContext ExtOpContext;
+	typedef SQLOps::OpProfilerIndexEntry IndexProfiler;
 
-	typedef SQLContainerUtils::ScanMergeMode MergeMode;
+	typedef SQLContainerUtils::IndexScanInfo IndexScanInfo;
+
+	typedef int64_t OIdTableGroupId;
+	typedef util::Vector<ColumnId> ColumnIdList;
+	typedef util::Vector<IndexInfo> IndexInfoList;
 
 	class CursorImpl;
 	class CursorAccessorImpl;
@@ -92,7 +100,7 @@ struct SQLContainerImpl {
 	class VarCondEvaluator;
 	template<typename Func, size_t V> class ComparisonEvaluator;
 	class EmptyCondEvaluator;
-	template<typename Base, BaseContainer::RowArrayType RAType>
+	template<typename Base, RowArrayType RAType>
 	class RowIdCondEvaluator;
 
 	class GeneralProjector;
@@ -106,14 +114,22 @@ struct SQLContainerImpl {
 	class BaseRegistrar;
 	class DefaultRegistrar;
 
-	struct SearchResult;
+	class SearchResult;
+	class IndexConditionUpdator;
+	class IndexSearchContext;
+
 	class CursorScope;
+	class LocalCursorScope;
+	class ContainerNameFormatter;
+
 	class MetaScanHandler;
 	class TupleUpdateRowIdHandler;
 
+	struct BitUtils;
 	class OIdTable;
 	class RowIdFilter;
 
+	struct ScanSimulatorUtils;
 	struct ContainerValueUtils;
 	struct TQLTool;
 
@@ -123,6 +139,8 @@ struct SQLContainerImpl {
 
 class SQLContainerImpl::CursorImpl : public SQLContainerUtils::ScanCursor {
 public:
+	class IndexConditionCursor;
+
 	struct Data;
 	class HolderImpl;
 
@@ -133,12 +151,9 @@ public:
 
 	virtual bool scanFull(OpContext &cxt, const Projection &proj);
 	virtual bool scanRange(OpContext &cxt, const Projection &proj);
-	virtual bool scanIndex(
-			OpContext &cxt, const SQLExprs::IndexConditionList &condList);
+	virtual bool scanIndex(OpContext &cxt, const IndexScanInfo &info);
 	virtual bool scanMeta(
 			OpContext &cxt, const Projection &proj, const Expression *pred);
-
-	virtual void finishIndexScan(OpContext &cxt);
 
 	virtual uint32_t getOutputIndex();
 	virtual void setOutputIndex(uint32_t index);
@@ -150,11 +165,56 @@ public:
 	void addContextRef(OpContext **ref);
 	void addContextRef(SQLExprs::ExprContext **ref);
 
+	static void setUpConditionColumnTypeList(
+			const BaseContainer &container,
+			SQLExprs::IndexConditionList::const_iterator condBegin,
+			SQLExprs::IndexConditionList::const_iterator condEnd,
+			util::Vector<ContainerColumnType> &condTypeList);
+
+	static void setUpSearchContext(
+			TransactionContext &txn,
+			SQLExprs::IndexConditionList::const_iterator condBegin,
+			SQLExprs::IndexConditionList::const_iterator condEnd,
+			const util::Vector<ContainerColumnType> &condTypeList,
+			BtreeSearchContext &sc);
+
 private:
+	enum RowsTargetType {
+		TYPE_NO_ROWS,
+		TYPE_COLLECTION_ROWS,
+		TYPE_TIME_SERIES_ROWS
+	};
+
+	enum IndexTargetType {
+		TYPE_NO_INDEX,
+		TYPE_TIME_SERIES_KEY_TREE,
+		TYPE_TIME_SERIES_VALUE_TREE,
+		TYPE_DEFAULT_TREE
+	};
+
 	typedef util::AllocVector<UpdatorEntry> UpdatorList;
 
 	typedef util::AllocVector<OpContext**> ContextRefList;
 	typedef util::AllocVector<SQLExprs::ExprContext**> ExprContextRefList;
+
+	typedef util::Map<uint64_t, OIdTableGroupId> IndexGroupIdMap;
+	typedef util::Map<uint64_t, uint32_t> IndexOrdinalMap;
+
+	RowsTargetType prepareFullScan(
+			OpContext &cxt, BtreeSearchContext *&sc, const Projection &proj,
+			ContainerRowScanner *&scanner);
+	void finishFullScan(OpContext &cxt, BtreeSearchContext *sc, bool &done);
+
+	RowsTargetType prepareRangeScan(
+			OpContext &cxt, const Projection &proj,
+			ContainerRowScanner *&scanner, SearchResult *&result);
+	void finishRangeScan(OpContext &cxt, bool &done);
+
+	IndexTargetType prepareIndexSearch(
+			OpContext &cxt, IndexSearchContext *&sc,
+			const IndexScanInfo &info, SearchResult *&result);
+	bool finishIndexSearch(
+			OpContext &cxt, IndexSearchContext *sc, bool &done);
 
 	ContainerId getNextContainerId() const;
 	void setNextContainerId(ContainerId containerId);
@@ -163,42 +223,74 @@ private:
 			OpContext &cxt, const Projection &proj,
 			const BaseContainer &container, RowIdFilter *rowIdFilter);
 	void updateScanner(OpContext &cxt, bool finished);
+	void clearScanner();
 
 	void preparePartialSearch(
 			OpContext &cxt, BtreeSearchContext &sc,
-			const SQLExprs::IndexConditionList *targetCondList);
+			BtreeConditionUpdator *updator,
+			const ColumnIdList &indexColumnList,
+			const SQLExprs::IndexConditionList *targetCondList,
+			util::Vector<ContainerColumnType> *condTypeList, size_t condPos);
 	bool finishPartialSearch(
 			OpContext &cxt, BtreeSearchContext &sc, bool forIndex);
+	void updatePartialExecutionSize(OpContext &cxt, bool done);
 
-	bool checkUpdates(
-			TransactionContext &txn, BaseContainer &container,
-			ResultSet &resultSet);
+	static bool checkUpdatesStart(
+			TupleUpdateRowIdHandler &handler, OIdTable &oIdTable);
+	RowIdFilter* restartRangeScanWithUpdates(
+			OpContext &cxt, TransactionContext &txn, const Projection &proj,
+			BaseContainer &container, OIdTable &oIdTable);
+	bool detectRangeScanFinish(
+			BaseContainer *container, TupleUpdateRowIdHandler *handler,
+			OIdTable *oIdTable);
+	static void applyRangeScanResultProfile(
+			OpContext &cxt, OIdTable *oIdTable);
 
-	static void setUpSearchContext(
-			TransactionContext &txn,
-			const SQLExprs::IndexConditionList &targetCondList,
-			BtreeSearchContext &sc, const BaseContainer &container);
+	IndexTargetType acceptIndexCondition(
+			OpContext &cxt, BaseContainer *container, IndexInfoList &infoList,
+			const SQLExprs::IndexConditionList &targetCondList, size_t pos,
+			ColumnIdList &indexColumnList);
+	IndexTargetType detectIndexTargetType(
+			IndexType indexType, BaseContainer &container,
+			const SQLExprs::IndexConditionList &condList, size_t pos);
 
-	IndexType acceptIndexCond(
-			OpContext &cxt, const SQLExprs::IndexConditionList &targetCondList,
-			util::Vector<uint32_t> &indexColumnList);
-
-	void acceptSearchResult(
-			OpContext &cxt, const SearchResult &result,
-			const SQLExprs::IndexConditionList *targetCondList,
-			ContainerRowScanner *scanner, OIdTable *oIdTable);
-
-	static void acceptIndexInfo(
+	void acceptIndexInfo(
 			OpContext &cxt, TransactionContext &txn, BaseContainer &container,
 			const SQLExprs::IndexConditionList &targetCondList,
-			const IndexInfo &info);
+			const IndexInfo &info, size_t pos, size_t condCount);
+	static void applyIndexResultProfile(
+			IndexSearchContext *sc, IndexProfiler &profiler);
 
+	OIdTableGroupId getIndexGroupId(size_t pos);
+	uint32_t getIndexOrdinal(size_t pos);
+
+	IndexSearchContext& prepareIndexSearchContext(
+			OpContext &cxt, const IndexScanInfo *info);
+
+	IndexConditionCursor& prepareIndexConditionCursor(
+			const SQLExprs::IndexConditionList &condList, bool &initialized);
+	BtreeConditionUpdator* prepareIndexConditionUpdator(
+			OpContext &cxt, IndexSearchContext &sc, BaseContainer &container,
+			const IndexScanInfo &info,
+			const SQLExprs::IndexConditionList &condList, size_t pos,
+			size_t subPos, size_t &nextPos);
+	SQLValues::ValueSetHolder& prepareValueSetHolder(OpContext &cxt);
+
+	void setRowDuplicatable(OpContext &cxt);
 	void setIndexLost(OpContext &cxt);
+	void setIndexAbortion(OpContext &cxt, bool duplicatableOrLost);
 
 	template<typename Container>
 	static void scanRow(
 			TransactionContext &txn, Container &container,
 			const SearchResult &result, ContainerRowScanner &scanner);
+
+	MetaProcessor* prepareMetaProcessor(
+			OpContext &cxt, TransactionContext &txn, ContainerId nextContainerId,
+			const Expression *pred, MetaProcessorSource *&source);
+	MetaProcessorSource* prepareMetaProcessorSource(
+			OpContext &cxt, TransactionContext &txn, const Expression *pred,
+			const FullContainerKey *&containerKey);
 
 	static FullContainerKey* predicateToContainerKey(
 			SQLValues::ValueContext &cxt, TransactionContext &txn,
@@ -210,19 +302,55 @@ private:
 	void updateAllContextRef(OpContext &cxt);
 	void clearAllContextRef();
 
+	static OutputOrder getOrder();
+	static RowsTargetType getRowsTargetType(BaseContainer &container);
+
+	Collection& resolveCollection();
+	TimeSeries& resolveTimeSeries();
+
+	BaseContainer& resolveContainer();
+
+	TransactionContext& resolveTransactionContext();
+
 	RowIdFilter* checkRowIdFilter(
 			OpContext &cxt, TransactionContext& txn, BaseContainer &container,
 			bool readOnly);
 	void finishRowIdFilter(RowIdFilter *rowIdFilter);
 
-	OIdTable* findOIdTable();
-	OIdTable& resolveOIdTable(OpContext &cxt, MergeMode::Type mode);
+	void setUpOIdTable(
+			OpContext &cxt, OIdTable &oIdTable,
+			const SQLExprs::IndexConditionList &condList);
 
 	RowIdFilter* findRowIdFilter();
 	RowIdFilter& resolveRowIdFilter(OpContext &cxt, RowId maxRowId);
 
 	Accessor &accessor_;
 	Data &data_;
+};
+
+class SQLContainerImpl::CursorImpl::IndexConditionCursor {
+public:
+	explicit IndexConditionCursor(const SQLExprs::IndexConditionList &condList);
+
+	bool exists();
+	void next();
+	void close();
+
+	void setNextPosition(size_t pos);
+	size_t getCurrentPosition();
+
+	void setCurrentSubPosition(size_t subPos);
+	size_t getCurrentSubPosition();
+
+private:
+	IndexConditionCursor(const IndexConditionCursor&);
+	IndexConditionCursor& operator=(const IndexConditionCursor&);
+
+	size_t currentPos_;
+	size_t currentSubPos_;
+
+	size_t nextPos_;
+	size_t condCount_;
 };
 
 struct SQLContainerImpl::CursorImpl::Data {
@@ -234,14 +362,21 @@ struct SQLContainerImpl::CursorImpl::Data {
 	int64_t totalSearchCount_;
 	uint64_t lastPartialExecSize_;
 
+	util::LocalUniquePtr<IndexConditionCursor> condCursor_;
+
 	ContainerRowScanner *scanner_;
 	util::LocalUniquePtr<UpdatorList> updatorList_;
-
-	util::AllocUniquePtr<OIdTable> oIdTable_;
 	util::AllocUniquePtr<RowIdFilter> rowIdFilter_;
 
 	ContextRefList cxtRefList_;
 	ExprContextRefList exprCxtRefList_;
+
+	const IndexGroupIdMap *indexGroupIdMap_;
+	const IndexOrdinalMap *indexOrdinalMap_;
+	IndexProfiler *lastIndexProfiler_;
+
+	util::LocalUniquePtr<SQLValues::ValueContext> valuesHolderCxt_;
+	util::LocalUniquePtr<SQLValues::ValueSetHolder> valuesHolder_;
 };
 
 class SQLContainerImpl::CursorImpl::HolderImpl :
@@ -281,6 +416,8 @@ public:
 			ExtOpContext &cxt, const TupleColumnList &inColumnList,
 			SQLExprs::IndexSelector &selector);
 	virtual bool isIndexLost();
+	virtual bool isRowDuplicatable();
+	virtual bool isRangeScanFinished();
 
 	virtual void setIndexSelection(const SQLExprs::IndexSelector &selector);
 	virtual const SQLExprs::IndexSelector& getIndexSelection();
@@ -288,10 +425,7 @@ public:
 	virtual void setRowIdFiltering();
 	virtual bool isRowIdFiltering();
 
-	virtual void setMergeMode(MergeMode::Type mode);
-
 	const ContainerLocation& getLocation();
-	MergeMode::Type getMergeMode();
 	int64_t getIndexLimit();
 	int64_t getMemoryLimit();
 	const std::pair<uint64_t, uint64_t>& getPartialExecSizeRange();
@@ -299,6 +433,11 @@ public:
 	void startScope(ExtOpContext &cxt, const TupleColumnList &inColumnList);
 	void finishScope() throw();
 	CursorScope& resolveScope();
+
+	void handleSearchError(std::exception &e);
+	static void handleSearchError(
+			TransactionContext *txn, BaseContainer *container,
+			std::exception &e);
 
 	BaseContainer& resolveContainer();
 	BaseContainer* getContainer();
@@ -322,8 +461,21 @@ public:
 	void clearResultSetPreserving(ResultSet &resultSet, bool force);
 	void activateResultSetPreserving(ResultSet &resultSet);
 
+	static void checkContainer(
+			TransactionContext &txn, BaseContainer *container,
+			const ContainerLocation &location, SchemaVersionId schemaVersionId,
+			const TupleColumnList &inColumnList);
+	static void checkContainerValidity(
+			TransactionContext &txn, BaseContainer &container,
+			const ContainerLocation &location);
 	static void checkInputInfo(
-			const TupleColumnList &list, const BaseContainer &container);
+			const BaseContainer &container, const TupleColumnList &list);
+	static void checkPartitioningVersion(
+			TransactionContext &txn, BaseContainer &container,
+			const ContainerLocation &location);
+	static void checkContainerSize(
+			TransactionContext &txn, BaseContainer &container,
+			const ContainerLocation &location);
 
 	static TupleColumnType resolveColumnType(
 			const ColumnInfo &columnInfo, bool used, bool withStats);
@@ -333,11 +485,13 @@ public:
 	bool updateNullsStats(
 			util::StackAllocator &alloc, const BaseContainer &container);
 
+	TupleUpdateRowIdHandler* findUpdateRowIdHandler();
 	TupleUpdateRowIdHandler* prepareUpdateRowIdHandler(
 			TransactionContext &txn, BaseContainer &container,
 			ResultSet &resultSet);
 
-	void acceptIndexLost();
+	void acceptIndexAbortion(bool duplicatableOrLost);
+	void setRangeScanFinished();
 
 	void initializeScanRange(
 			TransactionContext &txn, BaseContainer &container);
@@ -349,8 +503,13 @@ public:
 			IndexSelector &indexSelector, const TupleColumnList &columnList);
 	static void getIndexInfoList(
 			TransactionContext &txn, BaseContainer &container,
-			util::Vector<IndexInfo> &indexInfoList);
+			IndexInfoList &indexInfoList);
 
+	OIdTable& resolveOIdTable();
+	OIdTable& prepareOIdTable(BaseContainer &container);
+	OIdTable* findOIdTable();
+
+	bool isRowIdFilterLimitReached(RowIdFilter *rowIdFilter);
 	void restoreRowIdFilter(RowIdFilter &rowIdFilter);
 	void finishRowIdFilter(RowIdFilter *rowIdFilter);
 
@@ -365,6 +524,10 @@ public:
 	static SQLExecutionManager* getExecutionManager(ExtOpContext &cxt);
 	static SQLService* getSQLService(ExtOpContext &cxt);
 	static const ResourceSet* getResourceSet(ExtOpContext &cxt);
+
+	static DataStoreV4& resolveDataStore(BaseContainer &container);
+	static DataStoreV4* resolveDataStoreOnTransaction(ExtOpContext &cxt);
+	static ObjectManagerV4& resolveObjectManager(BaseContainer &container);
 
 private:
 	friend class CursorScope;
@@ -416,7 +579,6 @@ private:
 	SQLValues::VarAllocator &varAlloc_;
 	ContainerLocation location_;
 	OpContext::Source cxtSrc_;
-	MergeMode::Type mergeMode_;
 
 	bool closed_;
 	bool rowIdFiltering_;
@@ -425,12 +587,14 @@ private:
 	bool indexLost_;
 	bool resultSetLost_;
 	bool nullsStatsChanged_;
+	bool rowDuplicatable_;
+	bool rangeScanFinished_;
 
 	ResultSetId resultSetId_;
 	ResultSetHolder resultSetHolder_;
 
 	PartitionId lastPartitionId_;
-	DataStoreV4 *lastDataStore_;
+	ResultSetManager *lastRSManager_;
 	BaseContainer *container_;
 	ContainerType containerType_;
 	SchemaVersionId schemaVersionId_;
@@ -443,6 +607,7 @@ private:
 	util::LocalUniquePtr<BaseObject> frontFieldCache_;
 
 	util::AllocUniquePtr<CursorScope> scope_;
+	util::AllocUniquePtr<OIdTable> oIdTable_;
 	util::AllocUniquePtr<TupleUpdateRowIdHandler> updateRowIdHandler_;
 
 	NullsStats initialNullsStats_;
@@ -1276,7 +1441,7 @@ private:
 	static const BaseRegistrar REGISTRAR_INSTANCE;
 };
 
-struct SQLContainerImpl::SearchResult {
+class SQLContainerImpl::SearchResult {
 public:
 	typedef util::XArray<OId> OIdList;
 	typedef std::pair<OIdList*, OIdList*> OIdListRef;
@@ -1287,6 +1452,8 @@ public:
 
 		bool isEntryEmpty() const;
 		size_t getEntrySize() const;
+
+		void clearEntry();
 
 		OIdList& getOIdList(bool forRowArray);
 		const OIdList& getOIdList(bool forRowArray) const;
@@ -1303,14 +1470,159 @@ public:
 	bool isEmpty() const;
 	size_t getSize() const;
 
+	void clear();
+
 	Entry& getEntry(bool onMvcc);
 	const Entry& getEntry(bool onMvcc) const;
 
 	OIdListRef getOIdListRef(bool forRowArray);
 
+	OIdList& normal();
+	OIdList& normalRa();
+
+	OIdList& mvcc();
+	OIdList& mvccRa();
+
 private:
 	Entry normalEntry_;
 	Entry mvccEntry_;
+};
+
+class SQLContainerImpl::IndexConditionUpdator {
+public:
+	class ByValue;
+	class ByReader;
+
+	IndexConditionUpdator(
+			TransactionContext &txn, SQLValues::VarContext &varCxt);
+
+	BtreeConditionUpdator* prepare(
+			BaseContainer &container, SQLValues::ValueSetHolder &valuesHolder,
+			const SQLExprs::IndexSelector *selector,
+			const SQLExprs::IndexConditionList *condList,
+			const util::Vector<SQLValues::TupleColumn> *columnList,
+			TupleListReader *reader, size_t pos, size_t subPos,
+			size_t &nextPos);
+
+	size_t getSubPosition();
+
+private:
+	TransactionContext &txn_;
+	util::StackAllocator &alloc_;
+	SQLValues::ValueContext valueCxt_;
+
+	util::AllocUniquePtr<ByValue> byValue_;
+	util::AllocUniquePtr<ByReader> byReader_;
+
+	size_t subPos_;
+};
+
+class SQLContainerImpl::IndexConditionUpdator::ByValue :
+		public SQLContainerImpl::BtreeConditionUpdator {
+public:
+	ByValue(TransactionContext &txn, size_t &subPos);
+	virtual ~ByValue();
+
+	static bool isAcceptable(
+			const SQLExprs::IndexConditionList &condList, size_t pos);
+
+	void assign(
+			BaseContainer &container,
+			const SQLExprs::IndexConditionList *condList, size_t pos,
+			size_t subPos, size_t &nextPos);
+
+	virtual void update(BtreeSearchContext &sc);
+	virtual void next();
+
+private:
+	TransactionContext &txn_;
+	util::StackAllocator &alloc_;
+
+	const SQLExprs::IndexConditionList *condList_;
+	util::Vector<ContainerColumnType> columnTypeList_;
+	util::Vector<TermCondition> termCondList_;
+	Value::Pool valuePool_;
+
+	size_t &subPos_;
+	size_t endPos_;
+};
+
+class SQLContainerImpl::IndexConditionUpdator::ByReader :
+		public SQLContainerImpl::BtreeConditionUpdator {
+public:
+	explicit ByReader(TransactionContext &txn);
+	virtual ~ByReader();
+
+	static bool isAcceptable(
+			const SQLExprs::IndexConditionList &condList, size_t pos);
+
+	void assign(
+			BaseContainer &container, SQLValues::ValueSetHolder &valuesHolder,
+			const SQLExprs::IndexSelector *selector,
+			const SQLExprs::IndexConditionList &condList,
+			const util::Vector<SQLValues::TupleColumn> &columnList,
+			TupleListReader &reader, size_t pos, size_t &nextPos);
+
+	virtual void update(BtreeSearchContext &sc);
+	virtual void next();
+
+private:
+	bool readValues();
+	bool readValuesDetail();
+
+	TransactionContext &txn_;
+	util::StackAllocator &alloc_;
+
+	const SQLExprs::IndexSelector *selector_;
+	SQLValues::ValueSetHolder *valuesHolder_;
+
+	SQLExprs::IndexConditionList subCondList_;
+	SQLExprs::IndexConditionList localSubCondList_;
+	util::Vector<SQLValues::TupleColumn> columnList_;
+	util::Vector<ContainerColumnType> columnTypeList_;
+	util::Vector<TermCondition> termCondList_;
+	Value::Pool valuePool_;
+
+	TupleListReader *reader_;
+};
+
+class SQLContainerImpl::IndexSearchContext {
+public:
+	IndexSearchContext(
+			TransactionContext &txn, SQLValues::VarContext &varCxt,
+			SQLOps::OpAllocatorManager &allocManager,
+			util::StackAllocator::BaseAllocator &baseAlloc);
+
+	void clear();
+
+	void setInfo(const IndexScanInfo *info);
+
+	const SQLExprs::IndexConditionList& conditionList();
+	IndexConditionUpdator& conditionUpdator();
+
+	ColumnIdList& columnList();
+	util::Vector<ContainerColumnType>& columnTypeList();
+	IndexInfoList& indexInfoList();
+
+	BtreeSearchContext& tree();
+
+	SearchResult& result();
+
+private:
+	util::StackAllocator &alloc_;
+	SQLOps::OpStore::AllocatorRef settingAllocRef_;
+
+	const SQLExprs::IndexConditionList *condList_;
+
+	ColumnIdList columnList_;
+	util::Vector<ContainerColumnType> columnTypeList_;
+	IndexInfoList indexInfoList_;
+
+	SearchContextPool scPool_;
+	BtreeSearchContext tree_;
+	IndexConditionUpdator indexConditionUpdator_;
+
+	SearchResult result_;
 };
 
 class SQLContainerImpl::CursorScope {
@@ -1323,29 +1635,35 @@ public:
 	TransactionContext& getTransactionContext();
 	ResultSet& getResultSet();
 
+	IndexSearchContext& prepareIndexSearchContext(
+			SQLValues::VarContext &varCxt, const IndexScanInfo *info,
+			SQLOps::OpAllocatorManager &allocManager,
+			util::StackAllocator::BaseAllocator &baseAlloc);
+	IndexSearchContext* findIndexSearchContext();
+
 	int64_t getStartPartialExecCount();
 	uint64_t getElapsedNanos();
 
 private:
 	typedef DataStoreBase::Scope DataStoreScope;
 
-	void initialize(ExtOpContext &cxt);
+	void initialize(
+			ExtOpContext &cxt, BaseContainer *container,
+			const TupleColumnList &inColumnList);
+	void setUpAccessor(BaseContainer *container);
+
 	void clear(bool force);
 	void clearResultSet(bool force);
 
 	static util::Mutex* getPartitionLock(
 			TransactionContext &txn, ExtOpContext &cxt);
 	static const DataStoreScope* getStoreScope(
-			TransactionContext &txn, ExtOpContext &cxt,
+			TransactionContext &txn, ExtOpContext &cxt, DataStoreV4 *dataStore,
 			util::LocalUniquePtr<DataStoreScope> &scope);
 	static BaseContainer* getContainer(
-			TransactionContext &txn, ExtOpContext &cxt,
+			TransactionContext &txn, DataStoreV4 *dataStore,
 			const DataStoreScope *latch, const ContainerLocation &location,
 			bool expired, ContainerType type);
-	static BaseContainer* checkContainer(
-			const TupleColumnList &inColumnList, BaseContainer *container,
-			const ContainerLocation &location,
-			SchemaVersionId schemaVersionId);
 	static ResultSet* prepareResultSet(
 			ExtOpContext &cxt, TransactionContext &txn, BaseContainer *container,
 			util::LocalUniquePtr<ResultSetGuard> &rsGuard,
@@ -1356,14 +1674,68 @@ private:
 	TransactionContext &txn_;
 	TransactionService *txnSvc_;
 	util::DynamicLockGuard<util::Mutex> partitionGuard_;
+	DataStoreV4 *dataStore_;
 	util::LocalUniquePtr<DataStoreScope> scope_;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr_;
 	util::LocalUniquePtr<ResultSetGuard> rsGuard_;
 	ResultSet *resultSet_;
 
+	util::LocalUniquePtr<IndexSearchContext> indexSearchContext_;
+
 	int64_t partialExecCount_;
 	util::Stopwatch watch_;
 };
+
+class SQLContainerImpl::LocalCursorScope {
+public:
+	LocalCursorScope(OpContext &cxt, CursorAccessorImpl &accessor);
+	LocalCursorScope(
+			ExtOpContext &extCxt, CursorAccessorImpl &accessor,
+			const TupleColumnList &inColumnList);
+
+	~LocalCursorScope();
+
+	void close() throw();
+	void closeWithError(std::exception &e);
+
+private:
+	enum {
+		INPUT_INDEX = 0
+	};
+
+	struct Data {
+		explicit Data(CursorAccessorImpl &accessor);
+
+		CursorAccessorImpl &accessor_;
+		bool closed_;
+	};
+
+	LocalCursorScope(const LocalCursorScope&);
+	LocalCursorScope& operator=(const LocalCursorScope&);
+
+	Data data_;
+};
+
+class SQLContainerImpl::ContainerNameFormatter {
+public:
+	ContainerNameFormatter(
+			TransactionContext &txn, BaseContainer &container,
+			const ContainerLocation &location);
+
+	std::ostream& format(std::ostream &os) const throw();
+
+private:
+	ContainerNameFormatter(const ContainerNameFormatter&);
+	ContainerNameFormatter& operator=(const ContainerNameFormatter&);
+
+	TransactionContext &txn_;
+	BaseContainer &container_;
+	const ContainerLocation &location_;
+};
+
+std::ostream& operator<<(
+		std::ostream &os,
+		const SQLContainerImpl::ContainerNameFormatter &formatter);
 
 class SQLContainerImpl::MetaScanHandler : public MetaProcessor::RowHandler {
 public:
@@ -1422,7 +1794,7 @@ private:
 
 	static void copyRowIdStore(
 			OpContext &cxt, uint32_t srcIndex, uint32_t destIndex,
-			const IdStoreColumnList &columnList);
+			const IdStoreColumnList &columnList, uint64_t *copiedCountRef);
 
 	static util::ObjectPool<Shared, util::Mutex> sharedPool_;
 
@@ -1441,530 +1813,486 @@ struct SQLContainerImpl::TupleUpdateRowIdHandler::Shared {
 	uint32_t rowIdStoreIndex_;
 
 	RowId maxRowId_;
+
+	uint64_t restInitialUpdateCount_;
 	bool updated_;
+	bool initialUpdatesAccepted_;
+};
+
+struct SQLContainerImpl::BitUtils {
+	template<typename V> struct DenseValues;
+	template<typename V> struct TupleColumns;
+};
+
+template<typename V>
+struct SQLContainerImpl::BitUtils::DenseValues {
+	typedef V ValueType;
+
+	struct ValueConstants {
+		static const uint32_t FULL_BIT_COUNT = (sizeof(ValueType) * CHAR_BIT);
+		static const uint32_t LOW_BIT_COUNT =
+				util::ILog2<FULL_BIT_COUNT>::VALUE;
+		static const ValueType LOW_BIT_MASK =
+				((static_cast<ValueType>(1) << LOW_BIT_COUNT) - 1);
+	};
+
+	static ValueType toHighPart(ValueType value);
+	static ValueType toLowBit(ValueType value);
+
+	static ValueType extraOfHighPart(ValueType value);
+
+	static bool nextValue(
+			uint32_t &nextPos, ValueType highPart, ValueType lowBits,
+			ValueType &value);
+};
+
+template<typename V>
+struct SQLContainerImpl::BitUtils::TupleColumns {
+public:
+	enum {
+		COLUMN_TYPE = SQLValues::TypeUtils::template ValueTraits<
+				V>::COLUMN_TYPE_AS_NUMERIC
+	};
+
+	typedef typename SQLValues::Types::template Of<COLUMN_TYPE>::Type
+			KeyTag;
+	typedef KeyTag ValueTag;
+
+	typedef typename KeyTag::ValueType KeyType;
+	typedef typename ValueTag::ValueType ValueType;
+
+	static KeyType readCurrentKey(TupleListReader &reader);
+	static ValueType readCurrentValue(TupleListReader &reader);
+
+	static void writeKey(WritableTuple &tuple, const KeyType &key);
+	static void writeValue(WritableTuple &tuple, const ValueType &value);
+
+	static TupleList::Column getKeyColumn();
+	static TupleList::Column getValueColumn();
+
+	static void getColumnTypeList(SQLValues::ColumnTypeList &list);
+
+private:
+	enum {
+		BITS_COLUMN_COUNT = 2
+	};
+
+	struct Constants {
+		static const TupleList::Column COLUMN_KEY;
+		static const TupleList::Column COLUMN_VALUE;
+		static const TupleColumnType COLUMN_TYPES[BITS_COLUMN_COUNT];
+	};
+
+	static TupleList::Column resolveColumn(bool forKey);
 };
 
 class SQLContainerImpl::OIdTable {
 public:
+	enum GroupMode {
+		MODE_UNION,
+		MODE_INTERSECT
+	};
+
+	typedef OIdTableGroupId GroupId;
+
 	struct Source;
-	class Reader;
-	class Writer;
+	struct MergeContext;
+	struct MergeElement;
+	struct MergeElementRef;
+	struct MergeElementGreater;
+	template<GroupMode M> struct MergeAction;
 
-	typedef SearchResult::OIdList OIdList;
-	typedef SearchResult::Entry SearchResultEntry;
+	explicit OIdTable(const Source &source);
+	~OIdTable();
 
-	OIdTable(const Source &source);
+	void createGroup(GroupId groupId, GroupId parentId, GroupMode mode);
 
-	bool isEmpty() const;
-
-	void addAll(const SearchResult &result);
-	void addAll(const SearchResultEntry &entry, bool onMvcc);
-
-	void popAll(SearchResult &result, uint64_t limit, uint32_t rowArraySize);
+	void addAll(GroupId groupId, SearchResult &result);
 	void popAll(
-			SearchResultEntry &entry, bool &onMvcc, uint64_t limit,
-			uint32_t rowArraySize);
+			SearchResult &result, uint64_t limit, uint32_t rowArraySize,
+			bool withUpdatesAlways);
 
 	void update(ResultSet::UpdateOperation op, OId oId);
 
-	static void readAll(
-			SearchResult &result, uint64_t limit, bool large, MergeMode::Type mode,
-			uint32_t rowArraySize, Reader &reader);
+	bool finalizeAddition(uint64_t limit);
 
-	void load(Reader &reader);
-	void save(Writer &writer);
+	bool isUpdatesAcceptable();
+	void acceptUpdates();
 
-	size_t getTotalAllocationSize();
+	bool isCursorStarted();
+	bool isCursorFinished();
+	void restartCursor();
+
+	bool getModificationProfile(
+			IndexProfiler::ModificationType modification, bool onMvcc,
+			int64_t &count) const;
 
 private:
 	enum {
-		SUB_TABLE_COUNT = 2,
-		ELEMENT_SET_ROWS_CAPACITY = 16
+		GROUP_ID_ROOT = -1,
+		GROUP_ID_DELTA_ADDITION = -2,
+		GROUP_ID_DELTA_REMOVAL = -3
 	};
 
-	template<bool Mvcc, bool Large, MergeMode::Type Mode> struct OpFuncTraits;
-	template<bool ByMvcc, bool ByMode> struct SwitcherTraits;
-	struct SwitcherOption;
-	class Switcher;
-
-	class ReadAllOp;
-	class LoadOp;
-	class SaveOp;
-
-	class AddAllOp;
-	class PopAllOp;
-
-	class AddOp;
-	class RemoveOp;
-	class RemoveChunkOp;
-
-	typedef uint32_t Group;
-	typedef uint32_t Element;
-	typedef uint64_t Code;
-	typedef int64_t SignedCode;
-
-	struct CodeUtils;
-	struct OIdConstantsBase;
-	template<bool Large> struct OIdConstants;
-
-	typedef util::Vector<Element> ElementList;
-
-	struct ElementSet;
-
-	struct GroupMapHasher {
-		size_t operator()(Group key) const { return key; }
-	};
-	typedef std::equal_to<Group> GroupMapPred;
-	typedef SQLAlgorithmUtils::HashMap<
-			Group, ElementSet, GroupMapHasher, GroupMapPred> HashGroupMap;
-	typedef util::Map<Group, ElementSet> TreeGroupMap;
-
-	struct SubTable {
-		SubTable();
-		bool isSubTableEmpty() const;
-
-		TreeGroupMap *treeMap_;
-		HashGroupMap *hashMap_;
+	enum {
+		MOD_TYPE_COUNT = IndexProfiler::END_MOD
 	};
 
-	template<bool Ordering>
-	struct MapByOrdering {
-		enum {
-			MAP_ORDERING = Ordering
-		};
-		typedef typename util::BoolType<MAP_ORDERING>::Result MapOrderingType;
-		typedef typename util::Conditional<
-				MAP_ORDERING, TreeGroupMap, HashGroupMap>::Type Type;
+	enum EntryType {
+		TYPE_CHUNK,
+		TYPE_RA_NORMAL,
+		TYPE_RA_MVCC,
+		TYPE_ROW_NORMAL,
+		TYPE_ROW_MVCC,
+		END_TYPE
 	};
 
-	template<MergeMode::Type Mode>
-	struct MapByMode {
-		typedef MapByOrdering<(Mode != MergeMode::MODE_MIXED)> Base;
-		enum {
-			MAP_ORDERING = Base::MAP_ORDERING
-		};
-		typedef typename Base::MapOrderingType MapOrderingType;
-		typedef typename Base::Type Type;
-	};
+	struct Group;
+	struct Slot;
+	struct HotSlot;
+	struct HotData;
+	struct Cursor;
+	struct Coders;
+	struct CoderConstants;
 
-	void add(OId oId, bool onMvcc);
-	void remove(OId oId, bool onMvcc, bool forRa = false);
-	void removeRa(OId oId, bool onMvcc);
-	void removeChunk(OId oId, bool onMvcc);
+	typedef BitUtils::TupleColumns<int64_t> BitTupleColumns;
+	typedef std::pair<uint64_t, uint64_t> Entry;
+	typedef std::pair<int64_t, int64_t> ModificationProfileEntry;
 
-	template<bool Mvcc, bool Large, MergeMode::Type Mode>
-	static void readAllDetail(
-			SearchResultEntry &entry, uint64_t limit, uint32_t rowArraySize,
-			Reader &reader);
-	template<bool Mvcc, bool Large, MergeMode::Type Mode>
-	void loadDetail(typename MapByMode<Mode>::Type &map, Reader &reader);
-	template<bool Mvcc, bool Large, MergeMode::Type Mode>
-	void saveDetail(typename MapByMode<Mode>::Type &map, Writer &writer);
+	typedef util::AllocVector<GroupId> GroupIdList;
+	typedef util::AllocMap<GroupId, Group*> GroupMap;
+	typedef util::AllocVector<Slot> SlotList;
+	typedef util::AllocVector<SlotList> SlotStageList;
+	typedef util::AllocVector<Entry> EntryList;
 
-	static bool isForRaWithMode(bool forRa, MergeMode::Type mode);
-	template<MergeMode::Type Mode>
-	static bool isForRaWithMode(bool forRa);
-	template<MergeMode::Type Mode>
-	static bool isRaMerging(bool forRa);
+	typedef util::XArray<OId> OIdList;
+	typedef util::Map<uint64_t, uint64_t> EntryMap;
+	typedef util::AllocUniquePtr<EntryMap> EntryMapPtr;
+	typedef util::Map<GroupId, HotSlot*> HotSlotMap;
 
-	template<bool Mvcc, bool Large, MergeMode::Type Mode>
-	static bool readTopElement(Reader &reader, bool &forRa, Code &code);
-	template<bool Large, MergeMode::Type Mode>
-	static bool readNextElement(
-			Reader &reader, bool forRa, Code lastMasked, Code &lastCode);
+	typedef EntryMap::const_iterator EntryIterator;
+	typedef std::pair<EntryIterator, EntryIterator> EntryIteratorPair;
 
-	template<bool Mvcc, bool Large, MergeMode::Type Mode>
-	static void writeGroupHead(Writer &writer, bool forRa, Group group);
 
-	template<bool Large, bool Ordering>
-	void addAllDetail(
-			typename MapByOrdering<Ordering>::Type &map,
-			const SearchResultEntry &entry);
-	template<bool Large, bool Ordering>
-	void addAllDetail(
-			typename MapByOrdering<Ordering>::Type &map,
-			const OIdList &list, bool forRa);
+	void checkAdditionWorking();
+	void checkAdditionFinalized();
+	void checkUpdatesAcceptable();
 
-	template<bool Large, bool Ordering>
-	void addDetail(
-			typename MapByOrdering<Ordering>::Type &map, OId oId, bool forRa);
-	template<bool Large, bool Ordering>
-	void addDetail(typename MapByOrdering<Ordering>::Type &map, OId oId);
-	template<bool Large, bool Ordering>
-	void addRaDetail(typename MapByOrdering<Ordering>::Type &map, OId oId);
 
-	template<bool Large, bool Ordering>
-	void popAllDetail(
-			typename MapByOrdering<Ordering>::Type &map,
-			SearchResultEntry &entry, uint64_t limit, uint32_t rowArraySize);
-	template<bool Large, bool Ordering>
-	void removeDetail(
-			typename MapByOrdering<Ordering>::Type &map, OId oId, bool forRa);
-	template<bool Large, bool Ordering>
-	void removeChunkDetail(
-			typename MapByOrdering<Ordering>::Type &map, OId oId);
+	Group* findGroup(GroupId groupId);
+	Group& getGroup(GroupId groupId);
+	Group& createGroupDirect(GroupId groupId, GroupMode mode);
+	void clearGroups();
 
-	static void elementSetToRa(ElementSet &elemSet);
+	GroupId getAdditionGroupId(GroupId groupId);
 
-	template<typename Map>
-	ElementSet& insertGroup(Map &map, Group group, bool forRa);
+	static GroupId validateGroupId(GroupId groupId, bool withRoot);
 
-	bool insertElement(ElementSet &elemSet, Element elem);
-	static bool eraseElement(ElementSet &elemSet, Element elem);
 
-	void prepareToAdd(const SearchResultEntry &entry);
-	void prepareToAdd(OId oId);
+	Slot resultToSlot(OpContext &cxt, SearchResult &result);
+	Slot oIdListToSlot(OpContext &cxt, EntryType type, OIdList &list);
+	Slot entryListToSlot(OpContext &cxt, EntryList &list);
 
-	TreeGroupMap& getGroupMap(bool onMvcc, const util::TrueType&);
-	HashGroupMap& getGroupMap(bool onMvcc, const util::FalseType&);
+	void resultToEntries(SearchResult &result, EntryList &dest);
+	void oIdListToEntries(EntryType type, OIdList &src, EntryList &dest);
 
-	Element resolveCategory();
+	bool slotToResult(
+			OpContext &cxt, Slot &slot, SearchResult &result, uint64_t limit,
+			uint32_t rowArraySize, HotSlot *removalSlot);
+	void resetSlotReader(Slot &slot);
 
-	SwitcherOption toSwitcherOption(bool onMvcc);
+	bool checkRemoved(EntryType type, Entry &entry, HotSlot &removalSlot);
+	bool checkRemovedSub(
+			EntryType type, Entry &entry, HotSlot &removalSlot);
 
-	static uint64_t getEntrySize(
-			const SearchResultEntry &entry, uint32_t rowArraySize);
-	static uint64_t getEntrySize(
-			bool forRa, size_t elemCount, uint32_t rowArraySize);
+	static bool isLimitReached(
+			const SearchResult &result, uint64_t limit, uint32_t rowArraySize);
+	static void entryToResult(
+			EntryType type, const Entry &entry, SearchResult &result);
+
+	static Entry readEntry(TupleListReader &reader);
+	static void writeEntry(TupleListWriter &writer, const Entry &entry);
+
+	static uint64_t readKey(TupleListReader &reader);
+	static uint64_t readPositionBits(TupleListReader &reader);
+
+
+	bool mergeGroup(OpContext &cxt, GroupId groupId, uint64_t &limit);
+	bool mergeSlot(OpContext &cxt, Group &group, bool full, uint64_t *limit);
+
+	Slot* updateMergingStage(
+			OpContext &cxt, Group &group, bool full, size_t *depth);
+	bool mergeStageSlot(
+			OpContext &cxt, GroupMode mode, SlotList &slotList, Slot &dest,
+			uint64_t *limit);
+
+
+	Slot* getSingleSlot(Group &group);
+	void addSlot(OpContext &cxt, Group &group, Slot &slot, bool withMerge);
+
+	Slot allocateSlot(OpContext &cxt);
+	void releaseSlot(OpContext &cxt, Slot &slot);
+
+
+	HotSlot* findHotSlot(GroupId groupId);
+	HotSlot& prepareHotSlot(GroupId groupId);
+
+	HotData& prepareHotData();
+
+
+	EntryMap* findEntryMap(EntryType type, HotSlot &slot);
+	EntryMap& prepareEntryMap(EntryType type, HotSlot &slot);
+
+	void updateEntry(EntryType type, OId oId);
+	void removeEntries(EntryType type, OId oId);
+	void removeEntriesAt(EntryType type, OId oId, EntryMap &map);
+	void addModificationEntry(GroupId groupId, EntryType type, OId oId);
+
+	void popUpdates(SearchResult &result);
+	uint64_t popEntries(
+			EntryType type, EntryIteratorPair &src, uint32_t rowArraySize,
+			OIdList &dest);
+
+
+	static OIdList* findSingleSearchResultOIdList(
+			SearchResult &result, EntryType &type);
+
+	static const OIdList& getSearchResultOIdList(
+			EntryType type, const SearchResult &result);
+	static OIdList& getSearchResultOIdList(
+			EntryType type, SearchResult &result);
+
+	static bool isMvccEntryType(EntryType type);
+	static bool isRowArrayEntryType(EntryType type);
 
 	SQLOps::OpAllocatorManager &allocManager_;
-	SQLOps::OpStore::AllocatorRef allocRef_;
-	util::StackAllocator &alloc_;
+	util::StackAllocator::BaseAllocator &baseAlloc_;
+	SQLValues::VarAllocator &varAlloc_;
+	OpContext::Source cxtSrc_;
 
+	uint32_t stageSizeLimit_;
 	bool large_;
-	MergeMode::Type mode_;
-	int64_t category_;
-	SubTable subTables_[SUB_TABLE_COUNT];
+
+	GroupMap groupMap_;
+	SlotList freeSlotList_;
+	util::AllocUniquePtr<HotData> hotData_;
+	util::AllocUniquePtr<Cursor> cursor_;
+	util::LocalUniquePtr<GroupId> mergingGroupId_;
+
+	bool updatesAcceptable_;
+	ModificationProfileEntry modificationProfile_[MOD_TYPE_COUNT];
 };
 
 struct SQLContainerImpl::OIdTable::Source {
-	Source();
+public:
+	explicit Source(const OpContext::Source &cxtSrc);
 
-	static Source ofContext(OpContext &cxt, MergeMode::Type mode);
-	static bool detectLarge(DataStoreV4 *dataStore);
+	static Source ofContext(
+			OpContext &cxt, BaseContainer &container, int64_t memoryLimit);
 
+	static bool detectLarge(BaseContainer &container);
+	static uint32_t resolveStageSizeLimit(
+			uint32_t blockSize, int64_t memoryLimit);
+
+	SQLOps::OpAllocatorManager& getAlloactorManager() const;
+	util::StackAllocator::BaseAllocator& getBaseAllocator() const;
+	SQLValues::VarAllocator& getVarAllocator() const;
+	const OpContext::Source& getContextSource() const;
+	uint32_t isStageSizeLimit() const;
+	bool isLarge() const;
+
+private:
 	SQLOps::OpAllocatorManager *allocManager_;
 	util::StackAllocator::BaseAllocator *baseAlloc_;
+	SQLValues::VarAllocator *varAlloc_;
+	OpContext::Source cxtSrc_;
+	uint32_t stageSizeLimit_;
 	bool large_;
-	MergeMode::Type mode_;
 };
 
-class SQLContainerImpl::OIdTable::Reader {
+struct SQLContainerImpl::OIdTable::MergeContext {
+	MergeContext(
+			TupleListWriter &writer, GroupMode mode, const uint64_t *limit);
+
+	uint64_t positionBits_;
+	TupleListWriter &writer_;
+
+	bool limited_;
+	uint64_t limit_;
+};
+
+struct SQLContainerImpl::OIdTable::MergeElement {
+	explicit MergeElement(TupleListReader &reader);
+
+	TupleListReader &reader_;
+};
+
+struct SQLContainerImpl::OIdTable::MergeElementRef {
 public:
-	typedef SQLOps::TupleListReader BaseReader;
-	typedef SQLOps::TupleColumn TupleColumn;
-	typedef SQLOps::TupleColumnList TupleColumnList;
+	explicit MergeElementRef(MergeElement &elem);
 
-	Reader(BaseReader &base, const TupleColumnList &columnList);
+	uint64_t key() const;
+	uint64_t positionBits() const;
 
-	bool exists();
-	void next();
-	Code getCode();
+	bool next() const;
 
 private:
-	BaseReader &base_;
-	const TupleColumn &column_;
+	TupleListReader *reader_;
 };
 
-class SQLContainerImpl::OIdTable::Writer {
-public:
-	typedef SQLOps::TupleListWriter BaseWriter;
-	typedef SQLOps::TupleColumn TupleColumn;
-	typedef SQLOps::TupleColumnList TupleColumnList;
-
-	Writer(BaseWriter &base, const TupleColumnList &columnList);
-
-	void writeCode(Code code);
-
-private:
-	BaseWriter &base_;
-	const TupleColumn &column_;
-};
-
-template<bool ByMvcc, bool ByMode>
-struct SQLContainerImpl::OIdTable::SwitcherTraits {
-	enum {
-		MVCC_SPECIFIC = ByMvcc,
-		MODE_SPECIFIC = ByMode
+struct SQLContainerImpl::OIdTable::MergeElementGreater {
+	template<typename>
+	struct TypeAt {
+		typedef MergeElementGreater TypedOp;
 	};
-	struct MvccFilter {
-		enum  {
-			OPTION_SPECIFIC = MVCC_SPECIFIC
-		};
-		template<bool Mvcc> struct At {
-			static const bool VALUE = (OPTION_SPECIFIC ? Mvcc : false);
-		};
-	};
-	struct ModeFilter {
-		enum  {
-			OPTION_SPECIFIC = MODE_SPECIFIC
-		};
-		template<MergeMode::Type Mode> struct At {
-			static const MergeMode::Type PARTIAL_SPECIFIC_VALUE =
-					(Mode == MergeMode::MODE_MIXED ?
-								Mode : MergeMode::END_MODE);
-			static const MergeMode::Type VALUE =
-					(OPTION_SPECIFIC ? Mode : PARTIAL_SPECIFIC_VALUE);
-		};
-	};
-};
-
-template<bool Mvcc, bool Large, SQLContainerUtils::ScanMergeMode::Type Mode>
-struct SQLContainerImpl::OIdTable::OpFuncTraits {
-	static const bool ON_MVCC = Mvcc;
-	static const bool ON_LARGE = Large;
-	static const MergeMode::Type MERGE_MODE = Mode;
-
-	typedef typename MapByMode<Mode>::MapOrderingType MapOrderingType;
-	static const bool MAP_ORDERING = MapByMode<Mode>::MAP_ORDERING;
-};
-
-struct SQLContainerImpl::OIdTable::SwitcherOption {
-	SwitcherOption();
-
-	OIdTable& getTable() const;
-
-	bool onMvcc_;
-	bool onLarge_;
-	MergeMode::Type mode_;
-
-	OIdTable *table_;
-};
-
-class SQLContainerImpl::OIdTable::Switcher {
-public:
-	template<typename Op> struct OpTraits {
-		typedef void (Op::*FuncType)(const SwitcherOption&) const;
-	};
-
-	explicit Switcher(const SwitcherOption &option);
 
 	template<typename Op>
-	typename OpTraits<Op>::FuncType resolve() const;
+	struct Func {
+		typedef typename Op::RetType (*Type)(Op&);
+	};
 
-private:
-	template<typename Op, bool Mvcc>
-	typename OpTraits<Op>::FuncType resolveDetail() const;
-	template<typename Op, bool Mvcc, bool Large>
-	typename OpTraits<Op>::FuncType resolveDetail() const;
-	template<typename Op, bool Mvcc, bool Large, MergeMode::Type Mode>
-	typename OpTraits<Op>::FuncType resolveDetail() const;
+	typedef SQLAlgorithmUtils::HeapElement<MergeElementRef> Element;
 
-	SwitcherOption option_;
+	bool operator()(const Element &elem1, const Element &elem2) const;
+	bool operator()(
+			const MergeElementRef &elem1, const MergeElementRef &elem2) const;
+
+	const MergeElementGreater& getTypeSwitcher() const;
+
+	template<typename Op> typename Func<Op>::Type get() const;
+	template<typename Op> typename Func<Op>::Type getWithOptions() const;
+	template<typename Op> static typename Op::RetType execute(Op &op);
 };
 
-class SQLContainerImpl::OIdTable::ReadAllOp {
+template<SQLContainerImpl::OIdTable::GroupMode M>
+struct SQLContainerImpl::OIdTable::MergeAction {
+	template<typename>
+	struct TypeAt {
+		typedef MergeAction TypedOp;
+	};
+
+	typedef SQLAlgorithmUtils::HeapElement<MergeElementRef> Element;
+	typedef SQLAlgorithmUtils::HeapPredicate<
+			MergeElementRef, MergeElementGreater> Predicate;
+	typedef void OptionsType;
+
+	explicit MergeAction(MergeContext &cxt);
+
+	bool operator()(const Element &elem, const util::FalseType&);
+	void operator()(const Element &elem, const util::TrueType&);
+	bool operator()(
+			const Element &elem, const util::TrueType&,
+			const util::TrueType&);
+	bool operator()(
+			const Element &elem, const util::TrueType&, const Predicate &pred);
+
+	MergeContext &cxt_;
+};
+
+struct SQLContainerImpl::OIdTable::Group {
+	Group(SQLValues::VarAllocator &varAlloc, GroupMode mode);
+
+	SlotStageList stageList_;
+	GroupId parentId_;
+	GroupIdList subIdList_;
+	GroupMode mode_;
+
+	util::LocalUniquePtr<uint64_t> mergingStageDepth_;
+	util::AllocUniquePtr<Slot> mergingSlot_;
+};
+
+struct SQLContainerImpl::OIdTable::Slot {
 public:
-	typedef SwitcherTraits<true, true> SwitcherTraitsType;
+	static Slot createSlot(
+			OpContext &cxt, const SQLValues::ColumnTypeList &typeList);
+	static Slot invalidSlot();
 
-	ReadAllOp(
-			SearchResultEntry &entry, uint64_t limit, uint32_t rowArraySize,
-			Reader &reader);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
+	void createTupleList(OpContext &cxt);
+	void closeTupleList(OpContext &cxt);
 
-private:
-	SearchResultEntry &entry_;
-	uint64_t limit_;
-	uint32_t rowArraySize_;
-	Reader &reader_;
-};
+	TupleListReader& getReader(OpContext &cxt);
+	void resetReaderPosition(OpContext &cxt);
 
-class SQLContainerImpl::OIdTable::LoadOp {
-public:
-	typedef SwitcherTraits<true, true> SwitcherTraitsType;
-
-	explicit LoadOp(Reader &reader);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
+	TupleListWriter& getWriter(OpContext &cxt);
+	void finalizeWriter(OpContext &cxt);
 
 private:
-	Reader &reader_;
+	enum {
+		READER_SUB_INDEX_CURRENT = 0,
+		READER_SUB_INDEX_INITIAL = 1
+	};
+	explicit Slot(uint32_t tupleListIndex);
+
+	uint32_t tupleListIndex_;
 };
 
-class SQLContainerImpl::OIdTable::SaveOp {
-public:
-	typedef SwitcherTraits<true, true> SwitcherTraitsType;
+struct SQLContainerImpl::OIdTable::HotSlot {
+	explicit HotSlot(util::StackAllocator &alloc);
 
-	explicit SaveOp(Writer &writer);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
+	EntryMapPtr& mapAt(EntryType type);
 
-private:
-	Writer &writer_;
+	util::StackAllocator &alloc_;
+	EntryMapPtr mapList_[END_TYPE];
 };
 
-class SQLContainerImpl::OIdTable::AddAllOp {
-public:
-	typedef SwitcherTraits<false, false> SwitcherTraitsType;
+struct SQLContainerImpl::OIdTable::HotData {
+	HotData(
+			SQLOps::OpAllocatorManager &allocManager,
+			util::StackAllocator::BaseAllocator &baseAlloc);
 
-	explicit AddAllOp(const SearchResultEntry &entry);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
-
-private:
-	const SearchResultEntry &entry_;
+	SQLOps::OpStore::AllocatorRef allocRef_;
+	util::StackAllocator &alloc_;
+	HotSlotMap hotSlots_;
 };
 
-class SQLContainerImpl::OIdTable::PopAllOp {
-public:
-	typedef SwitcherTraits<false, false> SwitcherTraitsType;
+struct SQLContainerImpl::OIdTable::Cursor {
+	Cursor();
 
-	PopAllOp(SearchResultEntry &entry, uint64_t limit, uint32_t rowArraySize);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
+	uint64_t nextKey_;
 
-private:
-	SearchResultEntry &entry_;
-	uint64_t limit_;
-	uint32_t rowArraySize_;
+	bool started_;
+	bool finished_;
 };
 
-class SQLContainerImpl::OIdTable::AddOp {
-public:
-	typedef SwitcherTraits<false, false> SwitcherTraitsType;
+struct SQLContainerImpl::OIdTable::Coders {
+	typedef BitUtils::DenseValues<OId> OIdValues;
 
-	AddOp(OId oId, bool forRa);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
+	static Entry oIdToEntry(EntryType type, OId oId);
+	static uint64_t oIdToKey(EntryType type, OId oId);
+	static uint64_t oIdToPositionBit(OId oId);
 
-private:
-	OId oId_;
-	bool forRa_;
+	static uint64_t chunkOrRaMaskOfKey(EntryType type, bool large);
+
+	static uint64_t chunkBitsOfKey(bool large, uint64_t key);
+	static uint64_t chunkMaskOfKey(bool large);
+
+	static uint64_t raBitsOfKey(uint64_t key);
+	static uint64_t raMaskOfKey();
+
+	static EntryType typeOfKey(uint64_t key);
+
+	static bool nextOId(uint32_t &nextPos, const Entry &entry, OId &oId);
+	static bool tryMergeEntry(const Entry &src, Entry &dest);
+
+	static uint64_t initialPositionBits(GroupMode mode);
+	template<GroupMode M> static uint64_t initialPositionBits();
+
+	template<GroupMode M>
+	static void mergePositionBits(const uint64_t &src, uint64_t &dest);
 };
 
-class SQLContainerImpl::OIdTable::RemoveOp {
-public:
-	typedef SwitcherTraits<false, false> SwitcherTraitsType;
+struct SQLContainerImpl::OIdTable::CoderConstants {
 
-	RemoveOp(OId oId, bool forRa);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
 
-private:
-	OId oId_;
-	bool forRa_;
-};
-
-class SQLContainerImpl::OIdTable::RemoveChunkOp {
-public:
-	typedef SwitcherTraits<false, false> SwitcherTraitsType;
-
-	explicit RemoveChunkOp(OId oId);
-	template<typename Traits> void execute(const SwitcherOption &option) const;
-
-private:
-	OId oId_;
-};
-
-struct SQLContainerImpl::OIdTable::CodeUtils {
-	static const uint32_t CODE_MVCC_FLAG_SHIFT_BIT =
-			(CHAR_BIT * sizeof(Code) - 1);
-	static const Code CODE_MVCC_FLAG =
-			(static_cast<Code>(1) << CODE_MVCC_FLAG_SHIFT_BIT);
-
-	static const uint32_t CODE_TO_OID_CHUNK_BIT = 1;
-
-	template<bool Large> static OId toOId(
-			Group group, Element elem, Element category);
-	template<bool Large> static OId codeToOId(Code code);
-	template<bool Large> static Group oIdToGroup(OId oId);
-	template<bool Large> static Element oIdToElement(OId oId);
-	template<bool Large> static Element oIdToRaElement(OId oId);
-	static Element oIdToCategory(OId oId);
-
-	template<bool Mvcc, bool Large> static Code toCode(
-			Group group, Element elem, Element category);
-	template<bool Large> static Code toMaskedCode(Code code);
-	static Code toRaCode(Code code);
-
-	template<bool Mvcc, bool Large, bool ForRa> static Code toGroupHead(Group group);
-	template<bool Large> static bool isGroupHead(Code code);
-	template<bool Large> static bool isRaHead(Code code);
-	static bool isOnMvcc(Code code);
-
-	template<bool Large> static Group toGroup(Code code);
-	template<bool Large> static Element toElement(Code code);
-	static Element toRaElement(Element elem);
-};
-
-struct SQLContainerImpl::OIdTable::OIdConstantsBase {
-
-	static const int32_t MAGIC_NUMBER_EXP_SIZE = 3;
-	static const uint64_t MAGIC_NUMBER = UINT64_C(0x000000000000a000);
-	static const uint32_t UNIT_OFFSET_SHIFT_BIT = 16;
 	static const uint32_t MAX_USER_BIT = 10;
 
 
-
-	static const int32_t MAGIC_CATEGORY_EXP_SIZE =
-			(UNIT_OFFSET_SHIFT_BIT - MAX_USER_BIT);
-	static const int32_t CATEGORY_EXP_SIZE =
-			(MAGIC_CATEGORY_EXP_SIZE - MAGIC_NUMBER_EXP_SIZE);
-
-	static const uint32_t CODE_TO_OID_OFFSET_BIT = MAGIC_NUMBER_EXP_SIZE;
-	static const uint32_t ELEMENT_TO_CODE_OFFSET_BIT = CATEGORY_EXP_SIZE;
-	static const uint32_t ELEMENT_TO_OID_OFFSET_BIT = MAGIC_CATEGORY_EXP_SIZE;
-
-	static const Element USER_MASK =
-			~(~static_cast<Element>(0) << MAX_USER_BIT);
-	static const Element CATEGORY_MASK =
-			(~(~static_cast<Element>(0) << CATEGORY_EXP_SIZE) << MAX_USER_BIT);
-
-	static const Element CATEGORY_USER_MASK = (CATEGORY_MASK | USER_MASK);
-	static const Element ELEMENT_NON_USER_MASK = ~USER_MASK;
-	static const Code CODE_NON_USER_MASK = ~static_cast<Code>(USER_MASK);
-};
-
-template<bool Large>
-struct SQLContainerImpl::OIdTable::OIdConstants {
-
-	static const uint32_t UNIT_CHUNK_SHIFT_BIT = (Large ? 38 : 32);
+	static const uint32_t UNIT_LARGE_CHUNK_SHIFT_BIT = 38;
+	static const uint32_t UNIT_SMALL_CHUNK_SHIFT_BIT = 32;
 
 
-	static const int32_t CHUNK_EXP_SIZE =
-			(CHAR_BIT * sizeof(OId) - UNIT_CHUNK_SHIFT_BIT);
-	static const int32_t OFFSET_EXP_SIZE = (UNIT_CHUNK_SHIFT_BIT -
-			OIdConstantsBase::MAGIC_CATEGORY_EXP_SIZE -
-			OIdConstantsBase::MAX_USER_BIT);
-
-	static const uint32_t CODE_BODY_SHIFT_BIT = UNIT_CHUNK_SHIFT_BIT - 2;
-	static const uint32_t CODE_RA_SHIFT_BIT = CODE_BODY_SHIFT_BIT - 1;
-
-	static const Code CODE_BODY_FLAG =
-			(static_cast<Code>(1) << CODE_BODY_SHIFT_BIT);
-	static const Code CODE_RA_FLAG =
-			(static_cast<Code>(1) << CODE_RA_SHIFT_BIT);
-
-	static const uint32_t GROUP_TO_OID_CHUNK_BIT = UNIT_CHUNK_SHIFT_BIT;
-	static const uint32_t GROUP_TO_CODE_BIT =
-			(GROUP_TO_OID_CHUNK_BIT - CodeUtils::CODE_TO_OID_CHUNK_BIT);
-
-	static const Code CODE_GROUP_MASK =
-			(~(~static_cast<Code>(0) << CHUNK_EXP_SIZE) <<
-			GROUP_TO_CODE_BIT);
-	static const Code CODE_OFFSET_MASK =
-			(~(~static_cast<Code>(0) << OFFSET_EXP_SIZE) <<
-			(OIdConstantsBase::UNIT_OFFSET_SHIFT_BIT -
-			OIdConstantsBase::CODE_TO_OID_OFFSET_BIT));
-
-	static const OId OID_OFFSET_MASK =
-			(~(~static_cast<OId>(0) << OFFSET_EXP_SIZE) <<
-			OIdConstantsBase::UNIT_OFFSET_SHIFT_BIT);
-
-	static const Code CODE_MVCC_GROUP_MASK =
-			(CodeUtils::CODE_MVCC_FLAG | CODE_GROUP_MASK);
-};
-
-
-struct SQLContainerImpl::OIdTable::ElementSet {
-	ElementSet(util::StackAllocator &alloc, bool forRa);
-
-	void initializeElements();
-
-	bool isForRa() const;
-	void setForRa();
-	bool acceptRows();
-
-	uint32_t rowsRest_;
-	ElementList elems_;
-
-private:
-	ElementSet& operator=(const ElementSet&);
-
+	static const uint64_t OID_USER_MASK =
+			((static_cast<uint64_t>(1) << MAX_USER_BIT) - 1);
 };
 
 class SQLContainerImpl::RowIdFilter {
@@ -1982,6 +2310,9 @@ public:
 	void save(TupleListWriter &writer);
 
 	void setReadOnly();
+	bool isReadOnly();
+
+	uint64_t getTotalAllocationSize();
 
 private:
 	enum {
@@ -1990,17 +2321,10 @@ private:
 		BITS_STORE_COLUMN_COUNT = 2
 	};
 
-	typedef SQLValues::Types::Long BitsKeyTag;
-	typedef SQLValues::Types::Integer BitsValueTag;
+	typedef BitUtils::DenseValues<RowId> RowIdValues;
+	typedef BitUtils::TupleColumns<int64_t> BitTupleColumns;
 
-	typedef TupleList::Column BitsStoreColumnList[BITS_STORE_COLUMN_COUNT];
 	typedef SQLAlgorithmUtils::DenseBitSet<> BitSet;
-
-	struct Constants {
-		static const TupleColumnType COLUMN_TYPES[BITS_STORE_COLUMN_COUNT];
-	};
-
-	static void getBitsStoreColumnList(BitsStoreColumnList &columnList);
 
 	SQLOps::OpAllocatorManager &allocManager_;
 	SQLOps::OpStore::AllocatorRef allocRef_;
@@ -2011,9 +2335,24 @@ private:
 	bool readOnly_;
 };
 
+struct SQLContainerImpl::ScanSimulatorUtils {
+	static void trySimulateUpdates(
+			OpContext &cxt, CursorAccessorImpl &accessor);
+	static void tryAcceptUpdates(
+			OpContext &cxt, CursorAccessorImpl &accessor,
+			const SearchResult &result);
+
+	static void simulateUpdates(
+			TransactionContext &txn, OpSimulator &simulator,
+			BaseContainer &container, ResultSet &resultSet);
+	static void acceptUpdates(
+			TransactionContext &txn, OpSimulator &simulator,
+			BaseContainer &container, const SearchResult &result);
+};
+
 struct SQLContainerImpl::ContainerValueUtils {
-	static void toContainerValue(
-			util::StackAllocator &alloc, const TupleValue &src, Value &dest);
+	static Value& toContainerValue(
+			Value::Pool &valuePool, const TupleValue &src);
 	static bool toTupleValue(
 			util::StackAllocator &alloc, const Value &src, TupleValue &dest,
 			bool failOnUnsupported);

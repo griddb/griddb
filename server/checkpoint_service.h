@@ -488,7 +488,7 @@ public:
 	}
 
 	inline void setErrorOccured(bool flag) {
-		isErrorOccured_ = flag;
+		errorOccured_ = flag;
 	}
 
 	void runCheckpoint(EventContext &ec, CheckpointMainMessage &message);
@@ -620,10 +620,9 @@ private:
 	ServiceThreadErrorHandler serviceThreadErrorHandler_;
 
 	EventEngine ee_;
-
+	const ConfigTable& configTable_;
 	ClusterService *clusterService_;
 	EventEngine *clsEE_;
-	const ConfigTable& configTable_;
 	TransactionService *transactionService_;
 	TransactionManager *transactionManager_;
 	EventEngine *txnEE_;
@@ -631,7 +630,6 @@ private:
 	PartitionList* partitionList_;
 	PartitionTable *partitionTable_;
 	bool initialized_;
-	bool isErrorOccured_;
 
 	SyncService *syncService_;
 

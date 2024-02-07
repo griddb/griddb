@@ -78,6 +78,8 @@ private:
 	class ViewHandler; 
 	class SQLHandler;
 	class PartitionStatsHandler;
+	class DatabaseStatsHandler;
+	class DatabaseHandler;
 	class KeyRefHandler;
 
 	class ContainerRefHandler; 
@@ -236,21 +238,31 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer *container) const;
 
 	virtual void execute(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container,
+			ContainerAttribute attribute, BaseContainer& container,
 			BaseContainer *subContainer) const;
 
 protected:
 	Context& getContext() const;
+	
+	BaseContainer& getBaseContainer(BaseContainer* container) const {
+		if (container == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Invalid function call(not transaction service)");
+		}
+		return *container;
+	};
 
 	void getNames(
 			TransactionContext &txn, BaseContainer &container,
 			const char8_t *&dbName, const char8_t *&containerName) const;
 
 	Value makeString(util::StackAllocator &alloc, const char8_t *src) const;
+
+	bool enableAdministratorScan() const;
+	template<typename T> static const char* getLimitTime(T time);
 
 	Context &cxt_;
 };
@@ -331,7 +343,7 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 
 	virtual void execute(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
@@ -356,7 +368,7 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 };
 
 class MetaProcessor::ViewHandler :
@@ -366,17 +378,18 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 };
 
 class MetaProcessor::SQLHandler :
 		public MetaProcessor::StoreCoreHandler { 
 public:
+	
 	explicit SQLHandler(Context &cxt);
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 };
 
 class MetaProcessor::PartitionStatsHandler :
@@ -386,7 +399,27 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
+};
+
+class MetaProcessor::DatabaseStatsHandler :
+	public MetaProcessor::StoreCoreHandler {
+public:
+	explicit DatabaseStatsHandler(Context& cxt);
+
+	virtual void operator()(
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* container) const;
+};
+
+class MetaProcessor::DatabaseHandler :
+	public MetaProcessor::StoreCoreHandler {
+public:
+	explicit DatabaseHandler(Context& cxt);
+
+	virtual void operator()(
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* container) const;
 };
 
 class MetaProcessor::EventHandler :
@@ -396,7 +429,7 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 
 	void exec(TransactionContext &txn);
 
@@ -408,7 +441,7 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 
 	static bool findApplicationName(
 			const NodeDescriptor &nd, util::String &name);
@@ -441,7 +474,7 @@ public:
 
 	virtual void operator()(
 			TransactionContext &txn, ContainerId id, DatabaseId dbId,
-			ContainerAttribute attribute, BaseContainer &container) const;
+			ContainerAttribute attribute, BaseContainer* container) const;
 private:
 	static const char *chunkCategoryList[];
 };
@@ -471,6 +504,7 @@ struct MetaProcessorSource {
 
 	DatabaseId dbId_;
 	const char8_t *dbName_;
+	bool isAdministrator_;
 
 	DataStoreV4 *dataStore_;
 	EventContext *eventContext_;
