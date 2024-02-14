@@ -20,6 +20,10 @@ GridDB CE V5.5の主な変更点は以下のとおりです。
 
     GridDBの監視を行うためのZabbix向けのテンプレートをサンプルとして追加しました。
 
+- ETLによる時系列データの自動集計ガイドの提供
+
+    蓄積された大量の時系列データを自動的に集計して集計結果を蓄積しておくことで、ユーザが集計結果を取得する際に、処理時間を短縮できるようになります。この時系列データの自動的な集計をETLを用いて実現するガイドを提供します。
+
 ---
 ## コストベースに基づくジョイン順序の最適化
 
@@ -30,6 +34,8 @@ GridDB CE V5.5の主な変更点は以下のとおりです。
 クラスタ定義ファイル(gs_cluster.json)を使う場合：
 
   * /sql/costBasedJoin：SQLプラン生成の際、ジョイン順序の決定にコストベースによる方法を用いるかどうかを指定します。用いない(false)場合は、ルールベースを用いてジョイン順を決定します。デフォルト値はコストベースによる方法(true)です。
+
+詳細は「SQLチューニングガイド」の[コストベースによる方法](https://github.com/griddb/docs-ja/blob/master/manuals/md_sql_tuning_guide/md_sql_tuning_guide.md#%E3%82%B3%E3%82%B9%E3%83%88%E3%83%99%E3%83%BC%E3%82%B9%E3%81%AB%E3%82%88%E3%82%8B%E6%96%B9%E6%B3%95)をご参考願います。
 
 ## SQLのバッチ更新のサポート
 
@@ -48,3 +54,8 @@ PreparedStatementインターフェースについて以下のメソッドをサ
 ## Zabbix向け監視テンプレート
 
 「[GridDB 監視テンプレート for Zabbix 説明書](https://github.com/griddb/griddb/blob/master/sample/zabbix/GridDB_ZabbixTemplateGuide_ja.md)」をご参考願います。
+
+## ETLによる時系列データの自動集計ガイドの提供
+
+「[ETL自動集計ガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_etl_auto_aggregation_guide/md_etl_auto_aggregation_guide.md)」をご参考願います。
+
