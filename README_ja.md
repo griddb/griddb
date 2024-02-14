@@ -7,7 +7,7 @@
 
 GridDBは、NoSQLインタフェースとSQLインタフェースを兼ね備えたIoT向けデータベースです。
 
-GridDBが提供する機能は『[GridDB 機能リファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_FeaturesReference/toc.md)』を参照ください。
+GridDBが提供する機能は『[GridDB 機能リファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_feature/md_reference_feature.md)』を参照ください。
 
 本リポジトリにはサーバとJavaクライアントがあります。JDBCドライバは[jdbcリポジトリ](https://github.com/griddb/jdbc/blob/master/README_ja.md)にあります。
 
@@ -107,13 +107,15 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
 
 ## ドキュメント
   以下のドキュメントがあります。
-  * [機能リファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_FeaturesReference/toc.md)
+  * [機能リファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_feature/md_reference_feature.md)
   * [クイックスタートアップガイド](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_QuickStartGuide/toc.md)
-  * [Java APIリファレンス](http://griddb.github.io/docs-ja/manuals/GridDB_Java_API_Reference.html)
-  * [C APIリファレンス](http://griddb.github.io/docs-ja/manuals/GridDB_C_API_Reference.html)
-  * [TQLリファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_TQL_Reference/toc.md)
-  * [JDBCドライバ説明書](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_JDBC_Driver_UserGuide/toc.md)
-  * [SQLリファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_SQL_Reference/toc.md)
+  * [Java APIリファレンス](http://griddb.github.io/docs-ja/manuals/md_reference_java_api/md_reference_java_api.html)
+  * [C APIリファレンス](http://griddb.github.io/docs-ja/manuals/md_reference_c_api/md_reference_c_api.html)
+  * [TQLリファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_tql/md_reference_tql.md)
+  * [JDBCドライバ説明書](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_jdbc/md_reference_jdbc.md)
+  * [SQLリファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_sql/md_reference_sql.md)
+  * [SQLチューニングガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_sql_tuning_guide/md_sql_tuning_guide.md)
+  * [ETL自動集計ガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_etl_auto_aggregation_guide/md_etl_auto_aggregation_guide.md)
   * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
   * [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES_ja.md)
   * [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES_ja.md)
