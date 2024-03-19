@@ -115,7 +115,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [JDBCドライバ説明書](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_jdbc/md_reference_jdbc.md)
   * [SQLリファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_sql/md_reference_sql.md)
   * [SQLチューニングガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_sql_tuning_guide/md_sql_tuning_guide.md)
-  * [ETL自動集計ガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_etl_auto_aggregation_guide/md_etl_auto_aggregation_guide.md)
+  * [プログラミングガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_programming_guide/md_programming_guide.md)
   * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
   * [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES_ja.md)
   * [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES_ja.md)
