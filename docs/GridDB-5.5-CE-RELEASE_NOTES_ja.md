@@ -20,10 +20,6 @@ GridDB CE V5.5の主な変更点は以下のとおりです。
 
     GridDBの監視を行うためのZabbix向けのテンプレートをサンプルとして追加しました。
 
-- ETLによる時系列データの自動集計ガイドの提供
-
-    蓄積された大量の時系列データを自動的に集計して集計結果を蓄積しておくことで、ユーザが集計結果を取得する際に、処理時間を短縮できるようになります。この時系列データの自動的な集計をETLを用いて実現するガイドを提供します。
-
 ---
 ## コストベースに基づくジョイン順序の最適化
 
@@ -54,8 +50,3 @@ PreparedStatementインターフェースについて以下のメソッドをサ
 ## Zabbix向け監視テンプレート
 
 「[GridDB 監視テンプレート for Zabbix 説明書](https://github.com/griddb/griddb/blob/master/sample/zabbix/GridDB_ZabbixTemplateGuide_ja.md)」をご参考願います。
-
-## ETLによる時系列データの自動集計ガイドの提供
-
-「[ETL自動集計ガイド](https://github.com/griddb/docs-ja/blob/master/manuals/md_etl_auto_aggregation_guide/md_etl_auto_aggregation_guide.md)」をご参考願います。
-
