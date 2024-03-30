@@ -1,0 +1,7 @@
+local Library = loadstring(game:HttpGet("https://raw.githubuserconte
+nt.com/xHeptc/Kavo-UI-Library/main/source.lua"))()local Window = Library.CreateLib("SNOOBE", "DarkTheme")
+local Tab = Window:NewTap"("سكربت ادمن مجاني انفنتي")
+local Section = Tab:NewSection("أرحب حياك في سكربت")
+Section:NewButton("STUL", "أرحب حياك في سكربت سنوبي", function()
+    print("Clicked")loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))()
+end)
