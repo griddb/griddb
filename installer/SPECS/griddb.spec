@@ -314,6 +314,7 @@ fi
 %dir %{griddb_instdir}
 %dir %{griddb_instdir}/bin
 %dir %{griddb_instdir}/conf
+%dir %{griddb_instdir}/conf_multicast
 %dir %{griddb_instdir}/3rd_party
 %dir %{griddb_instdir}/3rd_party/MessagePack
 %dir %{griddb_instdir}/3rd_party/ebb
@@ -413,6 +414,8 @@ fi
 /usr/griddb/bin/gridstore
 
 %changelog
+* Wed Feb 07 2024 Toshiba Digital Solutions Corporation
+- 5.5.0
 * Mon Nov 13 2023 Toshiba Digital Solutions Corporation
 - 5.3.1
 * Mon Jun 12 2023 Toshiba Digital Solutions Corporation
