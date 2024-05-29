@@ -77,15 +77,7 @@ CFLAGS="\
 -DSQLITE_DEFAULT_CACHE_SIZE=1000000 \
 -DGD_ENABLE_NEWSQL_SERVER"
 
-COMPILE_OPT=" \
--Wall \
--Wextra \
--Wformat=2 \
--Wcast-qual \
--Wcast-align \
--Wpointer-arith \
--Wwrite-strings \
--Wconversion"
+COMPILE_OPT=""
 
 if [ $ENABLE_DEBUG = yes ]
 then

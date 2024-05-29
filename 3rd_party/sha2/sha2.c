@@ -617,7 +617,7 @@ void SHA256_Final(sha2_byte digest[], SHA256_CTX* context) {
 #if BYTE_ORDER == LITTLE_ENDIAN
 		{
 			/* Convert TO host byte order */
-			int	j;
+			volatile int	j;
 			for (j = 0; j < 8; j++) {
 				REVERSE32(context->state[j],context->state[j]);
 				*d++ = context->state[j];
