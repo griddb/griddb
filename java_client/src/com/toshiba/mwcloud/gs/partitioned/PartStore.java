@@ -2295,7 +2295,7 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				BasicBuffer in, ColumnInfo intervalType) throws GSException {
 			final int typeValue = in.base().get();
 			if (intervalType.getType() == GSType.TIMESTAMP) {
-				if (typeValue == TimeUnit.DAY.ordinal()) {
+				if ((typeValue == TimeUnit.DAY.ordinal() || typeValue == TimeUnit.HOUR.ordinal())) {
 					return typeValue;
 				}
 			}

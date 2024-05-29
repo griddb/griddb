@@ -348,7 +348,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 * SSL接続を選択できる環境設定(詳細: {@link GridStoreFactory})の場合のみ
 	 * 指定できる。それ以外の場合はプロパティの値によらず指定できない。
 	 * SSL接続を選択できる場合、省略時は{@code "PREFERRED"}が指定されたものと
-	 * みなされる。バージョン4.5よりサポート。VERIFYはバージョン4.6よりサポート</td>
+	 * みなされる。バージョン4.5よりサポート。{@code "VERIFY"}はバージョン4.6よりサポート</td>
 	 * </tr>
 	 * <tr>
 	 * <td>connectionRoute</td>
@@ -508,6 +508,59 @@ public abstract class GridStoreFactory implements Closeable {
 	 * "{@code auto}" can only be used for the time zone that does not observe the
 	 * daylight saving time.
 	 * This property is supported on version 4.3 or later.</td></tr>
+	 * <tr>
+	 * <td>authentication</td>
+	 * <td>authentication type. One of the following strings can be specified:
+	 * <dl>
+	 * <dt>{@code "INTERNAL"}</dt>
+	 * <dd>internal authentication based on the account information managed on
+	 * the cluster.</dd>
+	 * <dt>{@code "LDAP"}</dt>
+	 * <dd>external authentication based on the account information managed by
+	 * the LDAP server outside the cluster. This property is not applicable when
+	 * connecting to the cluster where LDAP connection settings are not available
+	 * or when the administrative user is used.</dd>
+	 * </dl>
+	 * If omitted, the authentication type is automatically selected.
+	 * Generally, it is not necessary to specify the authentication type.
+	 * It is necessary, for example, to specify internal authentication when
+	 * connecting to the cluster that uses both internal and external
+	 * authentication for a non-administrative user. 
+	 * This property is supported on version 4.5 or later.</td>
+	 * </tr>
+	 * <tr>
+	 * <td>sslMode</td>
+	 * <td>mode for specifying whether to use SSL in connecting to the cluster.
+	 * One of the following strings can be specified:
+	 * <dl>
+	 * <dt>{@code "DISABLED"}</dt>
+	 * <dd>Never uses SSL.</dd>
+	 * <dt>{@code "PREFERRED"}</dt>
+	 * <dd>Uses SSL as much as possible. If both SSL and non-SSL
+	 * connections can be used, uses SSL connection.</dd>
+	 * <dt>{@code "VERIFY"}</dt>
+	 * <dd>Always uses SSL. Server certificate verification is enabled.</dd>
+	 * </dl>
+	 * This property is applicable only when the environment settings
+	 * (For details, see {@link GridStoreFactory}) allow to select SSL connection.
+	 * Otherwise, it is not applicable regardless of the value of the property. 
+	 * If SSL connection can be selected but the value is omitted,{@code "PREFERRED"}
+	 * is specified by default. This property is supported on version 4.5 or later.
+	 * {@code "VERIFY"} is supported on version 4.6 or later.</td>
+	 * </tr>
+	 * <tr>
+	 * <td>connectionRoute</td>
+	 * <td>A communication path used when connected to a cluster.
+	 * The following string can be specified:
+	 * <dl>
+	 * <dt>{@code "PUBLIC"}</dt>
+	 * <dd>Connects to a cluster with multiple communication paths settings by
+	 * using an external communication path.</dd>
+	 * </dl>
+	 * When omitted, a normal communication path is used to establish a connection.
+	 * Specify this string only when external connection is required.
+	 * Supported starting with version 5.1.1.</td>
+	 * </tr>
 	 * </tbody>
 	 * </table>
 	 *

@@ -669,7 +669,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 							(byte) metaNamingType.ordinal());
 				}
 				optionalRequest.putAcceptableFeatureVersion(
-						FeatureVersion.V5_3);
+						FeatureVersion.V5_6);
 			}
 
 			@Override

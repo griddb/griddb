@@ -18,6 +18,15 @@ import java.lang.annotation.Target;
  *
  * @since 5.3
  * </div><div lang="en">
+ * Sets date/time precision in row fields to be mapped during 
+ * {@link Container} operations.
+ *
+ * <p>A row field that does not have this annotation is considered 
+ * not to have the specification of date/time precision.</p>
+ *
+ * <p>The mapping between time and date precision and column types 
+ * is as specified in {@link ColumnInfo#getTimePrecision()}.</p>
+ *
  * @since 5.3
  * </div>
  */
@@ -31,6 +40,8 @@ public @interface TimePrecision {
 	 * @return 日時精度
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Returns date/time precision
+	 * @return date/time precision
 	 * @since 5.3
 	 * </div>
 	 */

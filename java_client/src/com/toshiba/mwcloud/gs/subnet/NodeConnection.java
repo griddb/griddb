@@ -61,7 +61,6 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.PropertyUtils;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.Statement;
-import com.toshiba.mwcloud.gs.common.RowMapper.SchemaFeatureLevel;
 import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.common.StatementResult;
 
@@ -1910,8 +1909,9 @@ public class NodeConnection implements Closeable {
 		V4_2,
 		V4_3,
 		V4_5,
-		V5_3
-
+		V5_3,
+		V5_5,
+		V5_6
 		;
 
 		public static FeatureVersion remoteValueOf(int ordinal)

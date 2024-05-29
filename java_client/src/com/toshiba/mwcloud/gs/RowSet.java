@@ -197,12 +197,20 @@ public interface RowSet<R> extends Closeable {
 	 * @throws GSException 現バージョンでは送出されない
 	 * @since 5.3
 	 * </div><div lang="en">
-	 * Returns the schema corresponding to the specified Row set.
+	 * Retrieves a schema corresponding to this row set.
 	 *
-	 * @return {@link ContainerInfo} having only container information
-	 * related to the schema. If the Row set has no Row and the type of
-	 * the Row is {@link AggregationResult}, returns {@code null}.
+	 * <p>{@link ContainerInfo} in which information about column layout including 
+	 * whether RowKey is included is the only information that is set is obtained.
+	 * Any other information such as information about container names, container 
+	 * types, index settings, and time series configuration options is not included. </p>
 	 *
+	 * <p>In the current version, {@code null} is returned if this Row set is configured so as 
+	 * to handle rows for the {@link AggregationResult} instance and if this Row set does 
+	 * not contain any Row.</p>
+	 *
+	 * @return {@link ContainerInfo} that only has container information about schemas.
+	 *
+	 * @throws GSException not issued in the current version.
 	 * @since 5.3
 	 * </div>
 	 */

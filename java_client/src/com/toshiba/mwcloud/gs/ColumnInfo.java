@@ -332,6 +332,29 @@ public class ColumnInfo {
 	 *
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Retrieves the date/time precision of this column.
+	 *
+	 * <p>In the current version, the following combination of column types and date/time 
+	 * precision can be used in defining a Container.</p>
+	 * <table>
+	 * <thead><tr><th>column type</th><th>date/time precision</th></tr></thead>
+	 * <tbody>
+	 * <tr><td>TIMESTAMP type</td><td>
+	 * <ul>
+	 * <li>{@link TimeUnit#MILLISECOND}</li>
+	 * <li>{@link TimeUnit#MICROSECOND}</li>
+	 * <li>{@link TimeUnit#NANOSECOND}</li>
+	 * <li>{@code null} (interpreted as if {@link TimeUnit#MILLISECOND} is specified)</li>
+	 * </ul>
+	 * </td></tr>
+	 * <tr><td>non-TIMESTAMP type</td><td>{@code null}</td></tr>
+	 * </tbody>
+	 * </table>
+	 *
+	 * <p>Use {@link Builder} to construct {@link ColumnInfo} with the date/time precision specified.</p>
+	 *
+	 * @return date/time precision; if not set, {@code null}.
+	 *
 	 * @since 5.3
 	 * </div>
 	 */
@@ -375,6 +398,11 @@ public class ColumnInfo {
 	 *
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * a builder to construct {@link ColumnInfo}
+	 *
+	 * <p>This builder can construct {@link ColumnInfo} by setting only 
+	 * the required subset of information that can be referenced using {@link ColumnInfo}.</p>
+	 *
 	 * @since 5.3
 	 * </div>
 	 */
@@ -398,6 +426,7 @@ public class ColumnInfo {
 		 * <div lang="ja">
 		 * すべての項目が未設定状態のビルダーを構築します。
 		 * </div><div lang="en">
+		 * Constructs a builder where none of the elements is specified.
 		 * </div>
 		 */
 		public Builder() {
@@ -411,6 +440,11 @@ public class ColumnInfo {
 		 * @param info ビルダーに設定する内容を含むカラム情報
 		 * @throws NullPointerException 引数に{@code null}が指定された場合
 		 * </div><div lang="en">
+		 * Constructs a builder where all the specified 
+		 * {@link ColumnInfo} elements are set.
+		 *
+		 * @param info Column information including what is set to the builder
+		 * @throws NullPointerException If {@code null} is specified as an argument
 		 * </div>
 		 */
 		public Builder(ColumnInfo info) {
@@ -429,6 +463,15 @@ public class ColumnInfo {
 		 * @throws NullPointerException 引数に{@code null}が指定された場合
 		 * @return このビルダー
 		 * </div><div lang="en">
+		 * Sets all the specified {@link ColumnInfo} elements.
+		 *
+		 * <p>If the specified {@link ColumnInfo} contains an item in which nothing 
+		 * is set, nothing will be set to the corresponding items in 
+		 * the builder regardless of the original settings of this builder.</p>
+		 *
+		 * @param info Column information including what is set to the builder
+		 * @throws NullPointerException If {@code null} is specified as an argument
+		 * @return this builder
 		 * </div>
 		 */
 		public Builder set(ColumnInfo info) {
@@ -454,6 +497,13 @@ public class ColumnInfo {
 		 * @return このビルダー
 		 * @see ColumnInfo#getName()
 		 * </div><div lang="en">
+		 * Sets a column name.
+		 *
+		 * <p>If the specified argument is {@code null}, nothing is set.</p>
+		 *
+		 * @param name column name
+		 * @return this builder
+		 * @see ColumnInfo#getName()
 		 * </div>
 		 */
 		public Builder setName(String name) {
@@ -472,6 +522,13 @@ public class ColumnInfo {
 		 * @return このビルダー
 		 * @see ColumnInfo#getType()
 		 * </div><div lang="en">
+		 * Sets a column type.
+		 *
+		 * <p>If the specified argument is {@code null}, nothing is set.</p>
+		 *
+		 * @param type column type
+		 * @return this builder
+		 * @see ColumnInfo#getType()
 		 * </div>
 		 */
 		public Builder setType(GSType type) {
@@ -490,6 +547,13 @@ public class ColumnInfo {
 		 * @return このビルダー
 		 * @see ColumnInfo#getNullable()
 		 * </div><div lang="en">
+		 * Sets whether NOT NULL constraints are placed in a column.
+		 *
+		 * <p>If the specified argument is {@code null}, nothing is set.</p>
+		 *
+		 * @param nullable whether NOT NULL constraints are placed in a column.
+		 * @return this builder
+		 * @see ColumnInfo#getNullable()
 		 * </div>
 		 */
 		public Builder setNullable(Boolean nullable) {
@@ -508,6 +572,13 @@ public class ColumnInfo {
 		 * @return このビルダー
 		 * @see ColumnInfo#getDefaultValueNull()
 		 * </div><div lang="en">
+		 * Sets whether to use NULL as an initial value of a column.
+		 *
+		 * <p>If the specified argument is {@code null}, nothing is set.</p>
+		 *
+		 * @param defaultValueNull whether to use NULL as an initial value of a column.
+		 * @return this builder
+		 * @see ColumnInfo#getDefaultValueNull()
 		 * </div>
 		 */
 		public Builder setDefaultValueNull(Boolean defaultValueNull) {
@@ -526,6 +597,13 @@ public class ColumnInfo {
 		 * @return このビルダー
 		 * @see ColumnInfo#getIndexTypes()
 		 * </div><div lang="en">
+		 * Sets a set of index types.
+		 *
+		 * <p>If the specified argument is {@code null}, nothing is set.</p>
+		 *
+		 * @param indexTypes a set of index types
+		 * @return this builder
+		 * @see ColumnInfo#getIndexTypes()
 		 * </div>
 		 */
 		public Builder setIndexTypes(Set<IndexType> indexTypes) {
@@ -544,6 +622,13 @@ public class ColumnInfo {
 		 * @return このビルダー
 		 * @see ColumnInfo#getTimePrecision()
 		 * </div><div lang="en">
+		 * Sets date/time precision.
+		 *
+		 * <p>If the specified argument is {@code null}, nothing is set.</p>
+		 *
+		 * @param timePrecision date/time precision
+		 * @return this builder
+		 * @see ColumnInfo#getTimePrecision()
 		 * </div>
 		 */
 		public Builder setTimePrecision(TimeUnit timePrecision) {
@@ -561,6 +646,12 @@ public class ColumnInfo {
 		 *
 		 * @return カラム情報
 		 * </div><div lang="en">
+		 * Constructs {@link ColumnInfo} based on what is set in this builder.
+		 *
+		 * <p>Column information to be returned will never change even when 
+		 * the settings of this builder are modified after construction.</p>
+		 *
+		 * @return column information
 		 * </div>
 		 */
 		public ColumnInfo toInfo() {
