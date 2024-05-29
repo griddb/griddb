@@ -353,7 +353,7 @@ private:
 #define UTIL_TRACER_DECLARE_CUSTOM(traceManager, name) \
 	inline util::Tracer& UTIL_TRACER_INSTANCE_GETTER(name) () { \
 		static util::Tracer *tracer( \
-				&((#traceManager == "AuditTraceManager") ? \
+				&((strcmp(#traceManager, "AuditTraceManager") == 0) ? \
 					util::traceManager::getAuditInstance() : \
 					util::traceManager::getInstance() \
 				).resolveTracer(#name)); \

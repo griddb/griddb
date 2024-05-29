@@ -543,14 +543,6 @@ ssize_t Socket::write(const void*, size_t, off_t) {
 	UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_OPERATION);
 }
 
-void Socket::read(IOOperation&) {
-	UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_OPERATION);
-}
-
-void Socket::write(IOOperation&) {
-	UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_OPERATION);
-}
-
 off_t Socket::tell() {
 	UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_OPERATION);
 }

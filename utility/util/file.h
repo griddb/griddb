@@ -332,10 +332,6 @@ public:
 
 	virtual ssize_t write(const void *buf, size_t blen, off_t offset);
 
-	virtual void read(IOOperation &operation);
-
-	virtual void write(IOOperation &operation);
-
 	virtual off_t tell();
 
 	virtual void seek(int64_t offset);
@@ -468,6 +464,128 @@ public:
 
 };
 
+#if UTIL_MINOR_MODULE_ENABLED
+
+extern UTIL_FLAG_TYPE UTIL_MEM_OMODE_EXEC; 
+extern UTIL_FLAG_TYPE UTIL_MEM_OMODE_READ; 
+extern UTIL_FLAG_TYPE UTIL_MEM_OMODE_WRITE; 
+extern UTIL_FLAG_TYPE UTIL_MEM_OMODE_NONE; 
+extern UTIL_FLAG_TYPE UTIL_MEM_OMODE_DEFAULT; 
+
+extern UTIL_FLAG_TYPE UTIL_MEM_FILE_FORCE; 
+extern UTIL_FLAG_TYPE UTIL_MEM_FILE_SHARED; 
+extern UTIL_FLAG_TYPE UTIL_MEM_FILE_PRIVATE; 
+extern UTIL_FLAG_TYPE UTIL_MEM_FILE_DEFAULT; 
+
+class Memory {
+public:
+
+	enum MEM_TYPE {
+		MEM_NORMAL, 
+		MEM_FILE, 
+	};
+
+public:
+	explicit Memory(size_t size);
+
+	Memory(size_t size, File &file,
+			off_t offset = 0,
+			int omode = UTIL_MEM_OMODE_DEFAULT,
+			int flags = UTIL_MEM_FILE_DEFAULT,
+			void *startPtr = NULL);
+
+	Memory(size_t size, File::FD fd,
+			off_t offset = 0,
+			int omode = UTIL_MEM_OMODE_DEFAULT,
+			int flags = UTIL_MEM_FILE_DEFAULT,
+			void *startPtr = NULL);
+
+	virtual ~Memory();
+
+public:
+	MEM_TYPE getType() const;
+
+	size_t getSize() const;
+
+	const void* getMemory() const;
+
+	void* getMemory();
+
+	void* operator()();
+
+	const void* operator()() const;
+
+private:
+	Memory(const Memory&);
+	Memory& operator=(const Memory&);
+
+private:
+	struct Data;
+	UTIL_UNIQUE_PTR<Data> data_;
+};
+
+class MessageQueue : public NamedFile {
+public:
+	virtual void open(const char8_t *name, FileFlag flags,
+			FilePermission perm = DEFAULT_PERMISSION);
+
+	virtual void open(const char8_t *name, FileFlag flags,
+			FilePermission perm, size_t maxmsg, size_t msgsize);
+
+	virtual bool unlink();
+
+	virtual void close();
+
+public:
+
+	virtual ssize_t send(const void *buf, size_t blen, size_t priority);
+
+	virtual ssize_t sendTimeLimit(const void *buf, size_t blen, size_t priority,
+			size_t msec);
+
+	virtual ssize_t receive(void *buf, size_t blen, size_t *priority);
+
+	virtual ssize_t receiveTimeLimit(void *buf, size_t blen, size_t *priority,
+			size_t msec);
+
+	virtual ssize_t read(void *buf, size_t blen);
+	virtual ssize_t write(const void *buf, size_t blen);
+
+	size_t getCurrentCount() const;
+
+	size_t getMaxCount() const;
+
+	size_t getMessageSize() const;
+
+#ifndef _WIN32
+	void getStatus(size_t* __restrict__ maxcount,
+			size_t* __restrict__ msgsize,
+			size_t* __restrict__ curcount) const;
+#else
+	void getStatus(size_t *maxcount, size_t *msgsize, size_t *curcount) const;
+#endif 
+public:
+	MessageQueue();
+	virtual ~MessageQueue();
+
+};
+
+class SharedMemory : public NamedFile {
+public:
+
+	static const FilePermission DEFAULT_PERMISSION;
+
+	virtual void open(const char8_t *path,
+			FileFlag flags, FilePermission perm = DEFAULT_PERMISSION);
+
+	virtual bool unlink();
+
+public:
+	SharedMemory();
+	virtual ~SharedMemory();
+};
+
+#endif 
 
 /*!
     @brief Manages a list of directory.
@@ -645,6 +763,15 @@ private:
 */
 class FileSystem {
 public:
+#if 0
+	static void access(const char8_t *path, int amode);
+
+	static void chmod(const char8_t *path, mode_t mode);
+
+	static void chown(const char8_t *path, uid_t uid);
+
+	static void chown(const char8_t *path, uid_t uid, gid_t gid);
+#endif
 
 	static bool exists(const char8_t *path);
 
@@ -654,13 +781,23 @@ public:
 
 	static void createDirectory(const char8_t *path);
 
+#if 0
+	static void createDirectory(const char8_t *path, mode_t mode);
+#endif
 
 	static void createDirectoryTree(const char8_t *path);
 
+#if 0
+	static void createDirectoryTree(const char8_t *path, mode_t mode);
+#endif
 
 	static void createLink(
 			const char8_t *sourcePath, const char8_t *targetPath);
 
+#if 0
+	static void createSymbolicLink(
+			const char8_t *sourcePath, const char8_t *targetPath);
+#endif
 
 	static void createPath(
 			const char8_t *directoryName, const char8_t *baseName,
@@ -676,6 +813,10 @@ public:
 
 	static void getRealPath(const char8_t *path, u8string &realPath);
 
+#if 0
+	static void getSymbolicLinkTarget(
+			const char8_t *sourcePath, u8string &targetPath);
+#endif
 
 	static void getStatus(const char8_t *path, FileSystemStatus *status);
 
@@ -689,6 +830,9 @@ public:
 
 	static void touch(const char8_t *path);
 
+#if 0
+	static void touch(const char8_t *path, mode_t mode);
+#endif
 
 	static void updateFileTime(const char8_t *path,
 			const DateTime *accessTime = NULL,

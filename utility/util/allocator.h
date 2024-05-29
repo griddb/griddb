@@ -89,6 +89,14 @@
 #define UTIL_ALLOCATOR_SUBSTITUTE_STACK_ALLOCATOR 0
 #endif
 
+#ifndef UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED
+#ifdef NDEBUG
+#define UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED 0
+#else
+#define UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED 1
+#endif
+#endif
+
 #ifndef UTIL_ALLOCATOR_REPORTER_ENABLED
 #define UTIL_ALLOCATOR_REPORTER_ENABLED 0
 #endif
@@ -208,6 +216,17 @@ public:
 	virtual ~AllocationErrorHandler();
 	virtual void operator()(Exception &e) = 0;
 };
+
+#if UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED
+struct AllocatorStats;
+namespace detail {
+class AllocatorDebugReporter {
+public:
+	static void reportUnexpectedUsage(
+			const AllocatorStats &stats, size_t total, size_t free);
+};
+}
+#endif 
 
 #if UTIL_ALLOCATOR_REPORTER_ENABLED
 namespace detail {
@@ -2579,6 +2598,11 @@ inline FixedSizeAllocator<Mutex>::~FixedSizeAllocator() {
 	for (;it != stackTraceMap_.end(); it++) {
 		std::cout << elementSize_ << "," << it->first << "," << it->second << std::endl; 
 	}
+#endif
+
+#if UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED
+	detail::AllocatorDebugReporter::reportUnexpectedUsage(
+			stats_, totalElementCount_, freeElementCount_);
 #endif
 
 	assert(totalElementCount_ == freeElementCount_);
