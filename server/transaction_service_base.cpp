@@ -62,6 +62,11 @@ void decodeLargeBinaryRow(
 	EVENT_START(ec, ev, mgr,conn.dbId_, clientRequest); \
 	if (checkConstraint(ev, conn)) return;
 
+
+#define TRANSACTION_EVENT_START_FOR_UPDATE(ec, ev, mgr, conn, clientRequest, isUpdate) \
+	EVENT_START(ec, ev, mgr,conn.dbId_, clientRequest); \
+	if (checkConstraint(ev, conn, isUpdate)) return;
+
 #include "base_container.h"
 #include "data_store_v4.h"
 #include "message_row_store.h"  
@@ -80,6 +85,7 @@ extern std::string dumpUUID(uint8_t* uuid);
 #ifndef _WIN32
 #include <signal.h>  
 #endif
+
 
 
 
@@ -507,22 +513,23 @@ void StatementHandler::setSuccessReply(
 					out << entrySize;
 
 					encodeBooleanData<EventByteOutStream>(out, true);
-					entrySize += sizeof(int8_t);
+					entrySize += static_cast<int32_t>(sizeof(int8_t));
 
 					int32_t partialEntryNum = static_cast<int32_t>(partialQueryOption.size());
 					out << partialEntryNum;
-					entrySize += sizeof(int32_t);
+					entrySize += static_cast<int32_t>(sizeof(int32_t));
 
 					PartialQueryOption::const_iterator itr;
 					for (itr = partialQueryOption.begin(); itr != partialQueryOption.end(); itr++) {
 						encodeIntData<EventByteOutStream, int8_t>(out, itr->first);
-						entrySize += sizeof(int8_t);
+						entrySize += static_cast<int32_t>(sizeof(int8_t));
 
-						int32_t partialEntrySize = itr->second->size();
+						int32_t partialEntrySize =
+								static_cast<int32_t>(itr->second->size());
 						out << partialEntrySize;
-						entrySize += sizeof(int32_t);
+						entrySize += static_cast<int32_t>(sizeof(int32_t));
 						encodeBinaryData<EventByteOutStream>(out, itr->second->data(), itr->second->size());
-						entrySize += itr->second->size();
+						entrySize += static_cast<int32_t>(itr->second->size());
 					}
 					const size_t entryLastPos = out.base().position();
 					out.base().position(entrySizePos);
@@ -536,9 +543,10 @@ void StatementHandler::setSuccessReply(
 				{
 					encodeEnumData<EventByteOutStream, QueryResponseType>(out, ROW_SET);
 
-					int32_t entrySize = sizeof(ResultSize) +
-						response.rs_->getFixedOffsetSize() +
-						response.rs_->getVarOffsetSize();
+					const int32_t entrySize = static_cast<int32_t>(
+							sizeof(ResultSize) +
+							response.rs_->getFixedOffsetSize() +
+							response.rs_->getVarOffsetSize());
 					out << entrySize;
 					out << response.rs_->getFetchNum();
 					ev.addExtraMessage(response.rs_->getFixedStartData(),
@@ -561,9 +569,10 @@ void StatementHandler::setSuccessReply(
 				entryNum += encodeDistributedResult<EventByteOutStream>(out, *response.rs_, NULL);
 
 				encodeEnumData<EventByteOutStream, QueryResponseType>(out, QUERY_ANALYSIS);
-				int32_t entrySize = sizeof(ResultSize) +
-					response.rs_->getFixedOffsetSize() +
-					response.rs_->getVarOffsetSize();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) +
+						response.rs_->getFixedOffsetSize() +
+						response.rs_->getVarOffsetSize());
 				out << entrySize;
 
 				out << response.rs_->getResultNum();
@@ -585,8 +594,8 @@ void StatementHandler::setSuccessReply(
 				encodeEnumData<EventByteOutStream, QueryResponseType>(out, AGGREGATION);
 				const util::XArray<uint8_t>* rowDataFixedPart =
 					response.rs_->getRowDataFixedPartBuffer();
-				int32_t entrySize = sizeof(ResultSize) +
-					rowDataFixedPart->size();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) + rowDataFixedPart->size());
 				out << entrySize;
 
 				out << response.rs_->getResultNum();
@@ -606,9 +615,10 @@ void StatementHandler::setSuccessReply(
 				}
 				{
 					encodeEnumData<EventByteOutStream, QueryResponseType>(out, ROW_SET);
-					int32_t entrySize = sizeof(ResultSize) +
-						response.rs_->getFixedOffsetSize() +
-						response.rs_->getVarOffsetSize();
+					const int32_t entrySize = static_cast<int32_t>(
+							sizeof(ResultSize) +
+							response.rs_->getFixedOffsetSize() +
+							response.rs_->getVarOffsetSize());
 					out << entrySize;
 
 					out << response.rs_->getFetchNum();
@@ -620,7 +630,8 @@ void StatementHandler::setSuccessReply(
 			} break;
 			default:
 				GS_THROW_USER_ERROR(GS_ERROR_TXN_RESULT_TYPE_INVALID,
-					"(resultType=" << response.rs_->getResultType() << ")");
+						"(resultType=" <<
+						static_cast<int32_t>(response.rs_->getResultType()) << ")");
 			}
 			break;
 		case UPDATE_CONTAINER_STATUS:
@@ -739,8 +750,14 @@ StatementHandler::OptionSet* StatementHandler::getReplyOption(util::StackAllocat
 	return optionSet;
 }
 
-StatementHandler::OptionSet* StatementHandler::getReplyOption(util::StackAllocator& alloc,
-	const ReplicationContext& replContext, CompositeIndexInfos* infos, bool isContinue) {
+StatementHandler::OptionSet* StatementHandler::getReplyOption(
+		util::StackAllocator& alloc, const ReplicationContext& replContext,
+		CompositeIndexInfos* infos, bool isContinue) {
+	UNUSED_VARIABLE(alloc);
+	UNUSED_VARIABLE(replContext);
+	UNUSED_VARIABLE(infos);
+	UNUSED_VARIABLE(isContinue);
+
 	return NULL;
 }
 
@@ -986,12 +1003,9 @@ void StatementHandler::checkExecutable(
 	}
 
 	const NodeId myself = 0;
-	const bool isOwner = partitionTable_->isOwner(pId, myself,
-		PartitionTable::PT_CURRENT_OB);
-	const bool isBackup = partitionTable_->isBackup(pId, myself,
-		PartitionTable::PT_CURRENT_OB);
-	const bool isCatchup = partitionTable_->isCatchup(pId, myself,
-		PartitionTable::PT_CURRENT_OB);
+	const bool isOwner = partitionTable_->isOwner(pId, myself);
+	const bool isBackup = partitionTable_->isBackup(pId, myself);
+	const bool isCatchup = partitionTable_->isCatchup(pId, myself);
 
 	assert((isOwner && isBackup) == false);
 	assert((isOwner && isCatchup) == false);
@@ -1137,6 +1151,17 @@ void StatementHandler::checkSchemaFeatureVersion(
 				"Requested client does not support extended schema feature "
 				"(e.g. precise timestamp type) (clientVersion=" <<
 				acceptableFeatureVersion << ")");
+	}
+}
+
+void StatementHandler::checkMetaTableFeatureVersion(
+		uint8_t unit, int32_t acceptableFeatureVersion) {
+	if (unit != static_cast<uint8_t>(util::DateTime::FIELD_DAY_OF_MONTH) &&
+			acceptableFeatureVersion < StatementMessage::FEATURE_V5_6) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_TXN_CLIENT_VERSION_NOT_ACCEPTABLE,
+				"Requested client does not support extended table partitioning type feature "
+				"(clientVersion=" << acceptableFeatureVersion << ")");
 	}
 }
 
@@ -1396,8 +1421,6 @@ void StatementHandler::decodeIndexInfo(
 	try {
 		uint32_t size;
 		in >> size;
-
-		const size_t startPos = in.base().position();
 
 		in >> indexInfo.indexName_;
 
@@ -1880,7 +1903,8 @@ void StatementHandler::encodeException(
 	}
 
 	{
-		const int32_t paramCount = (paramList == NULL ? 0 : paramList->size());
+		const int32_t paramCount = static_cast<int32_t>(
+				paramList == NULL ? 0 : paramList->size());
 		out << paramCount;
 
 		for (int32_t i = 0; i < paramCount; i++) {
@@ -2062,9 +2086,11 @@ void StatementHandler::replySuccess(
 	@brief Replies success message
 */
 void StatementHandler::replySuccess(
-	EventContext & ec,
-	util::StackAllocator & alloc, StatementExecStatus status,
-	const ReplicationContext & replContext) {
+		EventContext & ec,
+		util::StackAllocator & alloc, StatementExecStatus status,
+		const ReplicationContext & replContext) {
+	UNUSED_VARIABLE(status);
+
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)             \
 	"(nd=" << replContext.getConnectionND()                    \
 		   << ", pId=" << replContext.getPartitionId()         \
@@ -2074,8 +2100,6 @@ void StatementHandler::replySuccess(
 		   << ", containerId=" << replContext.getContainerId() << ")"
 
 	util::StackAllocator::Scope scope(alloc);
-	const util::DateTime& now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	if (replContext.getConnectionND().isEmpty()) {
 		return;
@@ -2092,7 +2116,6 @@ void StatementHandler::replySuccess(
 			ev.setPartitionIdSpecified(false);
 
 			EventByteOutStream out = ev.getOutStream();
-			const ReplicationContext::BinaryData2* mesBinary = replContext.getMessage();
 			encodeBinaryData< EventByteOutStream>(out, replContext.getMessage()->data(), replContext.getMessage()->size());
 			const std::vector<ReplicationContext::BinaryData*>& extraMessages = replContext.getExtraMessages();
 			for (std::vector<ReplicationContext::BinaryData*>::const_iterator itr = extraMessages.begin();
@@ -2120,7 +2143,6 @@ void StatementHandler::replySuccess(
 			setReplyOption(request.optional_, replContext);
 
 			EventByteOutStream out = ev.getOutStream();
-			const ReplicationContext::BinaryData2* mesBinary = replContext.getMessage();
 			encodeBinaryData< EventByteOutStream>(out, replContext.getMessage()->data(), replContext.getMessage()->size());
 			const std::vector<ReplicationContext::BinaryData*>& extraMessages = replContext.getExtraMessages();
 			for (std::vector<ReplicationContext::BinaryData*>::const_iterator itr = extraMessages.begin();
@@ -2549,21 +2571,16 @@ void StatementHandler::ConnectionOption::checkSelect(SQLParsedInfo & parsedInfo)
 }
 
 bool StatementHandler::checkPrivilege(
-	EventType command,
-	UserType userType, RequestType requestType, bool isSystemMode,
-	int32_t featureVersion,
-	ContainerAttribute resourceSubType,
-	ContainerAttribute expectedResourceSubType) {
+		EventType command,
+		UserType userType, RequestType requestType, bool isSystemMode,
+		int32_t featureVersion,
+		ContainerAttribute resourceSubType,
+		ContainerAttribute expectedResourceSubType) {
 
-	bool isWriteMode = false;
-	switch (command) {
-	case PUT_CONTAINER:
-	case DROP_CONTAINER:
-		isWriteMode = true;
-		break;
-	default:
-		isWriteMode = false;
-	}
+	UNUSED_VARIABLE(command);
+
+
+
 
 
 	bool granted = false;
@@ -2589,7 +2606,8 @@ bool StatementHandler::checkPrivilege(
 			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_PARAMETER_INVALID,
-				"Illeagal parameter. ContainerAttribute = " << resourceSubType);
+					"Illeagal parameter. ContainerAttribute = " <<
+					static_cast<int32_t>(resourceSubType));
 		}
 		break;
 
@@ -2610,13 +2628,15 @@ bool StatementHandler::checkPrivilege(
 			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_PARAMETER_INVALID,
-				"Illeagal parameter. ContainerAttribute = " << resourceSubType);
+					"Illeagal parameter. ContainerAttribute = " <<
+					static_cast<int32_t>(resourceSubType));
 		}
 		break;
 
 	default:
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_PARAMETER_INVALID,
-			"Illeagal parameter. RequestType = " << requestType);
+				"Illeagal parameter. RequestType = " <<
+				static_cast<int32_t>(requestType));
 	}
 
 	if (expectedResourceSubType == CONTAINER_ATTR_ANY) {
@@ -2624,9 +2644,9 @@ bool StatementHandler::checkPrivilege(
 	}
 	else if (granted && (expectedResourceSubType != resourceSubType)) {
 		GS_THROW_USER_ERROR(GS_ERROR_TXN_CONTAINER_ATTRIBUTE_UNMATCH,
-			"Container attribute not match."
-			<< " (expected=" << expectedResourceSubType
-			<< ", actual=" << resourceSubType << ")");
+				"Container attribute not match." <<
+				" (expected=" << static_cast<int32_t>(expectedResourceSubType) <<
+				", actual=" << static_cast<int32_t>(resourceSubType) << ")");
 	}
 
 	return granted;
@@ -2759,14 +2779,17 @@ DataStoreV4* StatementHandler::getDataStore(PartitionId pId) {
 }
 
 DataStoreBase* StatementHandler::getDataStore(PartitionId pId, StoreType type) {
-	DataStoreBase& dsBase =
-		partitionList_->partition(pId).dataStore();
+	UNUSED_VARIABLE(type);
+
+	DataStoreBase& dsBase = partitionList_->partition(pId).dataStore();
 	return &dsBase;
 }
 
-DataStoreBase* StatementHandler::getDataStore(PartitionId pId, KeyDataStoreValue * keyStoreVal) {
-	DataStoreBase& dsBase =
-		partitionList_->partition(pId).dataStore();
+DataStoreBase* StatementHandler::getDataStore(
+		PartitionId pId, KeyDataStoreValue * keyStoreVal) {
+	UNUSED_VARIABLE(keyStoreVal);
+
+	DataStoreBase& dsBase = partitionList_->partition(pId).dataStore();
 	return &dsBase;
 }
 
@@ -3673,7 +3696,7 @@ void GetContainerPropertiesHandler::encodeContainerProps(
 		encodePartitioningMetaData(
 			out, txn, emNow, *container, container->getAttribute(),
 			dbName, containerNameStr.c_str()
-			, currentTime
+			, currentTime, acceptableFeatureVersion
 		);
 	}
 
@@ -3883,8 +3906,6 @@ void GetContainerPropertiesHandler::encodeEventNotification(
 void GetContainerPropertiesHandler::encodeTrigger(
 	EventByteOutStream & out, const util::XArray<const uint8_t*> &triggerList) {
 	try {
-		util::StackAllocator& alloc = *triggerList.get_allocator().base();
-
 		encodeEnumData<EventByteOutStream, ContainerProperty>(out, CONTAINER_PROPERTY_TRIGGER);
 
 		const size_t sizePos = out.base().position();
@@ -3950,8 +3971,6 @@ void GetContainerPropertiesHandler::encodeIndexDetail(
 void GetContainerPropertiesHandler::encodeNulls(
 	EventByteOutStream & out, const util::XArray<uint8_t> &nullsList) {
 	try {
-		util::StackAllocator& alloc = *nullsList.get_allocator().base();
-
 		encodeEnumData<EventByteOutStream, ContainerProperty>(out, CONTAINER_PROPERTY_NULLS_STATISTICS);
 
 		const size_t sizePos = out.base().position();
@@ -4000,7 +4019,7 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 	TransactionContext & txn, EventMonotonicTime emNow,
 	BaseContainer & largeContainer, ContainerAttribute attribute,
 	const char8_t* dbName, const char8_t* containerName
-	, int64_t currentTime
+	, int64_t currentTime, int32_t acceptableFeatureVersion
 ) {
 	try {
 		util::StackAllocator& alloc = txn.getDefaultAllocator();
@@ -4096,6 +4115,7 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 			int8_t unitValue = -1;
 			if (TupleColumnTypeUtils::isTimestampFamily(
 					partitionColumnOriginalType)) {
+				StatementHandler::checkMetaTableFeatureVersion(unitValue, static_cast<uint8_t>(acceptableFeatureVersion));
 				unitValue = static_cast<int8_t>(partitioningInfo.intervalUnit_);
 			}
 			out << unitValue;
@@ -4118,13 +4138,14 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 			else {
 				partitionColumnSize = static_cast<int32_t>(partitioningInfo.opt_->partitionColumnIdList_.size());
 				out << partitionColumnSize;
-				for (size_t pos = 0; pos < partitionColumnSize; pos++) {
+				for (int32_t pos = 0; pos < partitionColumnSize; pos++) {
 					out << static_cast<int32_t>(partitioningInfo.opt_->partitionColumnIdList_[pos]);
 				}
 			}
 		}
 
-		if (partitioningInfo.subPartitioningColumnId_ != -1) {
+		if (partitioningInfo.subPartitioningColumnId_ !=
+				static_cast<ColumnId>(-1)) {
 			int32_t partitionColumnSize = 0;
 			if (partitioningInfo.opt_ == NULL) {
 				partitionColumnSize = 1;
@@ -4134,7 +4155,7 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 			else {
 				partitionColumnSize = static_cast<int32_t>(partitioningInfo.opt_->subPartitionColumnIdList_.size());
 				out << partitionColumnSize;
-				for (size_t pos = 0; pos < partitionColumnSize; pos++) {
+				for (int32_t pos = 0; pos < partitionColumnSize; pos++) {
 					out << static_cast<int32_t>(partitioningInfo.opt_->subPartitionColumnIdList_[pos]);
 				}
 			}
@@ -4282,8 +4303,9 @@ void PutContainerHandler::operator()(EventContext & ec, Event & ev) {
 			request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 			request.optional_.get<Options::CONTAINER_ATTRIBUTE>())) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-				"Can not create container attribute : " <<
-				request.optional_.get<Options::CONTAINER_ATTRIBUTE>());
+					"Can not create container attribute : " <<
+					static_cast<int32_t>(
+							request.optional_.get<Options::CONTAINER_ATTRIBUTE>()));
 		}
 		const FullContainerKey containerKey(
 			alloc, getKeyConstraint(request.optional_),
@@ -4535,8 +4557,8 @@ void DropContainerHandler::operator()(EventContext & ec, Event & ev) {
 					request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 					keyStoreValue.attribute_)) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-					"Can not drop container attribute : " <<
-					keyStoreValue.attribute_);
+						"Can not drop container attribute : " <<
+						static_cast<int32_t>(keyStoreValue.attribute_));
 			}
 			if (keyStoreValue.containerId_ == UNDEF_CONTAINERID) {
 				OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
@@ -4826,10 +4848,12 @@ void CreateIndexHandler::operator()(EventContext& ec, Event& ev) {
 	@brief Continue current event
 */
 void StatementHandler::continueEvent(
-	EventContext& ec,
-	util::StackAllocator& alloc, const NodeDescriptor& ND, EventType stmtType,
-	StatementId originalStmtId, const Request& request,
-	const Response& response, bool ackWait) {
+		EventContext& ec,
+		util::StackAllocator& alloc, const NodeDescriptor& ND, EventType stmtType,
+		StatementId originalStmtId, const Request& request,
+		const Response& response, bool ackWait) {
+	UNUSED_VARIABLE(response);
+
 
 	util::StackAllocator::Scope scope(alloc);
 
@@ -4873,9 +4897,11 @@ void StatementHandler::continueEvent(
 	@brief Replies success message
 */
 void StatementHandler::continueEvent(
-	EventContext& ec,
-	util::StackAllocator& alloc, StatementExecStatus status,
-	const ReplicationContext& replContext) {
+		EventContext& ec,
+		util::StackAllocator& alloc, StatementExecStatus status,
+		const ReplicationContext& replContext) {
+	UNUSED_VARIABLE(status);
+
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)             \
 	"(nd=" << replContext.getConnectionND()                    \
 		   << ", pId=" << replContext.getPartitionId()         \
@@ -5016,8 +5042,6 @@ void CreateDropTriggerHandler::operator()(EventContext& ec, Event& ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator& alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
 
@@ -5622,7 +5646,6 @@ void RemoveRowHandler::operator()(EventContext& ec, Event& ev) {
 		inMes.decode(in);
 		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
-		RowKeyData& rowKey = inMes.keyData_;
 		const uint64_t numRow = 1;
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
@@ -5711,7 +5734,6 @@ void UpdateRowByIdHandler::operator()(EventContext& ec, Event& ev) {
 		util::XArray<RowId> rowIds(alloc);
 		rowIds.assign(numRow, UNDEF_ROWID);
 		rowIds[0] = inMes.rowId_;
-		RowData& rowData = inMes.rowData_;
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = PROLE_OWNER;
@@ -5910,7 +5932,6 @@ void RemoveRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 		util::XArray<const util::XArray<uint8_t>*> logRecordList(alloc);
 
 		try {
-			StatementId rowCounter = 0;
 			for (StatementId rowStmtId = request.fixed_.cxtSrc_.stmtId_, rowCounter = 0;
 				rowCounter < numRow; rowCounter++, rowStmtId++) {
 				try {
@@ -6138,11 +6159,11 @@ void GetRowHandler::operator()(EventContext& ec, Event& ev) {
 
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
-		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
-
-		RowKeyData& rowKey = inMes.keyData_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+		TRANSACTION_EVENT_START_FOR_UPDATE(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0), forUpdate);
+
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole =
 			forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
@@ -6229,14 +6250,14 @@ void GetRowSetHandler::operator()(EventContext& ec, Event& ev) {
 
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
-		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
-		PartialQueryOption& partialQueryOption = inMes.partialQueryOption_;
 		RowId position = inMes.rowId_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole =
 			forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
@@ -6328,7 +6349,6 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
-		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -6366,6 +6386,8 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 		}
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+		TRANSACTION_EVENT_START_FOR_UPDATE(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0), forUpdate);
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = nodeDistribution ?
 			PROLE_ANY :
@@ -6516,7 +6538,6 @@ void AppendRowHandler::operator()(EventContext& ec, Event& ev) {
 		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const uint64_t numRow = 1;
-		RowData& rowData = inMes.rowData_;
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = PROLE_OWNER;
@@ -6593,14 +6614,13 @@ void QueryGeometryRelatedHandler::operator()(EventContext& ec, Event& ev) {
 
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
-		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
-		PartialQueryOption& partialQueryOption = inMes.partialQueryOption_;
-		GeometryQuery& query = inMes.query_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+		TRANSACTION_EVENT_START_FOR_UPDATE(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0), forUpdate);
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole =
 			forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
@@ -6691,14 +6711,13 @@ void QueryGeometryWithExclusionHandler::operator()(
 
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
-		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
-		PartialQueryOption& partialQueryOption = inMes.partialQueryOption_;
-		GeometryQuery& query = inMes.query_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+		TRANSACTION_EVENT_START_FOR_UPDATE(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0), forUpdate);
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole =
 			forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
@@ -6792,9 +6811,8 @@ void GetRowTimeRelatedHandler::operator()(EventContext& ec, Event& ev) {
 		inMes.decode(in);
 		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
-		TimeRelatedCondition& condition = inMes.condition_;
-
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole =
 			forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
@@ -6872,8 +6890,6 @@ void GetRowInterpolateHandler::operator()(EventContext& ec, Event& ev) {
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
-
-		InterpolateCondition& condition = inMes.condition_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
@@ -7033,14 +7049,13 @@ void QueryTimeRangeHandler::operator()(EventContext& ec, Event& ev) {
 
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
-		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
-		PartialQueryOption& partialQueryOption = inMes.partialQueryOption_;
-		RangeQuery& query = inMes.query_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
+		TRANSACTION_EVENT_START_FOR_UPDATE(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0), forUpdate);
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole =
 			forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
@@ -7136,8 +7151,6 @@ void QueryTimeSamplingHandler::operator()(EventContext& ec, Event& ev) {
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
-		PartialQueryOption& partialQueryOption = inMes.partialQueryOption_;
-		SamplingQuery& query = inMes.query_;
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
@@ -9074,7 +9087,6 @@ void MultiQueryHandler::operator()(EventContext& ec, Event& ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator& alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Request request(alloc, getRequestSource(ev));
@@ -9472,7 +9484,8 @@ void MultiQueryHandler::encodeMultiSearchResultHead(
 }
 
 void MultiQueryHandler::encodeEmptySearchResult(
-	util::StackAllocator& alloc, EventByteOutStream& out) {
+		util::StackAllocator& alloc, EventByteOutStream& out) {
+	UNUSED_VARIABLE(alloc);
 	try {
 		int64_t allSize = 0;
 		int32_t entryNum = 0;
@@ -9513,22 +9526,23 @@ void MultiQueryHandler::encodeSearchResult(
 				out << entrySize;
 
 				encodeBooleanData<EventByteOutStream>(out, true);
-				entrySize += sizeof(int8_t);
+				entrySize += static_cast<int32_t>(sizeof(int8_t));
 
 				int32_t partialEntryNum = static_cast<int32_t>(partialQueryOption.size());
 				out << partialEntryNum;
-				entrySize += sizeof(int32_t);
+				entrySize += static_cast<int32_t>(sizeof(int32_t));
 
 				PartialQueryOption::const_iterator itr;
 				for (itr = partialQueryOption.begin(); itr != partialQueryOption.end(); itr++) {
 					encodeIntData<EventByteOutStream, int8_t>(out, itr->first);
-					entrySize += sizeof(int8_t);
+					entrySize += static_cast<int32_t>(sizeof(int8_t));
 
-					int32_t partialEntrySize = itr->second->size();
+					int32_t partialEntrySize =
+							static_cast<int32_t>(itr->second->size());
 					out << partialEntrySize;
-					entrySize += sizeof(int32_t);
+					entrySize += static_cast<int32_t>(sizeof(int32_t));
 					encodeBinaryData< EventByteOutStream>(out, itr->second->data(), itr->second->size());
-					entrySize += itr->second->size();
+					entrySize += static_cast<int32_t>(itr->second->size());
 				}
 				const size_t entryLastPos = out.base().position();
 				out.base().position(entrySizePos);
@@ -9544,9 +9558,10 @@ void MultiQueryHandler::encodeSearchResult(
 			{
 				encodeEnumData<EventByteOutStream, QueryResponseType>(out, ROW_SET);
 
-				int32_t entrySize = sizeof(ResultSize) +
-					rs.getFixedOffsetSize() +
-					rs.getVarOffsetSize();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) +
+						rs.getFixedOffsetSize() +
+						rs.getVarOffsetSize());
 				out << entrySize;
 
 				out << rs.getFetchNum();
@@ -9574,9 +9589,10 @@ void MultiQueryHandler::encodeSearchResult(
 			allSize += sizeof(int32_t);
 			{
 				encodeEnumData<EventByteOutStream, QueryResponseType>(out, QUERY_ANALYSIS);
-				int32_t entrySize = sizeof(ResultSize) +
-					rs.getFixedOffsetSize() +
-					rs.getVarOffsetSize();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) +
+						rs.getFixedOffsetSize() +
+						rs.getVarOffsetSize());
 				out << entrySize;
 
 				out << rs.getResultNum();
@@ -9603,8 +9619,8 @@ void MultiQueryHandler::encodeSearchResult(
 				encodeEnumData<EventByteOutStream, QueryResponseType>(out, AGGREGATION);
 				const util::XArray<uint8_t>* rowDataFixedPart =
 					rs.getRowDataFixedPartBuffer();
-				int32_t entrySize = sizeof(ResultSize) +
-					rowDataFixedPart->size();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) + rowDataFixedPart->size());
 				out << entrySize;
 
 				out << rs.getResultNum();
@@ -9632,9 +9648,10 @@ void MultiQueryHandler::encodeSearchResult(
 			}
 			{
 				encodeEnumData<EventByteOutStream, QueryResponseType>(out, ROW_SET);
-				int32_t entrySize = sizeof(ResultSize) +
-					rs.getFixedOffsetSize() +
-					rs.getVarOffsetSize();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) +
+						rs.getFixedOffsetSize() +
+						rs.getVarOffsetSize());
 				out << entrySize;
 
 				out << rs.getFetchNum();
@@ -9648,7 +9665,7 @@ void MultiQueryHandler::encodeSearchResult(
 		} break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_RESULT_TYPE_INVALID,
-				"(resultType=" << rs.getResultType() << ")");
+					"(resultType=" << static_cast<int32_t>(rs.getResultType()) << ")");
 		}
 
 		const size_t lastPos = out.base().position();
@@ -10302,8 +10319,11 @@ bool DataStorePeriodicallyHandler::ExpiredContainerContext::next(int64_t size) {
 }
 
 int64_t DataStorePeriodicallyHandler::getContainerNameList(
-	EventContext& ec, PartitionGroupId pgId,
-	PartitionId pId, int32_t start, ResultSize limit, util::XArray<FullContainerKey>& containerNameList) {
+		EventContext& ec, PartitionGroupId pgId,
+		PartitionId pId, int64_t start, ResultSize limit,
+		util::XArray<FullContainerKey>& containerNameList) {
+	UNUSED_VARIABLE(pgId);
+
 	Partition& partition = partitionList_->partition(pId);
 	if (!partition.isActive()) {
 		return 0;
@@ -10350,8 +10370,8 @@ void DataStorePeriodicallyHandler::sendCheckDropContainerList(
 		optionalRequest.set<StatementMessage::Options::SYSTEM_MODE>(systemMode);
 		bool forSync = true;
 		optionalRequest.set<StatementMessage::Options::FOR_SYNC>(forSync);
-		ContainerId containerId = -1;
-		optionalRequest.set<StatementMessage::Options::SUB_CONTAINER_ID>(containerId);
+		int32_t subContainerId = -1;
+		optionalRequest.set<StatementMessage::Options::SUB_CONTAINER_ID>(subContainerId);
 		optionalRequest.encode(out);
 		encodeContainerKey(out, containerNameList[pos]);
 		out << TABLE_PARTITIONING_CHECK_EXPIRED;
@@ -10366,7 +10386,9 @@ void DataStorePeriodicallyHandler::sendCheckDropContainerList(
 bool DataStorePeriodicallyHandler::checkAndDrop(EventContext& ec, ExpiredContainerContext& cxt) {
 
 	util::StackAllocator& alloc = ec.getAllocator();
-
+	if (clusterManager_->getStandbyInfo().isStandby()) {
+		return false;
+	}
 	ExpiredContainerContext::Status status = cxt.getStatus();
 	switch (status) {
 	case ExpiredContainerContext::INIT:
@@ -10394,7 +10416,7 @@ bool DataStorePeriodicallyHandler::checkAndDrop(EventContext& ec, ExpiredContain
 }
 
 void DataStorePeriodicallyHandler::setConcurrency(int64_t concurrency) {
-	concurrency_ = concurrency;
+	concurrency_ = static_cast<int32_t>(concurrency);
 	expiredCounterList_.assign(concurrency, 0);
 	startPosList_.assign(concurrency, 0);
 
@@ -10414,9 +10436,6 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 	try {
 		if (clusterManager_->checkRecoveryCompleted()) {
 			WATCHER_START;
-			util::StackAllocator& alloc = ec.getAllocator();
-			const util::DateTime now = ec.getHandlerStartTime();
-			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 			const PartitionGroupId pgId = ec.getWorkerId();
 			const PartitionGroupConfig& pgConfig =
 				transactionManager_->getPartitionGroupConfig();
@@ -10469,7 +10488,6 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 				if (pIdCursor_[pgId] == UNDEF_PARTITIONID) {
 					pIdCursor_[pgId] = pgConfig.getGroupBeginPartitionId(pgId);
 				}
-				Partition* partition = &partitionList_->partition(pIdCursor_[pgId]);
 				uint64_t periodMaxScanCount = dsConfig_->getBatchScanNum();
 
 				uint64_t count = 0;
@@ -10481,7 +10499,6 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 					Partition* partition = &partitionList_->partition(pIdCursor_[pgId]);
 					if (partition->isActive()) {
 						Timestamp timestamp = ec.getHandlerStartTime().getUnixTime();
-						uint64_t maxScanNum = periodMaxScanCount - count;
 
 						util::StackAllocator& alloc = ec.getAllocator();
 						const util::DateTime now = ec.getHandlerStartTime();
@@ -10958,8 +10975,6 @@ void UpdateDataStoreStatusHandler::operator()(EventContext& ec, Event& ev) {
 
 		const PartitionGroupId pgId = ec.getWorkerId();
 		if (clusterManager_->checkRecoveryCompleted()) {
-			bool isFinished = true;
-
 			const PartitionGroupConfig& pgConfig = transactionManager_->getPartitionGroupConfig();
 			for (PartitionId currentPId = pgConfig.getGroupBeginPartitionId(pgId);
 				currentPId < pgConfig.getGroupEndPartitionId(pgId); currentPId++) {
@@ -11102,7 +11117,8 @@ TransactionService::TransactionService(
 
 	connectHandler_(
 		StatementHandler::TXN_CLIENT_VERSION,
-		ACCEPTABLE_NOSQL_CLIENT_VERSIONS) {
+		ACCEPTABLE_NOSQL_CLIENT_VERSIONS)
+{
 	try {
 		eeConfig_.setServerNDAutoNumbering(false);
 		eeConfig_.setClientNDEnabled(true);
@@ -11599,6 +11615,14 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		longTermSyncHandler_.initialize(mgrSet);
 		setClusterHandler();
 
+		ee_->setHandler(TXN_SYNC_REDO_LOG, redoLogHandler_);
+		ee_->setHandler(TXN_SYNC_REDO_LOG_REPLICATION, redoLogHandler_);
+		ee_->setHandler(TXN_SYNC_REDO_REMOVE, redoLogHandler_);
+		ee_->setHandler(TXN_SYNC_REDO_CHECK, redoLogHandler_);
+		ee_->setHandler(TXN_SYNC_REDO_ERROR, redoLogHandler_);
+		redoLogHandler_.initialize(mgrSet);
+
+
 		syncCheckEndHandler_.initialize(mgrSet);
 		ee_->setHandler(TXN_SYNC_TIMEOUT, syncCheckEndHandler_);
 		ee_->setHandler(TXN_SYNC_CHECK_END, syncCheckEndHandler_);
@@ -11617,9 +11641,6 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 
 		const PartitionGroupConfig& pgConfig =
 			mgrSet.txnMgr_->getPartitionGroupConfig();
-
-		const int32_t writeLogInterval =
-			mgrSet.partitionList_->partition(0).logManager().getConfig().logWriteMode_;
 
 		for (PartitionGroupId pgId = 0;
 			pgId < pgConfig.getPartitionGroupCount(); pgId++) {
@@ -11755,9 +11776,9 @@ void TransactionService::changeTimeoutCheckMode(PartitionId pId,
 
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INVALID_ARGS,
-			"(pId=" << pId << ", state=" << after
-			<< ", changeType=" << static_cast<int32_t>(changeType)
-			<< ", isToSubMaster=" << isToSubMaster << ")");
+				"(pId=" << pId << ", state=" << static_cast<int32_t>(after) <<
+				", changeType=" << static_cast<int32_t>(changeType) <<
+				", isToSubMaster=" << isToSubMaster << ")");
 	}
 }
 
@@ -11980,8 +12001,6 @@ int32_t TransactionService::getWaitTime(EventContext& ec, Event* ev, int32_t ope
 	int32_t waitTime = 0;
 	const PartitionGroupId pgId = ec.getWorkerId();
 	if (type == TXN_BACKGROUND) {
-		PartitionId pId = (*ev).getPartitionId();
-		EventType eventType = (*ev).getType();
 		EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
 			EventEngine::Stats::EVENT_ACTIVE_EXECUTABLE_ONE_SHOT_COUNT,
 			executableCount, &ec, ev);
@@ -12162,22 +12181,23 @@ void StatementHandler::TQLOutputMessage::encode(S& out) {
 				out << entrySize;
 
 				encodeBooleanData<S>(out, true);
-				entrySize += sizeof(int8_t);
+				entrySize += static_cast<int32_t>(sizeof(int8_t));
 
 				int32_t partialEntryNum = static_cast<int32_t>(partialQueryOption.size());
 				out << partialEntryNum;
-				entrySize += sizeof(int32_t);
+				entrySize += static_cast<int32_t>(sizeof(int32_t));
 
 				PartialQueryOption::const_iterator itr;
 				for (itr = partialQueryOption.begin(); itr != partialQueryOption.end(); itr++) {
 					encodeIntData<S, int8_t>(out, itr->first);
-					entrySize += sizeof(int8_t);
+					entrySize += static_cast<int32_t>(sizeof(int8_t));
 
-					int32_t partialEntrySize = itr->second->size();
+					int32_t partialEntrySize =
+							static_cast<int32_t>(itr->second->size());
 					out << partialEntrySize;
-					entrySize += sizeof(int32_t);
+					entrySize += static_cast<int32_t>(sizeof(int32_t));
 					encodeBinaryData<S>(out, itr->second->data(), itr->second->size());
-					entrySize += itr->second->size();
+					entrySize += static_cast<int32_t>(itr->second->size());
 				}
 				const size_t entryLastPos = out.base().position();
 				out.base().position(entrySizePos);
@@ -12191,9 +12211,10 @@ void StatementHandler::TQLOutputMessage::encode(S& out) {
 			{
 				encodeEnumData<S, QueryResponseType>(out, ROW_SET);
 
-				int32_t entrySize = sizeof(ResultSize) +
-					rs_->getFixedOffsetSize() +
-					rs_->getVarOffsetSize();
+				const int32_t entrySize = static_cast<int32_t>(
+						sizeof(ResultSize) +
+						rs_->getFixedOffsetSize() +
+						rs_->getVarOffsetSize());
 				out << entrySize;
 				out << rs_->getFetchNum();
 				entryNum++;
@@ -12212,9 +12233,10 @@ void StatementHandler::TQLOutputMessage::encode(S& out) {
 			entryNum += encodeDistributedResult<S>(out, *rs_, NULL);
 
 			encodeEnumData<S, QueryResponseType>(out, QUERY_ANALYSIS);
-			int32_t entrySize = sizeof(ResultSize) +
-				rs_->getFixedOffsetSize() +
-				rs_->getVarOffsetSize();
+			const int32_t entrySize = static_cast<int32_t>(
+					sizeof(ResultSize) +
+					rs_->getFixedOffsetSize() +
+					rs_->getVarOffsetSize());
 			out << entrySize;
 
 			out << rs_->getResultNum();
@@ -12232,8 +12254,8 @@ void StatementHandler::TQLOutputMessage::encode(S& out) {
 			encodeEnumData<S, QueryResponseType>(out, AGGREGATION);
 			const util::XArray<uint8_t>* rowDataFixedPart =
 				rs_->getRowDataFixedPartBuffer();
-			int32_t entrySize = sizeof(ResultSize) +
-				rowDataFixedPart->size();
+			const int32_t entrySize = static_cast<int32_t>(
+					sizeof(ResultSize) + rowDataFixedPart->size());
 			out << entrySize;
 
 			out << rs_->getResultNum();
@@ -12253,9 +12275,10 @@ void StatementHandler::TQLOutputMessage::encode(S& out) {
 			}
 			{
 				encodeEnumData<S, QueryResponseType>(out, ROW_SET);
-				int32_t entrySize = sizeof(ResultSize) +
-					rs_->getFixedOffsetSize() +
-					rs_->getVarOffsetSize();
+				const int32_t entrySize = static_cast<uint32_t>(
+						sizeof(ResultSize) +
+						rs_->getFixedOffsetSize() +
+						rs_->getVarOffsetSize());
 				out << entrySize;
 
 				out << rs_->getFetchNum();
@@ -12263,7 +12286,8 @@ void StatementHandler::TQLOutputMessage::encode(S& out) {
 		} break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_RESULT_TYPE_INVALID,
-				"(resultType=" << rs_->getResultType() << ")");
+					"(resultType=" <<
+					static_cast<int32_t>(rs_->getResultType()) << ")");
 		}
 
 }
@@ -12288,7 +12312,8 @@ void StatementHandler::TQLOutputMessage::addExtraMessage(Event* ev) {
 	} break;
 	default:
 		GS_THROW_USER_ERROR(GS_ERROR_TXN_RESULT_TYPE_INVALID,
-			"(resultType=" << rs_->getResultType() << ")");
+				"(resultType=" <<
+				static_cast<int32_t>(rs_->getResultType()) << ")");
 	}
 }
 void StatementHandler::TQLOutputMessage::addExtraMessage(ReplicationContext* replContext) {
@@ -12312,21 +12337,33 @@ void StatementHandler::TQLOutputMessage::addExtraMessage(ReplicationContext* rep
 	} break;
 	default:
 		GS_THROW_USER_ERROR(GS_ERROR_TXN_RESULT_TYPE_INVALID,
-			"(resultType=" << rs_->getResultType() << ")");
+				"(resultType=" <<
+				static_cast<int32_t>(rs_->getResultType()) << ")");
 	}
 }
 
-bool StatementHandler::checkConstraint(Event& ev, ConnectionOption& connOption) {
+bool StatementHandler::checkConstraint(Event& ev, ConnectionOption& connOption, bool isUpdate) {
 	uint32_t delayTime1, delayTime2;
-	bool isClientNd = !ev.getSenderND().isEmpty() && ev.getSenderND().getId() < 0;
-	if (isClientNd
-		&& transactionManager_->getDatabaseManager().getExecutionConstraint(connOption.dbId_, delayTime1, delayTime2, false)) {
-		if (delayTime1 > 0 && connOption.retryCount_ == 0) {
-			connOption.retryCount_++;
-			transactionService_->getEE()->addTimer(ev, delayTime1);
-			return true;
+	bool isClientNd = (!ev.getSenderND().isEmpty() && ev.getSenderND().getId() < 0);
+	if (clusterManager_->getStandbyInfo().isStandby()) {
+		if (transactionService_->isUpdateEvent(ev)) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DENY_REQUEST,
+				"Deny write operation (Standby mode), eventType=" << EventTypeUtility::getEventTypeName(ev.getType()));
 		}
-	} 
+		if (isUpdate) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DENY_REQUEST,
+				"Deny write operation (Standby mode), eventType=" << EventTypeUtility::getEventTypeName(ev.getType()));
+		}
+	}
+	if (isClientNd) {
+		if (transactionManager_->getDatabaseManager().getExecutionConstraint(connOption.dbId_, delayTime1, delayTime2, false)) {
+			if (delayTime1 > 0 && connOption.retryCount_ == 0) {
+				connOption.retryCount_++;
+				transactionService_->getEE()->addTimer(ev, delayTime1);
+				return true;
+			}
+		}
+	}
 	connOption.retryCount_ = 0;
 	return false;
 }
@@ -12371,8 +12408,8 @@ util::XArray<uint8_t>* StatementHandler::appendDataStoreLog(
 	}
 	return logBinary;
 }
-const char* StatementHandler::AuditEventType(const Event &ev)
-{
+
+const char* StatementHandler::AuditEventType(const Event &ev) {
 	EventType eventType = ev.getType();
 	switch (eventType) {
 	case LOGIN: /* LoginHandler */
@@ -12447,8 +12484,8 @@ const char* StatementHandler::AuditEventType(const Event &ev)
 	}
 	return "";
 }
-const int32_t StatementHandler::AuditCategoryType(const Event &ev)
-{
+
+int32_t StatementHandler::AuditCategoryType(const Event &ev) {
 	EventType eventType = ev.getType();
 	switch (eventType) {
 	case LOGIN: /* LoginHandler */
@@ -12522,4 +12559,112 @@ const int32_t StatementHandler::AuditCategoryType(const Event &ev)
 		return 0;
 	}
 	return 0;
+}
+
+bool TransactionService::isUpdateEvent(Event& ev) {
+	switch (ev.getType()) {
+	case PUT_CONTAINER:
+	case PUT_LARGE_CONTAINER:
+	case UPDATE_CONTAINER_STATUS:
+	case CREATE_LARGE_INDEX:
+	case DROP_CONTAINER:
+	case CREATE_INDEX:
+	case DELETE_INDEX:
+	case CREATE_TRIGGER:
+	case DELETE_TRIGGER:
+	case CREATE_TRANSACTION_CONTEXT:
+	case CLOSE_TRANSACTION_CONTEXT:
+	case COMMIT_TRANSACTION:
+	case ABORT_TRANSACTION:
+	case PUT_ROW:
+	case PUT_MULTIPLE_ROWS:
+	case REMOVE_ROW:
+	case UPDATE_ROW_BY_ID:
+	case REMOVE_ROW_BY_ID:
+	case APPEND_TIME_SERIES_ROW:
+	case CREATE_MULTIPLE_TRANSACTION_CONTEXTS:
+	case CLOSE_MULTIPLE_TRANSACTION_CONTEXTS:
+	case PUT_MULTIPLE_CONTAINER_ROWS:
+	case PUT_USER:
+	case DROP_USER:
+	case PUT_DATABASE:
+	case DROP_DATABASE:
+	case PUT_PRIVILEGE:
+	case DROP_PRIVILEGE:
+	case CONTINUE_CREATE_INDEX:
+	case UPDATE_DATA_STORE_STATUS:
+	case REMOVE_MULTIPLE_ROWS_BY_ID_SET:
+	case UPDATE_MULTIPLE_ROWS_BY_ID_SET:
+		return true;
+	case CONNECT:
+	case DISCONNECT:
+	case LOGIN:
+	case LOGOUT:
+	case GET_PARTITION_ADDRESS:
+	case GET_PARTITION_CONTAINER_NAMES:
+	case GET_CONTAINER_PROPERTIES:
+	case GET_COLLECTION:
+	case INTERPOLATE_TIME_SERIES_ROW:
+	case GET_TIME_SERIES_ROW_RELATED:
+	case AGGREGATE_TIME_SERIES:
+	case FETCH_RESULT_SET:
+	case CLOSE_RESULT_SET:
+	case GET_MULTIPLE_CONTAINER_ROWS:
+	case EXECUTE_MULTIPLE_QUERIES:
+	case QUERY_TIME_SERIES_SAMPLING:
+	case AUTHENTICATION_ACK:
+	case GET_USERS:
+	case GET_DATABASES:
+	case SQL_GET_CONTAINER:
+	case EXECUTE_JOB:
+	case SEND_EVENT:
+	case AUTHENTICATION:
+	case BACK_GROUND:
+		return false;
+	case GET_ROW: 
+	case GET_MULTIPLE_ROWS: 
+	case QUERY_TQL: 
+	case QUERY_COLLECTION_GEOMETRY_RELATED: 
+	case QUERY_COLLECTION_GEOMETRY_WITH_EXCLUSION: 
+	case QUERY_TIME_SERIES_RANGE: 
+		return false;
+	case FLUSH_LOG:
+	case REPLICATION_LOG:
+	case REPLICATION_ACK:
+	case REPLICATION_LOG2:
+	case REPLICATION_ACK2:
+	case TXN_COLLECT_TIMEOUT_RESOURCE:
+	case CHUNK_EXPIRE_PERIODICALLY:
+	case ADJUST_STORE_MEMORY_PERIODICALLY:
+		return false;
+	case TXN_SHORTTERM_SYNC_REQUEST:
+	case TXN_SHORTTERM_SYNC_START:
+	case TXN_SHORTTERM_SYNC_START_ACK:
+	case TXN_SHORTTERM_SYNC_LOG:
+	case TXN_SHORTTERM_SYNC_LOG_ACK:
+	case TXN_SHORTTERM_SYNC_END:
+	case TXN_SHORTTERM_SYNC_END_ACK:
+	case TXN_SYNC_TIMEOUT:
+	case TXN_SYNC_CHECK_END:
+	case TXN_CHANGE_PARTITION_TABLE:
+	case TXN_CHANGE_PARTITION_STATE:
+	case TXN_DROP_PARTITION:
+	case TXN_LONGTERM_SYNC_REQUEST:
+	case TXN_LONGTERM_SYNC_START:
+	case TXN_LONGTERM_SYNC_START_ACK:
+	case TXN_LONGTERM_SYNC_CHUNK:
+	case TXN_LONGTERM_SYNC_CHUNK_ACK:
+	case TXN_LONGTERM_SYNC_LOG:
+	case TXN_LONGTERM_SYNC_LOG_ACK:
+	case TXN_LONGTERM_SYNC_PREPARE_ACK:
+	case TXN_LONGTERM_SYNC_RECOVERY_ACK:
+	case TXN_SYNC_REDO_LOG:
+	case TXN_SYNC_REDO_LOG_REPLICATION:
+	case TXN_SYNC_REDO_REMOVE:
+	case TXN_SYNC_REDO_CHECK:
+	case TXN_SYNC_REDO_ERROR:
+		return false;
+	default:
+		return false;
+	}
 }

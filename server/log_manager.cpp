@@ -31,12 +31,15 @@ const uint32_t Log::COMMON_HEADER_SIZE = Log::getCommonHeaderSize();
 
 const uint16_t LogManagerConst::LOGFORMAT_OLD_VERSION = 0x0;
 const uint16_t LogManagerConst::LOGFORMAT_BASE_VERSION = 0x1;
-const uint16_t LogManagerConst::LOGFORMAT_LATEST_VERSION = 0x1; 
+const uint16_t LogManagerConst::LOGFORMAT_V56_ZSTD_VERSION = 0x2; 
+const uint16_t LogManagerConst::LOGFORMAT_LATEST_VERSION = LOGFORMAT_V56_ZSTD_VERSION; 
+
 
 const uint16_t
 LogManagerConst::LOGFORMAT_ACCEPTABLE_VERSIONS[] = {
 		LOGFORMAT_OLD_VERSION,      
 		LOGFORMAT_BASE_VERSION,
+		LOGFORMAT_LATEST_VERSION,
 		UINT16_MAX /* sentinel */
 };
 
@@ -44,6 +47,8 @@ uint32_t LogManagerConst::getLogFormatVersionScore(uint16_t version) {
 	switch(version) {
 	case LOGFORMAT_BASE_VERSION:
 		return 1;
+	case LOGFORMAT_LATEST_VERSION:
+		return 2;
 	default:
 		return 0;
 	}
@@ -112,7 +117,6 @@ std::string Log::toString() const {
 
 
 void Log::encode(util::StackAllocator& alloc, util::XArray<uint8_t>& logRecoreds) {
-	int64_t dataSize = getDataSize();
 	size_t startPos = logRecoreds.size();
 	util::XArray<uint8_t> binary(alloc);
 	typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
@@ -153,7 +157,7 @@ WALBuffer::WALBuffer(PartitionId pId, LogManagerStats &stats) :
 		stopOnDuplicateError_(false),
 		duplicateStatus_(DuplicateLogMode::DUPLICATE_LOG_DISABLE),
 		position_(0),
-		needFlush_(false), stats_(stats) {
+		needFlush_(false), stats_(stats), logManager_(NULL) {
 	buffer_.reset(UTIL_NEW uint8_t[bufferSize_]);
 }
 
@@ -165,13 +169,14 @@ WALBuffer::~WALBuffer() {
 
 		エリア作成など
 */
-WALBuffer& WALBuffer::init(SimpleFile* logfile) {
+WALBuffer& WALBuffer::init(SimpleFile* logfile, LogManager<MutexLocker>& logManager) {
 	assert(logfile);
 	logFile_ = logfile;
 	logFile_->setSize(0);
 
 	buffer_.reset(UTIL_NEW uint8_t[bufferSize_]);
 	position_ = 0;
+	logManager_ = &logManager;
 	return *this;
 }
 
@@ -226,6 +231,14 @@ SimpleFile* WALBuffer::initDuplicateLogFile(const char* path) {
 	}
 	return duplicateFile_;
 }
+void WALBuffer::deleteDuplicateFile() {
+	if (duplicateFile_) {
+		if (logManager_) {
+			logManager_->deleteDuplicateFile();
+		}
+		duplicateFile_ = NULL;
+	}
+}
 
 void WALBuffer::handleDuplicateError(std::exception &e) {
 	setDuplicateStatus(DuplicateLogMode::DUPLICATE_LOG_ERROR);
@@ -237,8 +250,7 @@ void WALBuffer::handleDuplicateError(std::exception &e) {
 			catch (...) {
 				;
 			}
-			delete duplicateFile_;
-			duplicateFile_ = NULL;
+			deleteDuplicateFile();
 		}
 		GS_RETHROW_SYSTEM_ERROR(
 				e, GS_EXCEPTION_MERGE_MESSAGE(e, "Write duplicate log failed."));
@@ -254,8 +266,7 @@ void WALBuffer::handleDuplicateError(std::exception &e) {
 			catch (...) {
 				;
 			}
-			delete duplicateFile_;
-			duplicateFile_ = NULL;
+			deleteDuplicateFile();
 		}
 	}
 }

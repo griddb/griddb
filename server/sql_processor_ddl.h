@@ -300,12 +300,14 @@ struct CreateIndexInfo : public DDLBaseInfo {
 	bool columnNameCaseSensitive_;
 	bool isSameName_;
 
-	void bindParamInfos(const char* dbName, const char* indexName, const char* tableName, const char* columnName,
-		SchemaVersionId versionId,
-		ContainerId containerId) {
-		dbName_ = dbName_;
-		tableName_ = tableName_;
-		indexName_ = indexName_;
+	void bindParamInfos(
+			const char* dbName, const char* indexName, const char* tableName,
+			const char* columnName,
+			SchemaVersionId versionId,
+			ContainerId containerId) {
+		dbName_ = dbName;
+		tableName_ = tableName;
+		indexName_ = indexName;
 		columnName_ = columnName;
 		containerId_ = containerId;
 		versionId_ = versionId;

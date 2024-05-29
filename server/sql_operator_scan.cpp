@@ -31,6 +31,7 @@ void SQLScanOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_SCAN_CONTAINER_RANGE, ScanContainerRange>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_INDEX, ScanContainerIndex>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_META, ScanContainerMeta>();
+	add<SQLOpTypes::OP_SCAN_CONTAINER_VISITED, ScanContainerVisited>();
 	add<SQLOpTypes::OP_SELECT, Select>();
 	add<SQLOpTypes::OP_SELECT_NONE, SelectPipe>();
 	add<SQLOpTypes::OP_SELECT_PIPE, SelectPipe>();
@@ -73,6 +74,10 @@ SQLScanOps::BaseScanContainerOperator::getScanCursorAccessor(
 		source.partialExecSizeRange_.second =
 				static_cast<uint64_t>(std::max<int64_t>(
 						cxt.getNextCountForSuspend(), 0));
+
+		const SQLOps::OpConfig::Value countBased = SQLOps::OpConfig::resolve(
+				SQLOpTypes::CONF_SCAN_COUNT_BASED, config);
+		source.partialExecCountBased_ = (countBased > 0);
 
 		util::AllocUniquePtr<ScanCursorAccessor> accessor(
 				ScanCursorAccessor::create(source));
@@ -601,7 +606,7 @@ const SQLExprs::IndexSelector* SQLScanOps::Scan::selectIndex(
 		if (expr == NULL) {
 			expr = baseCode.getFilterPredicate();
 		}
-		if (forMeta || expr == NULL || !location.indexActivated_) {
+		if (forMeta || !location.indexActivated_) {
 			break;
 		}
 
@@ -611,6 +616,8 @@ const SQLExprs::IndexSelector* SQLScanOps::Scan::selectIndex(
 			}
 			break;
 		}
+
+		const Projection *pipeProj = baseCode.getPipeProjection();
 
 		util::StackAllocator &alloc = cxt.getAllocator();
 
@@ -628,7 +635,7 @@ const SQLExprs::IndexSelector* SQLScanOps::Scan::selectIndex(
 		accessor.getIndexSpec(
 				cxt.getExtContext(), cxt.getInputColumnList(0), *selector);
 		selector->setBulkGrouping(true);
-		selector->select(*expr);
+		selector->selectDetail(pipeProj, expr);
 		if (selector->isSelected()) {
 			break;
 		}
@@ -749,6 +756,9 @@ bool SQLScanOps::ScanUnique::generateUniqueScanPlan(
 			builder.createProjectionByUsage(false),
 			baseCode.getFilterPredicate());
 
+	Projection &visitedProj = builder.createProjectionByUsage(false);
+	builder.replaceColumnToConstExpr(visitedProj);
+
 	rewriter.setIdProjected(true);
 	rewriter.setInputProjected(true);
 
@@ -786,8 +796,22 @@ bool SQLScanOps::ScanUnique::generateUniqueScanPlan(
 		return false;
 	}
 
-	OpNode &groupNode = plan.createNode(SQLOpTypes::OP_UNION);
-	{
+	const bool withVisited = !(indexLost && aggregated);
+
+	OpNode *visitedScanNode = NULL;
+	if (withVisited) {
+		OpCode code;
+		code.setContainerLocation(&location);
+		code.setPipeProjection(&visitedProj);
+
+		OpNode &node = plan.createNode(SQLOpTypes::OP_SCAN_CONTAINER_VISITED);
+		node.setCode(code);
+		node.addInput(plan.getParentInput(0));
+		visitedScanNode = &node;
+	}
+
+	OpNode *groupNode = NULL;
+	if (withVisited) {
 		SQLValues::CompColumnList &keyColumnList =
 				builder.createCompColumnList();
 		{
@@ -807,14 +831,16 @@ bool SQLScanOps::ScanUnique::generateUniqueScanPlan(
 			code.setContainerLocation(NULL);
 		}
 		code.setKeyColumnList(&keyColumnList);
-		code.setUnionType(SQLType::UNION_DISTINCT);
+		code.setUnionType(SQLType::UNION_EXCEPT);
 
-		OpNode &node = groupNode;
+		OpNode &node = plan.createNode(SQLOpTypes::OP_UNION);
 		node.setCode(code);
 		node.addInput(*inNode);
+		node.addInput(*visitedScanNode);
+		groupNode = &node;
 	}
 
-	OpNode *tailNode = &groupNode;
+	const OpNode *tailNode = (groupNode == NULL ? inNode : groupNode);
 	if (aggregated) {
 		OpNode &node = plan.createNode(SQLOpTypes::OP_SELECT);
 
@@ -827,7 +853,7 @@ bool SQLScanOps::ScanUnique::generateUniqueScanPlan(
 		code.setPipeProjection(&mappedProj);
 
 		node.setCode(code);
-		node.addInput(groupNode);
+		node.addInput(*tailNode);
 
 		tailNode = &node;
 	}
@@ -986,6 +1012,23 @@ void SQLScanOps::ScanContainerMeta::execute(OpContext &cxt) const {
 
 		if (done || cxt.checkSuspendedAlways()) {
 			break;
+		}
+	}
+}
+
+
+void SQLScanOps::ScanContainerVisited::execute(OpContext &cxt) const {
+	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
+
+	for (;;) {
+		const bool done = cursor->scanVisited(
+				cxt, *getCode().getPipeProjection());
+
+		if (done) {
+			break;
+		}
+		else if (cxt.checkSuspended()) {
+			return;
 		}
 	}
 }

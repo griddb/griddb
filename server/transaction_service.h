@@ -456,11 +456,14 @@ public:
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		virtual void addExtraMessage(Event *event) {
+			UNUSED_VARIABLE(event);
 		}
 		virtual void addExtraMessage(ReplicationContext* replicationContext) {
+			UNUSED_VARIABLE(replicationContext);
 		}
 
 		CommonMessageHeader header_;
@@ -490,6 +493,7 @@ public:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		Serializable* dsMes_;
 	};
@@ -514,6 +518,7 @@ public:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		bool existFlag_;
 	};
@@ -545,6 +550,7 @@ public:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		ResultSet* rs_;
@@ -570,6 +576,7 @@ public:
 		void encode(S& out);
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		void addExtraMessage(Event* event);
 		void addExtraMessage(ReplicationContext* replicationContext);
@@ -615,6 +622,7 @@ public:
 		void encode(S& out);
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		const FixedRequest& request_;
@@ -647,6 +655,7 @@ public:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -671,6 +680,7 @@ public:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -697,6 +707,7 @@ public:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -745,7 +756,7 @@ public:
 
 	const char* AuditEventType(const Event &ev);
 
-	const int32_t AuditCategoryType(const Event &ev);
+	int32_t AuditCategoryType(const Event &ev);
 
 	typedef uint32_t
 		ClusterRole;  
@@ -1045,6 +1056,7 @@ public:
 			const BaseContainer &container, int32_t acceptableFeatureVersion);
 	static void checkSchemaFeatureVersion(
 			int32_t schemaFetureLevel, int32_t acceptableFeatureVersion);
+	static void checkMetaTableFeatureVersion(uint8_t unit, int32_t acceptableFeatureVersion);
 
 	void checkFetchOption(FetchOption fetchOption);
 	void checkSizeLimit(ResultSize limit);
@@ -1169,12 +1181,6 @@ public:
 	static void decodeStoreMemoryAgingSwapRate(
 		S &in,
 		double &storeMemoryAgingSwapRate);
-	template<typename S>
-	static void decodeUserInfo(
-		S &in, UserInfo &userInfo);
-	template<typename S>
-	static void decodeDatabaseInfo(S &in,
-		DatabaseInfo &dbInfo, util::StackAllocator &alloc);
 
 	static EventByteOutStream encodeCommonPart(
 		Event &ev, StatementId stmtId, StatementExecStatus status);
@@ -1353,7 +1359,7 @@ public:
 		const TransactionManager::ContextSource& cxtSrc, StatementId stmtId,
 		StoreType storeType, DataStoreLogV4* dsMes);
 
-	bool checkConstraint(Event& ev, ConnectionOption& connOption);
+	bool checkConstraint(Event& ev, ConnectionOption& connOption, bool isUpdated = false);
 
 protected:
 	const KeyConstraint& getKeyConstraint(
@@ -1560,6 +1566,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -1592,6 +1599,7 @@ private:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		OldStatementId stmtId_;
@@ -1650,6 +1658,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -1672,6 +1681,10 @@ private:
 
 		}
 		void decode(EventByteInStream& in) {
+			UNUSED_VARIABLE(in);
+		}
+		void encode(OutStream& out) {
+			SimpleOutputMessage::encode(out);
 		}
 
 		util::XArray<uint8_t> *binary_;
@@ -1700,6 +1713,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -1728,6 +1742,10 @@ private:
 			}
 		}
 		void decode(EventByteInStream& in) {
+			UNUSED_VARIABLE(in);
+		}
+		void encode(OutStream& out) {
+			SimpleOutputMessage::encode(out);
 		}
 
 		uint64_t containerNum_;
@@ -1796,6 +1814,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -1855,7 +1874,7 @@ private:
 			TransactionContext &txn, EventMonotonicTime emNow,
 			BaseContainer &largeContainer,  ContainerAttribute attribute,
 			const char *dbName, const char8_t *containerName
-			, int64_t currentTime
+			, int64_t currentTime, int32_t acceptableFeatureVersion
 			);
 	void encodeNulls(
 			EventByteOutStream &out,
@@ -1894,6 +1913,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -1951,6 +1971,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in);
@@ -1999,6 +2020,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2077,6 +2099,7 @@ private:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		NodeAffinityNumber currentAffinity_;
@@ -2106,6 +2129,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2163,6 +2187,7 @@ private:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		uint8_t exist_;
 	};
@@ -2190,6 +2215,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2227,6 +2253,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2274,6 +2301,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2310,6 +2338,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2399,6 +2428,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2434,6 +2464,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2482,6 +2513,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2517,6 +2549,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2561,6 +2594,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2588,6 +2622,7 @@ private:
 		void encode(S& out);
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		void addExtraMessage(Event* event);
 		void addExtraMessage(ReplicationContext* replicationContext);
@@ -2618,6 +2653,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2650,6 +2686,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2683,6 +2720,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2714,6 +2752,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2746,6 +2785,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2779,6 +2819,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2811,6 +2852,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2843,6 +2885,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2875,6 +2918,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2909,6 +2953,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -2941,6 +2986,7 @@ private:
 		void encode(S& out);
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		void addExtraMessage(Event* event);
 		void addExtraMessage(ReplicationContext* replicationContext);
@@ -2971,6 +3017,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3018,6 +3065,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3051,6 +3099,7 @@ private:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		CommonMessageHeader header_;
@@ -3094,6 +3143,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3462,6 +3512,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3498,10 +3549,15 @@ class ReplicationAckHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
 protected:
-	virtual void decode(EventByteInStream &in, ReplicationAck &ack, Request &requestOption, 
-		ConnectionOption &connOption) {
+	virtual void decode(
+			EventByteInStream &in, ReplicationAck &ack, Request &requestOption,
+			ConnectionOption &connOption) {
+		UNUSED_VARIABLE(requestOption);
+		UNUSED_VARIABLE(connOption);
+
 		decodeReplicationAck(in, ack);
 	}
+
 private:
 	struct InMessage : public SimpleInputMessage {
 		InMessage(util::StackAllocator& alloc, const FixedRequest::Source& src, ConnectionOption& connOption)
@@ -3517,6 +3573,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3819,6 +3876,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3862,6 +3920,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3904,6 +3963,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -3952,6 +4012,7 @@ private:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		util::XArray<UserInfo*> *userInfoList_;
 		Request& request_;
@@ -3987,6 +4048,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4028,6 +4090,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4065,6 +4128,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4115,6 +4179,7 @@ private:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		util::XArray<DatabaseInfo*> *databaseInfoList_;
 	};
@@ -4152,6 +4217,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4185,6 +4251,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4334,6 +4401,7 @@ protected:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4377,6 +4445,7 @@ protected:
 		}
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		ConnectionOption* connectionOption_;
 	};
@@ -4405,6 +4474,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4479,6 +4549,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4589,6 +4660,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4619,7 +4691,7 @@ public:
 
 	int64_t getContainerNameList(
 		EventContext& ec, PartitionGroupId pgId,
-		PartitionId pId, int32_t start, ResultSize limit, util::XArray<FullContainerKey>& containerNameList);
+		PartitionId pId, int64_t start, ResultSize limit, util::XArray<FullContainerKey>& containerNameList);
 
 	void sendCheckDropContainerList(EventContext& ec,
 		PartitionId pId, util::XArray<FullContainerKey>& containerNameList);
@@ -4643,7 +4715,9 @@ public:
 		}
 		
 		bool checkInterruption() {
-			return (watch_.elapsedMillis() >= interruptionInterval_);
+			return (
+					static_cast<int64_t>(watch_.elapsedMillis()) >=
+					interruptionInterval_);
 		}
 
 		void prepare(int32_t checkInterval, int32_t limitCount, int32_t interruptionInterval) {
@@ -4749,6 +4823,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4784,6 +4859,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4824,6 +4900,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4857,6 +4934,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4909,6 +4987,7 @@ private:
 
 		template<typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 
 		TableSchemaInfo* info_;
@@ -4939,6 +5018,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -4978,6 +5058,7 @@ private:
 		}
 		template<typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template<typename S>
 		void decode(S& in) {
@@ -5075,6 +5156,8 @@ public:
 	TransactionManager *getManager() {
 		return transactionManager_;
 	}
+
+	bool isUpdateEvent(Event &ev);
 
 	ResultSetHolderManager& getResultSetHolderManager();
 
@@ -5223,6 +5306,7 @@ private:
 	DropPartitionHandler dropPartitionHandler_;
 	ChangePartitionStateHandler changePartitionStateHandler_;
 	ChangePartitionTableHandler changePartitionTableHandler_;
+	RedoLogHandler redoLogHandler_;
 
 	SQLGetContainerHandler sqlGetContainerHandler_;
 
@@ -5249,7 +5333,6 @@ public:
 	}
 
 	ResultSetHolderManager resultSetHolderManager_;
-
 };
 
 class TxnLogManager {

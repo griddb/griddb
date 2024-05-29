@@ -66,14 +66,15 @@ class ChunkCompressorBase {
 public:
 	virtual size_t compress(const void* in, void*& out) = 0;
 	virtual bool uncompress(void* area, size_t compressedSize) = 0;
+	virtual int32_t getCompressorId() = 0;
 };
 
 
 /*!
-	@brief Zipによるチャンク圧縮
+	@brief Zlibによるチャンク圧縮
 	@note Chunk層を対象
 */
-class ChunkCompressorZip final : public ChunkCompressorBase {
+class ChunkCompressorZlib final : public ChunkCompressorBase {
 private:
 	static const int32_t COMPRESS_LEVEL = Z_BEST_SPEED;
 
@@ -87,14 +88,45 @@ private:
 	bool isFirstTime_;
 
 public:
-	ChunkCompressorZip(size_t chunkSize, size_t skipSize, size_t compressedSizeLimit);
-	~ChunkCompressorZip();
+	ChunkCompressorZlib(size_t chunkSize, size_t skipSize, size_t compressedSizeLimit);
+	~ChunkCompressorZlib();
 
 	size_t compress(const void* in, void*& out);
 
 	bool uncompress(void* area, size_t compressedSize);
+
+	int32_t getCompressorId();
 };
 
+/*!
+	@brief Zstandardによるチャンク圧縮
+	@note Chunk層を対象
+*/
+class ChunkCompressorZstd final : public ChunkCompressorBase {
+private:
+
+	uint8_t* compressBuffer_;
+	uint8_t* uncompressBuffer_;
+	size_t chunkSize_;
+	size_t skipSize_;
+	size_t compressedSizeLimit_;
+	size_t bufferSize_;
+	int32_t compressLevel_;
+	uint64_t compressionErrorCount_;
+	size_t compressBound_;
+	bool isFirstTime_;
+
+public:
+	ChunkCompressorZstd(
+		size_t chunkSize, size_t skipSize, size_t compressedSizeLimit, int32_t compressLevel);
+	~ChunkCompressorZstd();
+
+	size_t compress(const void* in, void*& out);
+
+	bool uncompress(void* area, size_t compressedSize);
+
+	int32_t getCompressorId();
+};
 
 /*!
 	@brief 仮想ファイル基底クラス
@@ -205,6 +237,7 @@ class SimpleFile {
 	std::string getFileName();
 
 	SimpleFile& open();
+	bool readOnlyOpen();
 
 	void seek(int64_t offset);
 
@@ -252,6 +285,7 @@ class BufferedReader {
 	std::string getFileName();
 
 	void open();
+	bool readOnlyOpen();
 
 	void seek(int64_t offset);
 

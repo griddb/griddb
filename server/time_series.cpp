@@ -27,6 +27,7 @@
 #include "message_schema.h"
 #include "value_processor.h"
 
+
 const bool TimeSeries::INDEX_MAP_TABLE[][MAP_TYPE_NUM] = {
 	{true, false, false},   
 	{true, false, false},   
@@ -612,8 +613,11 @@ void TimeSeries::putRow(TransactionContext &txn, uint32_t rowSize,
 /*!
 	@brief Deletes a Row corresponding to the specified Row key
 */
-void TimeSeries::deleteRow(TransactionContext &txn, uint32_t rowKeySize,
-	const uint8_t* rowKey, RowId& rowId, bool& existing) {
+void TimeSeries::deleteRow(
+		TransactionContext &txn, uint32_t rowKeySize,
+		const uint8_t* rowKey, RowId& rowId, bool& existing) {
+	UNUSED_VARIABLE(rowKeySize);
+
 	Timestamp rowKeyTimestamp =
 		*(reinterpret_cast<const Timestamp *>(rowKey));
 	bool isForceLock = false;
@@ -1358,7 +1362,7 @@ void TimeSeries::searchRowIdIndexAsRowArray(
 		TransactionContext& txn, BtreeMap::SearchContext &sc,
 		util::XArray<OId> &oIdList, util::XArray<OId> &mvccOIdList) {
 
-	const OutputOrder order = ORDER_UNDEFINED;
+	const OutputOrder order = sc.getOutputOrder();
 
 	RowId startRowId;
 	RowId endRowId;
@@ -1597,21 +1601,20 @@ void TimeSeries::searchColumnIdIndex(
 		TransactionContext &txn, BtreeMap::SearchContext &sc,
 		util::XArray<OId> &resultList, OutputOrder order,
 		bool neverOrdering) {
+	UNUSED_VARIABLE(neverOrdering);
+
 	assert(!(order != ORDER_UNDEFINED && neverOrdering));
 
 	util::XArray<OId> mergeList(txn.getDefaultAllocator());
 	if (order != ORDER_UNDEFINED) {
-		reinterpret_cast<BaseContainer *>(this)
-			->searchColumnIdIndex(txn, sc, resultList, order);
+		BaseContainer::searchColumnIdIndex(txn, sc, resultList, order);
 	}
 	else {
 		ColumnId sortColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
 		ColumnInfo &sortColumnInfo = getColumnInfo(sortColumnId);
 		ResultSize limitBackup = sc.getLimit();
 		sc.setLimit(MAX_RESULT_SIZE);
-		reinterpret_cast<BaseContainer *>(this)
-			->searchColumnIdIndex(
-				txn, sc, resultList, order);
+		BaseContainer::searchColumnIdIndex(txn, sc, resultList, order);
 		sc.setLimit(limitBackup);
 		util::XArray<OId> dummyList(txn.getDefaultAllocator());
 		mergeRowList<TimeSeries>(txn, sortColumnInfo, resultList, false,
@@ -1627,22 +1630,9 @@ void TimeSeries::searchColumnIdIndex(
 void TimeSeries::searchColumnIdIndex(
 		TransactionContext &txn, BtreeMap::SearchContext &sc,
 		util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList) {
-	{
-		ResultSize limitBackup = sc.getLimit();
-		sc.setLimit(MAX_RESULT_SIZE);
-		reinterpret_cast<BaseContainer *>(this)
-			->searchColumnIdIndex(
-				txn, sc, normalRowList, mvccRowList);
-		sc.setLimit(limitBackup);
-	}
-	if (normalRowList.size() + mvccRowList.size() > sc.getLimit()) {
-		if (mvccRowList.size() > sc.getLimit()) {
-			mvccRowList.resize(sc.getLimit());
-			normalRowList.clear();
-		} else {
-			normalRowList.resize(sc.getLimit() - mvccRowList.size());
-		}
-	}
+
+
+	BaseContainer::searchColumnIdIndex(txn, sc, normalRowList, mvccRowList);
 }
 
 /*!
@@ -1700,10 +1690,13 @@ const BaseContainer::IndexMapTable& TimeSeries::getIndexMapTable() {
 }
 
 
-void TimeSeries::putRowInternal(TransactionContext& txn,
-	InputMessageRowStore* inputMessageRowStore, RowId& rowId,
-	bool rowIdSpecified,
-	PutStatus& status, PutRowOption putRowOption) {
+void TimeSeries::putRowInternal(
+		TransactionContext& txn,
+		InputMessageRowStore* inputMessageRowStore, RowId& rowId,
+		bool rowIdSpecified,
+		PutStatus& status, PutRowOption putRowOption) {
+	UNUSED_VARIABLE(rowIdSpecified);
+
 	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 	PutMode mode = UNDEFINED_STATUS;
 	Timestamp rowKey = inputMessageRowStore->getField<COLUMN_TYPE_TIMESTAMP>(
@@ -1856,8 +1849,8 @@ void TimeSeries::appendRowInternal(TransactionContext& txn,
 		rowArray.reset();
 		if (rowIdMap.get()->isEmpty()) {
 			bool isRowArraySizeControlMode = false;
-			uint32_t smallRowArrayNum =
-				calcRowArrayNum(txn, isRowArraySizeControlMode, getSmallRowArrayNum());
+			uint16_t smallRowArrayNum = static_cast<uint16_t>(
+				calcRowArrayNum(txn, isRowArraySizeControlMode, getSmallRowArrayNum()));
 			rowArray.initialize(txn, rowId, smallRowArrayNum);
 		}
 		else {
@@ -2035,7 +2028,8 @@ void TimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 	}
 
 	uint16_t halfRowNum = rowArray.getMaxRowNum() / 2;
-	uint16_t activeNum = rowArray.getActiveRowNum(halfRowNum + 1);
+	uint16_t activeNum = rowArray.getActiveRowNum(
+			static_cast<uint16_t>(halfRowNum + 1));
 
 	DeleteStatus deleteStatus = DELETE_SIMPLE;
 	RowArray nextRowArray(txn, this);
@@ -2055,7 +2049,8 @@ void TimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 					RowScope rowScope(*this, TO_NORMAL);
 					convertRowArraySchema(txn, nextRowArray, false);
 				}
-				uint32_t nextActiveNum = nextRowArray.getActiveRowNum(rowArray.getMaxRowNum() - activeNum);
+				uint32_t nextActiveNum = nextRowArray.getActiveRowNum(
+						static_cast<uint16_t>(rowArray.getMaxRowNum() - activeNum));
 				if (activeNum + nextActiveNum + 1 <= rowArray.getMaxRowNum()) {
 					deleteStatus = DELETE_MERGE;
 				}
@@ -2492,7 +2487,9 @@ void TimeSeries::setDummyMvccImage(TransactionContext &txn) {
 }
 
 void TimeSeries::getContainerOptionInfo(
-	TransactionContext &txn, util::XArray<uint8_t> &containerSchema) {
+		TransactionContext &txn, util::XArray<uint8_t> &containerSchema) {
+	UNUSED_VARIABLE(txn);
+
 	bool isExistTimeSeriesOption = true;
 	containerSchema.push_back(
 		reinterpret_cast<uint8_t *>(&isExistTimeSeriesOption), sizeof(bool));
@@ -2661,6 +2658,14 @@ bool TimeSeries::scanRowArrayChecked(
 	}
 
 	if (!isExclusive()) {
+		if (!sc.isSuspended() && rowArray == NULL) {
+			if (order != ORDER_DESCENDING) {
+				lastCheckRowId = endRowId;
+			}
+			else {
+				lastCheckRowId = startRowId;
+			}
+		}
 		BtreeMap::SearchContext mvccSC (txn.getDefaultAllocator(), UNDEF_COLUMNID);
 		std::pair<RowId, RowId> mvccRowIdRange;
 		searchMvccMapPrepare(
@@ -2991,8 +2996,6 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 		}
 	}
 }
-
-
 
 /*!
 	@brief Performs an aggregation operation on a Row set or its specific

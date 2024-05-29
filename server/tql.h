@@ -564,6 +564,7 @@ TQLPARSER_SAFE_DELETE((yypminor->yy146));
     ** The following routine is called if the stack overflows.
     */
     void yyStackOverflow(tqlParser_YYMINORTYPE *yypMinor){
+      UNUSED_VARIABLE(yypMinor);
       yyidx--;
 #ifndef NDEBUG
       if( yyTraceFILE ){
@@ -1135,6 +1136,7 @@ TQLPARSER_SAFE_DELETE((yypminor->yy146));
 			 int yymajor,                   /* The major type of the error token */
 			 tqlParser_YYMINORTYPE yyminor            /* The minor type of the error token */
 			 ){
+      UNUSED_VARIABLE(yymajor);
 #define TOKEN (yyminor.yy0)
 
   if(TOKEN.z[0]){

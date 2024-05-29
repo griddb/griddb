@@ -104,8 +104,9 @@ public:
 	}
 
 	static uint32_t getHeaderSize(int32_t num) {
-		return sizeof(int64_t) * 2 + sizeof(int32_t) +
-			   num * (sizeof(CONTAINER_META_TYPE) + sizeof(uint32_t));
+		return static_cast<uint32_t>(
+				sizeof(int64_t) * 2 + sizeof(int32_t) +
+				num * (sizeof(CONTAINER_META_TYPE) + sizeof(uint32_t)));
 	}
 
 private:
@@ -266,6 +267,7 @@ struct IndexInfo {
 			in >> size;
 
 			const size_t startPos = in.base().position();
+			UNUSED_VARIABLE(startPos);
 
 			in >> indexName_;
 
@@ -438,10 +440,10 @@ public:
 		return columnId & BIT_POS_FILTER;
 	}
 	static inline void setBit(uint8_t &byte, uint32_t bitPos) {
-		byte |= (0x1 << bitPos);
+		byte = static_cast<uint8_t>(byte | (0x1 << bitPos));
 	}
 	static inline void resetBit(uint8_t &byte, uint32_t bitPos) {
-		byte &= ~(0x1 << bitPos);
+		byte = static_cast<uint8_t>(byte & (~(0x1 << bitPos)));
 	}
 	/*!
 		@brief Check if value is null
@@ -474,7 +476,8 @@ public:
 		}
 	}
 	static uint16_t calcBitsSize(uint32_t columnNum) {
-		uint16_t nullBitsSize = columnNum >> BITE_POS_FILTER;
+		uint16_t nullBitsSize =
+				static_cast<uint16_t>(columnNum >> BITE_POS_FILTER);
 		if ((columnNum & BIT_POS_FILTER) != 0) {
 			nullBitsSize++;
 		}
@@ -544,8 +547,9 @@ public:
 		@brief Calculate the size needed
 	*/
 	static uint32_t getAllocateSize(uint32_t columnNum, uint32_t rowKeyNum) {
-		return COLUMN_INFO_OFFSET + (sizeof(ColumnInfo) * columnNum) + 
-			sizeof(uint16_t) + sizeof(uint16_t) * rowKeyNum;
+		return static_cast<uint32_t>(
+				COLUMN_INFO_OFFSET + (sizeof(ColumnInfo) * columnNum) +
+				sizeof(uint16_t) + sizeof(uint16_t) * rowKeyNum);
 	}
 	void getKeyColumnIdList(util::Vector<ColumnId> &keyColumnIdList) {
 		uint16_t *keyNumAddr = reinterpret_cast<uint16_t *>(getRowKeyPtr());
@@ -737,14 +741,21 @@ public:
 	static const uint32_t INITIALIZE_RESERVE_NUM = 1;
 
 public:
-	IndexSchema(TransactionContext &txn, ObjectManagerV4 &objectManager,
-		AllocateStrategy &strategy)
-		: BaseObject(objectManager, strategy),
-		  allocateStrategy_(strategy) {}
-	IndexSchema(TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
-		AllocateStrategy &strategy)
-		: BaseObject(objectManager, strategy, oId),
-		  allocateStrategy_(strategy) {}
+	IndexSchema(
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			AllocateStrategy &strategy) :
+			BaseObject(objectManager, strategy),
+			allocateStrategy_(strategy) {
+		UNUSED_VARIABLE(txn);
+	}
+
+	IndexSchema(
+			TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
+			AllocateStrategy &strategy) :
+			BaseObject(objectManager, strategy, oId),
+			allocateStrategy_(strategy) {
+		UNUSED_VARIABLE(txn);
+	}
 
 	void initialize(TransactionContext &txn, uint16_t reserveNum, 
 		uint16_t indexNum, uint32_t columnNum, bool onMemory);
@@ -810,7 +821,8 @@ public:
 		uint8_t *lowerAddr = getBaseAddr() + NULL_BIT_SIZE_LOWER_OFFSET;
 		uint16_t upper = static_cast<uint16_t>(*upperAddr);
 		uint16_t lower = static_cast<uint16_t>(*lowerAddr);
-		uint16_t nullBitsSize = ((upper << NULL_BIT_UPPER_SHIFT) | lower);
+		uint16_t nullBitsSize =
+				static_cast<uint16_t>((upper << NULL_BIT_UPPER_SHIFT) | lower);
 		return nullBitsSize;
 	}
 	void updateNullsStats(const uint8_t *nullbits) {
@@ -959,8 +971,9 @@ private:
 
 	}
 
-	void getIndexInfo(TransactionContext &txn, uint16_t nth, 
-		IndexInfo &indexInfo) {
+	void getIndexInfo(
+			TransactionContext &txn, uint16_t nth, IndexInfo &indexInfo) {
+		UNUSED_VARIABLE(txn);
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 		indexInfo.mapType = getMapType(indexDataPos);
 		BaseObject option(*getObjectManager(),
@@ -1001,24 +1014,26 @@ private:
 		return static_cast<DDLStatus>(type);
 	}
 
-	MapOIds getMapOIds(
-		TransactionContext &txn, uint8_t *cursor) const {
+	MapOIds getMapOIds(TransactionContext &txn, uint8_t *cursor) const {
+		UNUSED_VARIABLE(txn);
 		return *reinterpret_cast<MapOIds *>(cursor);
 	}
 
 
-	void setMapOIds(TransactionContext &txn, uint8_t *cursor,
-		const MapOIds oIds) {
+	void setMapOIds(
+			TransactionContext &txn, uint8_t *cursor, const MapOIds oIds) {
+		UNUSED_VARIABLE(txn);
 		*reinterpret_cast<MapOIds *>(cursor) = oIds;
 	}
 
-	void updateMapOIds(TransactionContext &txn, uint8_t *cursor,
-		const MapOIds &oIds) {
+	void updateMapOIds(
+			TransactionContext &txn, uint8_t *cursor, const MapOIds &oIds) {
+		UNUSED_VARIABLE(txn);
 		*reinterpret_cast<MapOIds *>(cursor) = oIds;
 	}
 
-	void removeMapOIds(
-		TransactionContext &txn, uint8_t *cursor) {
+	void removeMapOIds(TransactionContext &txn, uint8_t *cursor) {
+		UNUSED_VARIABLE(txn);
 		*reinterpret_cast<MapOIds *>(cursor) = UNDEF_MAP_OIDS;
 	}
 	bool compareColumnIds(TransactionContext &txn, uint8_t *cursor, 
@@ -1042,7 +1057,8 @@ private:
 			static_cast<uint16_t>(columnId);
 	}
 	void setMapType(uint8_t *cursor, MapType mapType, bool isComposite) {
-		uint8_t value = isComposite ? (COMPOSITE_FLAG_MASK | mapType) : mapType;
+		const uint8_t value = static_cast<uint8_t>(
+				isComposite ? (COMPOSITE_FLAG_MASK | mapType) : mapType);
 		*(cursor + MAPTYPE_OFFSET) = value;
 	}
 	void setStatus(uint8_t *cursor, DDLStatus status) const {

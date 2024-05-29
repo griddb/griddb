@@ -42,36 +42,11 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
-
 const std::string RecoveryManager::BACKUP_INFO_FILE_NAME("gs_backup_info.json");
 const std::string RecoveryManager::BACKUP_INFO_DIGEST_FILE_NAME(
 	"gs_backup_info_digest.json");
 
 util::Atomic<uint32_t> RecoveryManager::progressPercent_(0);
-
-namespace {
-/*!
-	@brief Formats Checkpoint IDs
-*/
-struct CheckpointIdFormatter {
-	CheckpointIdFormatter(CheckpointId checkpointId)
-		: checkpointId_(checkpointId) {}
-
-	CheckpointId checkpointId_;
-};
-
-std::ostream &operator<<(
-	std::ostream &s, const CheckpointIdFormatter &formatter) {
-	if (formatter.checkpointId_ == UNDEF_CHECKPOINT_ID) {
-		s << "(undefined)";
-	}
-	else {
-		s << formatter.checkpointId_;
-	}
-
-	return s;
-}
-}
 
 /*!
 	@brief Constructor of RecoveryManager
@@ -316,8 +291,6 @@ void RecoveryManager::scanExistingFiles(
 		ConfigTable &param,
 		bool &existBackupInfoFile1, bool &existBackupInfoFile2) {
 
-	const uint32_t partitionNum = param.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM);
-
 	const char8_t *const dbPath =
 		param.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH);
 
@@ -365,7 +338,6 @@ void RecoveryManager::checkRestoreFile() {
 	const uint32_t partitionNum = pgConfig_.getPartitionCount();
 	const std::string& dataPath = backupInfo_.getDataStorePath();
 	for (uint32_t pId = 0; pId < partitionNum; ++pId) {
-		Partition& partition = partitionList_->partition(pId);
 		const int64_t cpLogVer = backupInfo_.getBackupCheckpointId(pId);
 		util::NormalOStringStream oss1;
 		oss1 << dataPath.c_str() << "/" << pId << "/" << pId << "_" << cpLogVer << LogManagerConst::CPLOG_FILE_SUFFIX;
@@ -403,10 +375,14 @@ void RecoveryManager::checkRestoreFile() {
 	}
 }
 
-void RecoveryManager::recovery(util::StackAllocator &alloc, bool existBackup,
-	bool forceRecoveryFromExistingFiles,
-	const std::string &recoveryTargetPartition, bool forLongArchive)
-{
+void RecoveryManager::recovery(
+		util::StackAllocator &alloc, bool existBackup,
+		bool forceRecoveryFromExistingFiles,
+		const std::string &recoveryTargetPartition, bool forLongArchive) {
+	UNUSED_VARIABLE(forceRecoveryFromExistingFiles);
+	UNUSED_VARIABLE(recoveryTargetPartition);
+	UNUSED_VARIABLE(forLongArchive);
+
 	try {
 		util::StackAllocator::Scope scope(alloc);
 		const uint64_t currentTime = util::Stopwatch::currentClock();
@@ -662,6 +638,8 @@ void RecoveryManager::BackupInfo::writeBackupInfoFile() {
 	@brief バックアップ情報ファイル削除
 */
 void RecoveryManager::BackupInfo::removeBackupInfoFile(PartitionList &ptList) {
+	UNUSED_VARIABLE(ptList);
+
 	std::string backupInfoFileName;
 	std::string backupInfoDigestFileName;
 	util::FileSystem::createPath(

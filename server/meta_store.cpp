@@ -1246,6 +1246,8 @@ MetaContainerInfo MetaType::Containers::toNodeDistribution(
 void MetaType::Containers::setUpCoreColumnInfo(
 		size_t index, ColumnId id, uint8_t type, bool nullable,
 		const char8_t *name, MetaColumnInfo &info) {
+	UNUSED_VARIABLE(index);
+
 	assert(info.id_ == UNDEF_COLUMNID);
 	assert(index == id);
 	assert(name != NULL);
@@ -2129,7 +2131,6 @@ void MetaProcessor::ContainerHandler::execute(
 			makeString(alloc, dataAffinity.c_str())));
 
 	const BaseContainer::ExpirationInfo *expirationInfo = NULL;
-	int32_t expirationDivision = -1;
 
 	if (partitioningInfo != NULL && partitioningInfo->isTableExpiration()) {
 		BaseContainer::ExpirationInfo *partitionExpiration =
@@ -2353,8 +2354,6 @@ void MetaProcessor::ColumnHandler::execute(
 	const BaseContainer &schemaContainer =
 			(subContainer == NULL ? container : *subContainer);
 
-	const ContainerType type = schemaContainer.getContainerType();
-
 	const char8_t *dbName;
 	const char8_t *name;
 	getNames(txn, container, dbName, name);
@@ -2572,15 +2571,13 @@ void MetaProcessor::MetaTriggerHandler::execute(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
 		ContainerAttribute attribute, BaseContainer &container,
 		BaseContainer *subContainer) const {
-	static_cast<void>(id);
-	static_cast<void>(attribute);
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(subContainer);
 
 	ValueListBuilder<MetaType::TriggerMeta> builder(
 			getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
-
-	BaseContainer &schemaContainer =
-			(subContainer == NULL ? container : *subContainer);
 
 	typedef util::XArray<const uint8_t*> TriggerArray;
 	TriggerArray triggerList(alloc);
@@ -2786,8 +2783,11 @@ MetaProcessor::EventHandler::EventHandler(Context &cxt) :
 }
 
 void MetaProcessor::EventHandler::operator()(
-	TransactionContext& txn, ContainerId id, DatabaseId dbId,
-	ContainerAttribute attribute, BaseContainer* targetContainer) const {
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(targetContainer);
 
 	ValueListBuilder<MetaType::EventMeta> builder(getContext().getValueListSource());
 	util::StackAllocator& alloc = txn.getDefaultAllocator();
@@ -2864,7 +2864,7 @@ void MetaProcessor::EventHandler::operator()(
 
 				builder.set(
 					MetaType::EVENT_WORKER_INDEX,
-					ValueUtils::makeInteger(pos));
+					ValueUtils::makeInteger(static_cast<int32_t>(pos)));
 
 				builder.set(
 					MetaType::EVENT_CLUSTER_PARTITION_INDEX,
@@ -3073,8 +3073,6 @@ void MetaProcessor::ContainerStatsHandler::execute(
 	const BaseContainer &schemaContainer =
 			(subContainer == NULL ? container : *subContainer);
 
-	const ContainerType type = schemaContainer.getContainerType();
-
 	const char8_t *dbName;
 	const char8_t *name;
 	getNames(txn, container, dbName, name);
@@ -3119,6 +3117,10 @@ const char *MetaProcessor::ClusterPartitionHandler::chunkCategoryList[] = {
 void MetaProcessor::ClusterPartitionHandler::operator()(
 		TransactionContext &txn, ContainerId id, DatabaseId dbId,
 		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(dbId);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(targetContainer);
 
 	ValueListBuilder<MetaType::ClusterPartitionMeta> builder(
 			getContext().getValueListSource());
@@ -3141,8 +3143,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 			else if (pt->isBackup(pId)) {
 				role = "BACKUP";
 			}
-			else if (pt->isCatchup(
-						 pId, 0, PartitionTable::PT_CURRENT_OB)) {
+			else if (pt->isCatchup(pId)) {
 				role = "CATCHUP";
 			}
 			else {
@@ -3190,7 +3191,8 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 				++chunkCategoryId) {
 
 			ChunkGroupStats::Table stats(NULL);
-			dsStats.getChunkStats(chunkCategoryId, stats);
+			dsStats.getChunkStats(
+					static_cast<ChunkCategoryId>(chunkCategoryId), stats);
 
 			builder.set(
 					MetaType::CLUSTER_PARTITION_BLOCK_CATEGORY,
@@ -3518,6 +3520,9 @@ MetaProcessor::SQLHandler::SQLHandler(Context &cxt) :
 void MetaProcessor::SQLHandler::operator()(
 		TransactionContext& txn, ContainerId id, DatabaseId dbId,
 		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(targetContainer);
 
 	ValueListBuilder<MetaType::SQLMeta> builder(getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
@@ -3968,7 +3973,7 @@ void MetaContainer::getColumnInfoList(
 
 	uint32_t columnCount = getColumnNum();
 	uint16_t variableColumnIndex = 0;
-	uint32_t nullsAndVarOffset =
+	size_t nullsAndVarOffset =
 			ValueProcessor::calcNullsByteSize(columnCount);
 	uint32_t rowFixedSize = 0;
 	for (uint32_t i = 0; i < columnCount; i++) {
@@ -3990,7 +3995,8 @@ void MetaContainer::getColumnInfoList(
 		for (uint32_t i = 0; i < columnCount; i++) {
 			ColumnInfo &info = columnInfoList[i];
 			if (!info.isVariable()) {
-				info.setOffset(nullsAndVarOffset + rowFixedSize);
+				info.setOffset(static_cast<uint16_t>(
+						nullsAndVarOffset + rowFixedSize));
 				rowFixedSize += info.getColumnSize();
 			}
 		}
@@ -4096,8 +4102,11 @@ MetaProcessor::DatabaseStatsHandler::DatabaseStatsHandler(Context& cxt) :
 }
 
 void MetaProcessor::DatabaseStatsHandler::operator()(
-	TransactionContext& txn, ContainerId id, DatabaseId dbId,
-	ContainerAttribute attribute, BaseContainer*  targetContainer) const {
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer*  targetContainer) const {
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(targetContainer);
 
 	ValueListBuilder<MetaType::DatabaseStatsMeta> builder(getContext().getValueListSource());
 	util::StackAllocator& alloc = txn.getDefaultAllocator();
@@ -4135,7 +4144,6 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 		for (StatsList::const_iterator it = statsList.begin();
 			it != statsList.end(); ++it) {
 			const NodeDescriptor& nd = it->first.nd_;
-			const Stats& stats = it->second;
 			if (!nd.isEmpty() && nd.getType() == NodeDescriptor::ND_TYPE_CLIENT) {
 				const StatementHandler::ConnectionOption& connOption = nd.getUserData<StatementHandler::ConnectionOption>();
 				DatabaseId currentDbId = connOption.dbId_;
@@ -4158,7 +4166,6 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 	EventMonitor& monitor = getContext().getSource().transactionManager_->getEventMonitor();
 	for (size_t pos = 0; pos < monitor.eventInfoList_.size(); pos++) {
 		EventMonitor::EventInfo& eventInfo = monitor.eventInfoList_[pos];
-		EventType eventType = eventInfo.eventType_;
 		DatabaseId currentDbId = eventInfo.dbId_;
 		bool clientRequest = eventInfo.clientRequest_;
 		if (eventInfo.eventType_ != UNDEF_EVENT_TYPE && currentDbId != UNDEF_DBID && clientRequest) {
@@ -4286,14 +4293,16 @@ MetaProcessor::DatabaseHandler::DatabaseHandler(Context& cxt) :
 }
 
 void MetaProcessor::DatabaseHandler::operator()(
-	TransactionContext& txn, ContainerId id, DatabaseId dbId,
-	ContainerAttribute attribute, BaseContainer* targetContainer) const {
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* targetContainer) const {
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(targetContainer);
 
 	util::StackAllocator& alloc = txn.getDefaultAllocator();
 	PartitionId pId = txn.getPartitionId();
 	PartitionTable* pt = getContext().getSource().partitionTable_;
 	if (pId != 0 || !pt->isOwner(0)) return;
-	BaseContainer& container = getBaseContainer(targetContainer);
 	TransactionManager* transactionManager = getContext().getSource().transactionManager_;
 	ClusterService* clusterService = getContext().getSource().sqlService_->getClusterService();
 	util::TimeZone timeZone;

@@ -207,10 +207,24 @@ public:
 	}
 
 	template <class T>
+	static void dumpValueByFunction(util::NormalOStringStream& oss, T& list) {
+		oss << "(";
+		size_t size = list.size();
+		size_t count = 0;
+		for (auto& entry : list) {
+			oss << entry.dump();
+			if (count != size - 1) oss << ",";
+			count++;
+		}
+		oss << ")";
+	}
+
+	template <class T>
 	static double average(T& list) {
 		size_t size = list.size();
 		if (size == 0) return -1;
-		return std::accumulate(std::begin(list), std::end(list), 0.0) / size;
+		return std::accumulate(std::begin(list), std::end(list), 0.0) /
+				static_cast<double>(size);
 	}
 
 	template <class T>
@@ -221,7 +235,7 @@ public:
 		return std::accumulate(std::begin(list), std::end(list), 0.0, [ave](double sum, const int32_t& e) {
 			const double temp = e - ave;
 			return sum + temp * temp;
-		}) / size;
+		}) / static_cast<double>(size);
 	}
 
 	template <class T>
@@ -229,6 +243,15 @@ public:
 		size_t size = list.size();
 		if (size == 0) return -1;
 		return std::sqrt(variance(list));
+	}
+
+	static void replaceAll(
+		std::string& str, const std::string& from, const std::string& to) {
+		std::string::size_type pos = 0;
+		while (pos = str.find(from, pos), pos != std::string::npos) {
+			str.replace(pos, from.size(), to);
+			pos += to.size();
+		}
 	}
 
 	static const char* getServiceTypeNameByEvent(EventType eventType, bool isTransaction) {
@@ -293,6 +316,22 @@ UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
 
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
+
+typedef std::pair<int32_t, bool> ServiceTypeInfo;
+
+class picojsonUtil {
+public:
+	static picojson::array& setJsonArray(picojson::value& value) {
+		value = picojson::value(picojson::array_type, false);
+		return value.get<picojson::array>();
+	}
+
+	static picojson::object& setJsonObject(picojson::value& value) {
+		value = picojson::value(picojson::object_type, false);
+		return value.get<picojson::object>();
+	}
+};
+
 
 
 #endif

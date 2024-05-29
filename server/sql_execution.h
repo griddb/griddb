@@ -74,14 +74,15 @@ public:
 		clear();
 		columnSize_ = columnNum;
 		rowCount_ = rowCount;
-		for (size_t pos = 0; pos < rowCount; pos++) {
+		for (int64_t pos = 0; pos < rowCount; pos++) {
 			util::Vector<BindParam*> bindParamList(alloc_);
 			bindParamList_.push_back(bindParamList);
 		}
 	}
 
 	void append(BindParam *bindParam) {
-		if (bindParamList_[currentPos_].size() >= columnSize_) {
+		if (static_cast<ptrdiff_t>(bindParamList_[currentPos_].size()) >=
+				columnSize_) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_INTERNAL,
 				"(pos=" << currentPos_ << ", size1=" << bindParamList_[currentPos_].size() <<",size2=" << columnSize_);
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_INTERNAL, "");
@@ -106,7 +107,7 @@ public:
 	}
 
 	bool next() {
-		if (currentPos_ == rowCount_) {
+		if (static_cast<ptrdiff_t>(currentPos_) == rowCount_) {
 			return false;
 		}
 		currentPos_++;
@@ -879,7 +880,7 @@ public:
 
 		void getQuery(util::String& str, size_t size);
 		void setQuery(util::String& query) const;
-		const DatabaseId getDBId() const;
+		DatabaseId getDBId() const;
 		bool isAdministrator() const;
 		const SQLString& getUserName() const;
 		int64_t getStartTime() const;
@@ -888,7 +889,7 @@ public:
 		int64_t getEndTime() const;
 		void setEndTime(int64_t endTime);
 
-		const double getStoreMemoryAgingSwapRate() const;
+		double getStoreMemoryAgingSwapRate() const;
 		const util::TimeZone& getTimezone() const;
 
 		ClientId& getId() const;

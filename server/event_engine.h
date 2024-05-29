@@ -1219,6 +1219,8 @@ private:
 	SocketPool(const SocketPool&);
 	SocketPool& operator=(const SocketPool&);
 
+	static uint64_t getCurrentUsage(util::ObjectPool<EventSocket> &base);
+
 	EventEngine &ee_;
 	const size_t ioConcurrency_;
 	const size_t primaryIOConcurrency_;

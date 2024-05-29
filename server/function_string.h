@@ -472,6 +472,17 @@ public:
 	}
 
 	virtual ~FunctorTrans() {}
+
+private:
+	Expr *operator()(
+			ExprList &args, ContainerRowWrapper *column_values,
+			FunctionMap *function_map, EvalMode mode, TransactionContext &txn,
+			ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
+			ExprList &argsAfterEval) {
+		return TqlFunc::operator()(
+				args, column_values, function_map, mode, txn, objectManager,
+				strategy, argsAfterEval);
+	}
 };
 
 /*!

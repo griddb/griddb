@@ -336,6 +336,8 @@ public:
 class FunctorTimestampdiff : public TqlFunc {
 public:
 	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &strategy) {
+		UNUSED_VARIABLE(strategy);
+
 		if (args.size() != 3) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");

@@ -1469,11 +1469,11 @@ static inline int32_t compareStringStringI(
 	for (uint32_t i = 0; i < cmpLen; i++) {
 		c1 = *(p + i);
 		if ((c1 >= 'a') && (c1 <= 'z')) {
-			c1 -= 32;
+			c1 = static_cast<char8_t>(c1 - 32);
 		}
 		c2 = *(q + i);
 		if ((c2 >= 'a') && (c2 <= 'z')) {
-			c2 -= 32;
+			c2 = static_cast<char8_t>(c2 - 32);
 		}
 		if (c1 < c2) {
 			return -1;
@@ -1559,16 +1559,21 @@ public:
 	static Comparator findComparator(ColumnType type1, ColumnType type2);
 
 	static Operator getOperator(
-			DSExpression::Operation op, ColumnType type1, ColumnType type2);
+			DSExpression::Operation opType, ColumnType type1, ColumnType type2,
+			bool extra);
 	static Operator getOperator(
 			const ValueOperatorTable &table,
 			ColumnType type1, ColumnType type2);
 
 	static Operator findOperator(
-			DSExpression::Operation op, ColumnType type1, ColumnType type2);
+			DSExpression::Operation opType, ColumnType type1, ColumnType type2,
+			bool extra);
 	static Operator findOperator(
 			const ValueOperatorTable &table,
 			ColumnType type1, ColumnType type2);
+
+	static Operator findExtraOperator(
+			DSExpression::Operation opType, ColumnType type1, ColumnType type2);
 
 	static size_t toOperatorIndex(ColumnType type);
 
@@ -1580,6 +1585,11 @@ public:
 	static const ValueOperatorTable gtTable_;
 	static const ValueOperatorTable leTable_;
 	static const ValueOperatorTable geTable_;
+
+	static const ValueOperatorList extraLtList_;
+	static const ValueOperatorList extraGtList_;
+	static const ValueOperatorList extraLeList_;
+	static const ValueOperatorList extraGeList_;
 
 	static const Operator isNull_;
 	static const Operator isNotNull_;
@@ -1714,7 +1724,7 @@ static inline void addIntLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void addIntFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) +
+	value.set(static_cast<double>(*(reinterpret_cast<const int32_t*>(p))) +
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void addIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
@@ -1744,12 +1754,12 @@ static inline void addLongLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void addLongFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) +
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void addLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
 }
 static inline void addFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
@@ -1765,12 +1775,12 @@ static inline void addFloatShort(TransactionContext&, uint8_t const* p,
 static inline void addFloatInt(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) +
-			  (*(reinterpret_cast<const int32_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int32_t*>(q))));
 }
 static inline void addFloatLong(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void addFloatFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -1800,7 +1810,7 @@ static inline void addDoubleInt(TransactionContext&, uint8_t const* p, uint32_t,
 static inline void addDoubleLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void addDoubleFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -1957,7 +1967,7 @@ static inline void subIntLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void subIntFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) -
+	value.set(static_cast<double>(*(reinterpret_cast<const int32_t*>(p))) -
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void subIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
@@ -1987,12 +1997,12 @@ static inline void subLongLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void subLongFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) -
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void subLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
 }
 static inline void subFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
@@ -2008,12 +2018,12 @@ static inline void subFloatShort(TransactionContext&, uint8_t const* p,
 static inline void subFloatInt(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) -
-			  (*(reinterpret_cast<const int32_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int32_t*>(q))));
 }
 static inline void subFloatLong(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void subFloatFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -2043,7 +2053,7 @@ static inline void subDoubleInt(TransactionContext&, uint8_t const* p, uint32_t,
 static inline void subDoubleLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void subDoubleFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -2139,7 +2149,7 @@ static inline void mulIntLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void mulIntFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) *
+	value.set(static_cast<double>(*(reinterpret_cast<const int32_t*>(p))) *
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void mulIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
@@ -2169,12 +2179,12 @@ static inline void mulLongLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void mulLongFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) *
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void mulLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
 }
 static inline void mulFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
@@ -2190,12 +2200,12 @@ static inline void mulFloatShort(TransactionContext&, uint8_t const* p,
 static inline void mulFloatInt(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) *
-			  (*(reinterpret_cast<const int32_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int32_t*>(q))));
 }
 static inline void mulFloatLong(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void mulFloatFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -2225,7 +2235,7 @@ static inline void mulDoubleInt(TransactionContext&, uint8_t const* p, uint32_t,
 static inline void mulDoubleLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void mulDoubleFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -2368,7 +2378,7 @@ static inline void divIntLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void divIntFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) /
+	value.set(static_cast<double>(*(reinterpret_cast<const int32_t*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void divIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
@@ -2414,12 +2424,12 @@ static inline void divLongLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void divLongFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
 static inline void divLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
+	value.set(static_cast<double>(*(reinterpret_cast<const int64_t*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
 }
 static inline void divFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
@@ -2435,12 +2445,12 @@ static inline void divFloatShort(TransactionContext&, uint8_t const* p,
 static inline void divFloatInt(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) /
-			  (*(reinterpret_cast<const int32_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int32_t*>(q))));
 }
 static inline void divFloatLong(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divFloatFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -2470,7 +2480,7 @@ static inline void divDoubleInt(TransactionContext&, uint8_t const* p, uint32_t,
 static inline void divDoubleLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
+			  static_cast<double>(*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divDoubleFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {

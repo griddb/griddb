@@ -45,19 +45,20 @@ KeyConstraint::KeyConstraint() :
 	largeContainerIdAllowed_(false) {
 }
 
-KeyConstraint::KeyConstraint(uint32_t maxTotalLength,
-							 bool systemPartAllowed,
-							 bool largeContainerIdAllowed) :
-	maxTotalLength_(maxTotalLength),
-	systemPartAllowed_(systemPartAllowed),
-	largeContainerIdAllowed_(largeContainerIdAllowed) {
+KeyConstraint::KeyConstraint(
+		size_t maxTotalLength,
+		bool systemPartAllowed,
+		bool largeContainerIdAllowed) :
+		maxTotalLength_(maxTotalLength),
+		systemPartAllowed_(systemPartAllowed),
+		largeContainerIdAllowed_(largeContainerIdAllowed) {
 }
 
-KeyConstraint KeyConstraint::getUserKeyConstraint(uint32_t maxTotalLength) {
+KeyConstraint KeyConstraint::getUserKeyConstraint(size_t maxTotalLength) {
 	return KeyConstraint(maxTotalLength, false, false);
 }
 
-KeyConstraint KeyConstraint::getSystemKeyConstraint(uint32_t maxTotalLength) {
+KeyConstraint KeyConstraint::getSystemKeyConstraint(size_t maxTotalLength) {
 	return KeyConstraint(maxTotalLength, true, true);
 }
 
@@ -112,7 +113,7 @@ FullContainerKeyComponents::operator=(const FullContainerKeyComponents &another)
 	return *this;
 }
 
-uint32_t FullContainerKeyComponents::getStringSize() const {
+size_t FullContainerKeyComponents::getStringSize() const {
 	return (baseNameSize_ + affinityStringSize_ + systemPartSize_);
 }
 
@@ -257,7 +258,7 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 	
 FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 								   const KeyConstraint &constraint,
-								   DatabaseId dbId, const char8_t *str, uint32_t length) :
+								   DatabaseId dbId, const char8_t *str, size_t length) :
 	constraint_(constraint), body_(NULL), size_(0) {
 	try {
 		FullContainerKeyComponents components;
@@ -659,7 +660,7 @@ const char8_t* FullContainerKey::getExtendedSymbol() {
 	return &symbol[1];
 }
 
-void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uint32_t length,
+void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, size_t length,
 										FullContainerKeyComponents &components,
 										ContainerKeyBitArray &upperCaseBit) const {
 	try {
@@ -677,7 +678,7 @@ void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uin
 		size_t sharpCounter = 0;
 		size_t atmarkCounter = 0;
 		const char8_t *part[4] = { NULL, NULL, NULL, NULL };
-		uint32_t partLen[4] = { 0, 0, 0, 0 };
+		size_t partLen[4] = { 0, 0, 0, 0 };
 
 		part[partCounter] = str;
 
@@ -848,7 +849,7 @@ void FullContainerKey::setUpperCaseBit(const FullContainerKeyComponents &compone
 	upperCaseBit.clear();
 
 	const char8_t *strList[3] = { components.baseName_, components.affinityString_, components.systemPart_ };
-	uint32_t lengthList[3] = { components.baseNameSize_, components.affinityStringSize_, components.systemPartSize_ };
+	size_t lengthList[3] = { components.baseNameSize_, components.affinityStringSize_, components.systemPartSize_ };
 
 	for (size_t i = 0; i < 3; i++) {
 		for (size_t j = 0; j < lengthList[i]; j++) {
@@ -1107,16 +1108,18 @@ void FullContainerKey::encodeVarLong(ContainerKeyOutStream &out,
 	}
 }
 
-void FullContainerKey::encodeString(ContainerKeyOutStream &out,
-									const char8_t *str, uint32_t len) const {
-	encodeVarInt(out, len);
-	out.writeAll(str, len);
+void FullContainerKey::encodeString(
+		ContainerKeyOutStream &out, const char8_t *str, size_t len) const {
+	encodeBinary(out, str, len);
 }
 
-void FullContainerKey::encodeBinary(ContainerKeyOutStream &out,
-								 const uint8_t *data, uint32_t len) const {
-	encodeVarInt(out, len);
-	out.writeAll(data, len);
+void FullContainerKey::encodeBinary(
+		ContainerKeyOutStream &out, const void *data, size_t len) const {
+	assert(len <= std::numeric_limits<uint32_t>::max());
+	const uint32_t intLen = static_cast<uint32_t>(len);
+
+	encodeVarInt(out, intLen);
+	out.writeAll(data, intLen);
 }
 
 uint32_t FullContainerKey::decodeVarInt(ContainerKeyInStream &in) const {
@@ -1161,12 +1164,12 @@ bool FullContainerKey::isSymbol(char8_t ch) {
 	return match;
 }
 
-void FullContainerKey::createOriginalString(char8_t const *src, uint32_t size, char8_t *dest,
+void FullContainerKey::createOriginalString(char8_t const *src, size_t size, char8_t *dest,
 											const ContainerKeyBitArray &upperCaseBit, uint64_t startPos) const {
 	for (uint32_t i = 0; i < size; i++) {
 		const char8_t c = *(src + i);
 		if (upperCaseBit.get(startPos + i)) {
-			*(dest + i) = c - 32;
+			*(dest + i) = static_cast<char8_t>(c - 32);
 		}
 		else {
 			*(dest + i) = c;
@@ -1182,10 +1185,10 @@ void FullContainerKey::validateDbId(DatabaseId dbId) const {
 }
 
 void FullContainerKey::validateBaseContainerName(const char8_t *baseName,
-												 uint32_t baseNameLength,
+												 size_t baseNameLength,
 												 bool systemPartExists) const {
 	const char8_t *str = baseName;
-	const uint32_t len = baseNameLength;
+	const size_t len = baseNameLength;
 	if ((str == NULL || len <= 0) && !systemPartExists) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
 			"Size of base name is zero");
@@ -1213,7 +1216,7 @@ void FullContainerKey::validateBaseContainerName(const char8_t *baseName,
 	}
 }
 
-bool FullContainerKey::validateExtendedName(const char8_t *str, uint32_t len,
+bool FullContainerKey::validateExtendedName(const char8_t *str, size_t len,
 											const char8_t *partName) const {
 	bool allNum = true;
 
@@ -1252,7 +1255,7 @@ bool FullContainerKey::validateExtendedName(const char8_t *str, uint32_t len,
 	return allNum;
 }
 
-void FullContainerKey::validateNumeric(const char8_t *str, uint32_t len,
+void FullContainerKey::validateNumeric(const char8_t *str, size_t len,
 									   const char8_t *partName) const {
 	if (str == NULL || len <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
@@ -1302,7 +1305,7 @@ void FullContainerKey::validateSystemPartId(SystemPartId systemPartId) const {
 	}
 }
 
-void FullContainerKey::validateAndSetNodeAffinity(const char8_t *str, uint32_t len,
+void FullContainerKey::validateAndSetNodeAffinity(const char8_t *str, size_t len,
 												  FullContainerKeyComponents &components) const {
 	if (validateExtendedName(str, len, "node affinity")) {
 		const NodeAffinityNumber affinityNumber = getNodeAffinityNumber(str, len);
@@ -1320,14 +1323,14 @@ void FullContainerKey::validateAndSetNodeAffinity(const char8_t *str, uint32_t l
 	}
 }
 
-void FullContainerKey::validateAndSetLargeContainerId(const char8_t *str, uint32_t len,
+void FullContainerKey::validateAndSetLargeContainerId(const char8_t *str, size_t len,
 													  FullContainerKeyComponents &components) const {
 	validateNumeric(str, len, "largeId");
 	components.largeContainerId_ = getLargeContainerId(str, len);
 	validateLargeContainerId(components.largeContainerId_);
 }
 
-void FullContainerKey::validateAndSetSystemPart(const char8_t *str, uint32_t len,
+void FullContainerKey::validateAndSetSystemPart(const char8_t *str, size_t len,
 												FullContainerKeyComponents &components) const {
 	if (validateExtendedName(str, len, "system part")) {
 		const SystemPartId systemPartId = getSystemPartId(str, len);
@@ -1346,7 +1349,7 @@ void FullContainerKey::validateAndSetSystemPart(const char8_t *str, uint32_t len
 }
 
 NodeAffinityNumber FullContainerKey::getNodeAffinityNumber(const char8_t *affinityString,
-												   uint32_t affinityStringLength) const {
+												   size_t affinityStringLength) const {
 	if (affinityString == NULL || affinityStringLength == 0) {
 		return UNDEF_NODE_AFFINITY_NUMBER;
 	}
@@ -1362,7 +1365,7 @@ NodeAffinityNumber FullContainerKey::getNodeAffinityNumber(const char8_t *affini
 }
 
 ContainerId FullContainerKey::getLargeContainerId(const char8_t *largeContainerIdString,
-												  uint32_t largeContainerIdStringLength) const {
+												  size_t largeContainerIdStringLength) const {
 	if (largeContainerIdString == NULL || largeContainerIdStringLength == 0) {
 		return UNDEF_LARGE_CONTAINERID;
 	}
@@ -1378,7 +1381,7 @@ ContainerId FullContainerKey::getLargeContainerId(const char8_t *largeContainerI
 }
 
 SystemPartId FullContainerKey::getSystemPartId(const char8_t *systemPart,
-											   uint32_t systemPartLength) const {
+											   size_t systemPartLength) const {
 	if (systemPart == NULL || systemPartLength == 0) {
 		return UNDEF_SYSTEM_PART_ID;
 	}
@@ -1394,8 +1397,8 @@ SystemPartId FullContainerKey::getSystemPartId(const char8_t *systemPart,
 }
 
 int32_t FullContainerKey::compareOriginalString(
-		const char8_t *str1, uint32_t str1Length,
-		const char8_t *str2, uint32_t str2Length,
+		const char8_t *str1, size_t str1Length,
+		const char8_t *str2, size_t str2Length,
 		bool caseSensitive) const {
 
 	const size_t len = std::min(str1Length, str2Length);
@@ -1423,15 +1426,15 @@ int32_t FullContainerKey::compareOriginalString(
 	}
 
 	if (result == 0) {
-		result = str1Length - str2Length;
+		result = compareLength(str1Length, str2Length);
 	}
 
 	return result;
 }
 
 int32_t FullContainerKey::compareNormalizedString(
-		const char8_t *str1, uint32_t str1Length, const ContainerKeyBitArray &upperCaseBit1, uint64_t startPos1,
-		const char8_t *str2, uint32_t str2Length, const ContainerKeyBitArray &upperCaseBit2, uint64_t startPos2,
+		const char8_t *str1, size_t str1Length, const ContainerKeyBitArray &upperCaseBit1, uint64_t startPos1,
+		const char8_t *str2, size_t str2Length, const ContainerKeyBitArray &upperCaseBit2, uint64_t startPos2,
 		bool caseSensitive) const {
 
 	const size_t len = std::min(str1Length, str2Length);
@@ -1449,10 +1452,29 @@ int32_t FullContainerKey::compareNormalizedString(
 	}
 
 	if (result == 0) {
-		result = str1Length - str2Length;
+		result = compareLength(str1Length, str2Length);
 	}
 
 	return result;
+}
+
+int32_t FullContainerKey::compareLength(size_t len1, size_t len2) {
+
+	if (len1 != len2) {
+		assert(
+				!(static_cast<int32_t>(
+						static_cast<uint32_t>(len1) -
+						static_cast<uint32_t>(len2)) < 0) ==
+				!(len1 < len2));
+
+		if (len1 < len2) {
+			return -1;
+		}
+		else {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 
@@ -1461,9 +1483,9 @@ EmptyAllowedKey::EmptyAllowedKey(const KeyConstraint &constraint) :
 }
 
 void EmptyAllowedKey::validate(
-	const KeyConstraint &constraint,
-	const char8_t *str, uint32_t length,
-	const char8_t *keyName) {
+		const KeyConstraint &constraint,
+		const char8_t *str, size_t length,
+		const char8_t *keyName) {
 	if (str == NULL) {
 		return;
 	}
@@ -1473,7 +1495,7 @@ void EmptyAllowedKey::validate(
 			"Size of " << keyName << " exceeds maximum size : " << str);
 	}
 
-	for (uint32_t i = 0; i < length; i++) {
+	for (size_t i = 0; i < length; i++) {
 		const unsigned char ch = static_cast<unsigned char>(str[i]);
 		if (!isalpha(ch) && !isdigit(ch) && !isSymbol(ch)) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
@@ -1488,9 +1510,9 @@ NoEmptyKey::NoEmptyKey(const KeyConstraint &constraint) :
 }
 
 void NoEmptyKey::validate(
-	const KeyConstraint &constraint,
-	const char8_t *str, uint32_t length,
-	const char8_t *keyName) {
+		const KeyConstraint &constraint,
+		const char8_t *str, size_t length,
+		const char8_t *keyName) {
 	if (length <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
 			"Size of " << keyName << " is zero");
@@ -1500,7 +1522,7 @@ void NoEmptyKey::validate(
 			"Size of " << keyName << " exceeds maximum size : " << str);
 	}
 
-	for (uint32_t i = 0; i < length; i++) {
+	for (size_t i = 0; i < length; i++) {
 		const unsigned char ch = static_cast<unsigned char>(str[i]);
 		if (!isalpha(ch) && !isdigit(ch) && !isSymbol(ch)) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
@@ -1510,12 +1532,12 @@ void NoEmptyKey::validate(
 }
 
 
-AlphaOrDigitKey::AlphaOrDigitKey(uint32_t maxLength) :
+AlphaOrDigitKey::AlphaOrDigitKey(size_t maxLength) :
 	FullContainerKey(KeyConstraint::getUserKeyConstraint(maxLength)) {
 }
 
 void AlphaOrDigitKey::validate(
-	const char8_t *str, uint32_t length, uint32_t maxLength,
+	const char8_t *str, size_t length, size_t maxLength,
 	const char8_t *keyName) {
 	if (length <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
@@ -1526,7 +1548,7 @@ void AlphaOrDigitKey::validate(
 			"Size of " << keyName << " exceeds maximum size : " << str);
 	}
 
-	for (uint32_t i = 0; i < length; i++) {
+	for (size_t i = 0; i < length; i++) {
 		const unsigned char ch = static_cast<unsigned char>(str[i]);
 		if (!isalpha(ch) && !isdigit(ch)) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,

@@ -237,6 +237,11 @@ std::string ValueProcessor::dumpMemory(
 	return ss.str();
 }
 
+int8_t ValueProcessor::errorForPrimitiveColumnTypeOrdinal() {
+	assert(false);
+	GS_THROW_USER_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+}
+
 VariableArrayCursor::VariableArrayCursor(
 	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId oId, AccessMode accessMode)
 	: BaseObject(objectManager, strategy),
@@ -395,7 +400,7 @@ OId VariableArrayCursor::clone(
 					linkOId = destOId;
 				}
 				else {
-					assert(lastElem > 0);
+					assert(lastElem != NULL);
 					uint8_t *linkOIdAddr =
 						lastElem + lastElemSize +
 						ValueProcessor::getEncodedVarSize(lastElemSize);
@@ -476,7 +481,7 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 	bool isConvertSpecialType,
 	util::XArray<uint32_t> &varDataObjectSizeList,
 	util::XArray<uint32_t> &varDataObjectPosList) {
-	uint32_t variableColumnNum = varList.size();
+	uint32_t variableColumnNum = static_cast<uint32_t>(varList.size());
 
 	uint32_t currentObjectSize = ValueProcessor::getEncodedVarSize(
 		variableColumnNum);  
@@ -640,9 +645,9 @@ OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
 				ValueProcessor::getEncodedVarSize(elemSize);
 			ColumnType columnType = columnTypeList[elemNth];
 			if (isConvertSpecialType && columnType == COLUMN_TYPE_STRING_ARRAY) {				
-				uint32_t linkHeaderValue =
-					ValueProcessor::encodeVarSize(
-						LINK_VARIABLE_COLUMN_DATA_SIZE);
+				uint32_t linkHeaderValue = static_cast<uint32_t>(
+						ValueProcessor::encodeVarSize(
+							LINK_VARIABLE_COLUMN_DATA_SIZE));
 				uint32_t linkHeaderSize =
 					ValueProcessor::getEncodedVarSize(
 						LINK_VARIABLE_COLUMN_DATA_SIZE);

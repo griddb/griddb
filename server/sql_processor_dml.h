@@ -106,9 +106,12 @@ public:
 
 	void exportTo(Context& cxt, const OutOption& option) const;
 
-	static void setField(TupleList::TupleColumnType type, ColumnId columnId,
-		const TupleValue& value, OutputMessageRowStore& rowStore,
-		ColumnType origColumnType = COLUMN_TYPE_NULL) {
+	static void setField(
+			TupleList::TupleColumnType type, ColumnId columnId,
+			const TupleValue& value, OutputMessageRowStore& rowStore,
+			ColumnType origColumnType = COLUMN_TYPE_NULL) {
+		UNUSED_VARIABLE(origColumnType);
+
 		switch (type) {
 		case TupleList::TYPE_STRING: {
 			if (value.varSize() > static_cast<size_t>(INT32_MAX)) {
@@ -521,8 +524,8 @@ public:
 		@brief 実行可能条件を満たすか
 	*/
 	bool full() {
-		return ((fixedData_->size() + varData_->size())
-			>= limitSize_);
+		return (static_cast<ptrdiff_t>(fixedData_->size() + varData_->size()) >=
+				limitSize_);
 	}
 
 	/*!
@@ -562,8 +565,8 @@ public:
 		@brief 実行可能条件を満たすか
 	*/
 	bool full() {
-		return ((fixedData_->size() + varData_->size())
-			>= limitSize_);
+		return (static_cast<ptrdiff_t>(fixedData_->size() + varData_->size()) >=
+				limitSize_);
 	}
 
 	/*!
@@ -674,6 +677,8 @@ public:
 	}
 
 	void executeAll(Context& cxt, DmlType type, bool isForce) {
+		UNUSED_VARIABLE(type);
+
 		for (DmlType type = 0; type <
 			static_cast<DmlType>(entries_.size()); type++) {
 			if (entries_[type] != NULL && (isForce || entries_[type]->full())) {

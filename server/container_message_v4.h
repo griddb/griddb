@@ -149,9 +149,13 @@ struct DSInputMes : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 	};
 
 	struct PutContainer : public Serializable {
@@ -174,9 +178,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		const FullContainerKey* key_;
 		ContainerType containerType_;
@@ -200,9 +206,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		TablePartitioningVersionId id_;
 	};
@@ -224,9 +232,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		const FullContainerKey* key_;
 		ContainerType containerType_;
@@ -248,9 +258,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		const FullContainerKey* key_;
 		ContainerType containerType_;
@@ -272,9 +284,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		IndexInfo* info_;
 		bool isCaseSensitive_; 
@@ -298,9 +312,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		IndexInfo* info_;
 		bool isCaseSensitive_; 
@@ -318,9 +334,13 @@ struct DSInputMes : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 	};
 	struct ContinueAlterContainer : public EmptyMessage {
 		void encode(EventByteOutStream& out) {
@@ -333,9 +353,13 @@ struct DSInputMes : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 	};
 	struct Commit : public Serializable {
 		Commit(util::StackAllocator& alloc, bool allowExpiration = true) :
@@ -350,9 +374,13 @@ struct DSInputMes : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 
 		bool allowExpiration_;
 	};
@@ -369,9 +397,13 @@ struct DSInputMes : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 
 		bool allowExpiration_;
 	};
@@ -390,9 +422,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		ContainerType containerType_;
 		bool allowExpiration_;
@@ -414,9 +448,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		RowData* rowData_;
 		PutRowOption putRowOption_;
@@ -441,9 +477,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		RowData* rowData_;
 		SchemaVersionId verId_;
@@ -464,9 +502,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		KeyData* keyData_;
 		SchemaVersionId verId_;
@@ -487,9 +527,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		RowId rowId_;
 		RowData* rowData_;
@@ -511,9 +553,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		RowId rowId_;
 		SchemaVersionId verId_;
@@ -534,9 +578,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		KeyData* keyData_;
 		bool forUpdate_;
@@ -562,9 +608,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		RowId position_;
 		ResultSize limit_;
@@ -596,9 +644,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		const char* dbName_;
 		FullContainerKey* containerKey_;
@@ -631,9 +681,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		GeometryQuery& query_;
 		ResultSize limit_;
@@ -663,9 +715,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		GeometryQuery& query_;
 		ResultSize limit_;
@@ -689,9 +743,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		TimeRelatedCondition condition_;
 		SchemaVersionId verId_;
@@ -712,9 +768,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		InterpolateCondition condition_;
 		SchemaVersionId verId_;
@@ -735,9 +793,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		AggregateQuery query_;
 		SchemaVersionId verId_;
@@ -765,9 +825,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		RangeQuery& query_;
 		ResultSize limit_;
@@ -797,9 +859,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		SamplingQuery& query_;
 		ResultSize limit_;
@@ -829,9 +893,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		ResultSetId rsId_;
 		ResultSize startPos_;
@@ -854,9 +920,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		ResultSetId rsId_;
 	};
@@ -875,9 +943,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		Timestamp currentTime_;
 	};
@@ -897,9 +967,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		BGTask bgTask_;
 	};
@@ -918,9 +990,11 @@ struct DSInputMes : public Serializable {
 
 		template <typename S>
 		void encode(S& out) {
+			UNUSED_VARIABLE(out);
 		}
 		template <typename S>
 		void decode(S& in) {
+			UNUSED_VARIABLE(in);
 		}
 		EventMonotonicTime currentTime_;
 	};
@@ -1093,9 +1167,11 @@ struct DSInputMes : public Serializable {
 			break;
 		}
 	}
-	DSInputMes(util::StackAllocator& alloc, DSOperationType type,
-		const FullContainerKey* containerKey, TablePartitioningVersionId id) :
-		Serializable(&alloc), type_(type) {
+	DSInputMes(
+			util::StackAllocator& alloc, DSOperationType type,
+			const FullContainerKey* containerKey, TablePartitioningVersionId id) :
+			Serializable(&alloc), type_(type) {
+		UNUSED_VARIABLE(containerKey);
 		value_.updateTablePartitioningId_ = ALLOC_NEW(*alloc_) UpdateTablePartitioningId(alloc, id);
 	}
 	DSInputMes(util::StackAllocator& alloc, DSOperationType type,
@@ -1295,9 +1371,11 @@ struct ResponsMesV4 : public Serializable {
 	}
 	template<typename S>
 	void encode(S& out) {
+		UNUSED_VARIABLE(out);
 	}
 	template<typename S>
 	void decode(S& in) {
+		UNUSED_VARIABLE(in);
 	}
 };
 
@@ -1333,6 +1411,7 @@ struct SchemaMessage : public ResponsMesV4 {
 	}
 	template<typename S>
 	void decode(EventByteInStream& in) {
+		UNUSED_VARIABLE(in);
 	}
 
 	SchemaVersionId schemaVersionId_;
@@ -1363,6 +1442,7 @@ struct WithExistMessage : public ResponsMesV4 {
 	}
 	template<typename S>
 	void decode(S& in) {
+		UNUSED_VARIABLE(in);
 	}
 	bool existFlag_;
 	Serializable *mes_;
@@ -1385,6 +1465,7 @@ struct RowExistMessage : public ResponsMesV4 {
 	}
 	template<typename S>
 	void decode(S& in) {
+		UNUSED_VARIABLE(in);
 	}
 	bool existFlag_;
 };
@@ -1400,6 +1481,7 @@ struct SimpleQueryMessage : public ResponsMesV4 {
 	void encode(S& out);
 	template<typename S>
 	void decode(S& in) {
+		UNUSED_VARIABLE(in);
 	}
 	ResultSetGuard* rsGuard_;
 	ResultSet* rs_;

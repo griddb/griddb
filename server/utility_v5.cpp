@@ -143,6 +143,68 @@ void UtilFile::removeFile(const char* path) {
 	util::FileSystem::remove(path, false);
 }
 
+bool UtilFile::writeFile(
+	const std::string& filePathName, const char* data, const size_t size, bool existsCheck, int32_t retryCount, int32_t retryWaitTime) {
+	if (existsCheck) {
+		if (util::FileSystem::exists(filePathName.c_str())) {
+			return false;
+		}
+	}
+	for (int32_t trial = 0; trial < retryCount; trial++) {
+		util::NamedFile file;
+		try {
+			file.open(
+				filePathName.c_str(),
+				util::FileFlag::TYPE_READ_WRITE |
+				util::FileFlag::TYPE_CREATE |
+				util::FileFlag::TYPE_TRUNCATE);
+			if (data && size > 0) {
+				file.write(data, size);
+			}
+			file.close();
+			return true;
+		}
+		catch (std::exception& e) {
+			util::Thread::sleep(retryWaitTime);
+			if (trial == retryCount - 1) {
+				try {
+					if (!util::FileSystem::exists(filePathName.c_str())) {
+						util::FileSystem::removeFile(filePathName.c_str());
+					}
+				}
+				catch (...) {
+				}
+				GS_RETHROW_USER_OR_SYSTEM(e, "");
+			}
+		}
+	}
+	return false;
+}
+
+
+bool UtilFile::writeFile(
+	const std::string& pathName, const std::string& fileName, const char* data, const size_t size, bool existsCheck, int32_t retryCount, int32_t retryWaitTime) {
+	std::string filePathName;
+	util::FileSystem::createPath(pathName.c_str(), fileName.c_str(), filePathName);
+	return UtilFile::writeFile(filePathName, data, size, existsCheck, retryCount, retryWaitTime);
+}
+
+template<typename T>
+ bool UtilFile::readFile(const std::string& filePathName, bool existsCheck, T &value) {
+	UNUSED_VARIABLE(existsCheck);
+
+	if (!util::FileSystem::exists(filePathName.c_str())) {
+		return false;
+	}
+	util::NamedFile file;
+	file.open(filePathName.c_str(), util::FileFlag::TYPE_READ_ONLY);
+	file.read(&value, sizeof(T));
+	file.close();
+	return true;
+}
+
+ template  bool UtilFile::readFile(const std::string& filePathName, bool existsCheck, int32_t& value);
+
 void UtilFile::dump(const char* path) {
 	util::Directory dir(path);
 	u8string realPath;

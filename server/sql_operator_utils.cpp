@@ -2807,7 +2807,14 @@ void SQLOps::OpProfilerIndexEntry::addCondition(
 	AnalysisIndexCondition destCond;
 	switch (cond.opType_) {
 	case SQLType::EXPR_BETWEEN:
-		destCond.condition_ = AnalysisIndexCondition::CONDITION_RANGE;
+		if (cond.firstHitOnly_) {
+			destCond.condition_ = (cond.descending_ ?
+					AnalysisIndexCondition::CONDITION_RANGE_LAST :
+					AnalysisIndexCondition::CONDITION_RANGE_FIRST);
+		}
+		else {
+			destCond.condition_ = AnalysisIndexCondition::CONDITION_RANGE;
+		}
 		break;
 	case SQLType::OP_EQ:
 		destCond.condition_ = AnalysisIndexCondition::CONDITION_EQ;
@@ -2897,6 +2904,7 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_RANGE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_INDEX),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_META),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_VISITED),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT_NONE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT_PIPE),
@@ -2993,6 +3001,8 @@ SQLOpUtils::AnalysisOptimizationInfo::AnalysisOptimizationInfo() :
 const util::NameCoderEntry<SQLOpUtils::AnalysisIndexCondition::ConditionType>
 		SQLOpUtils::AnalysisIndexCondition::CONDITION_LIST[] = {
 	UTIL_NAME_CODER_ENTRY(CONDITION_RANGE),
+	UTIL_NAME_CODER_ENTRY(CONDITION_RANGE_FIRST),
+	UTIL_NAME_CODER_ENTRY(CONDITION_RANGE_LAST),
 	UTIL_NAME_CODER_ENTRY(CONDITION_EQ)
 };
 

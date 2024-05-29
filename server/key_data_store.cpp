@@ -90,7 +90,11 @@ bool KeyDataStore::support(Support type) {
 	@param [in] clsService ClusterService(エラー通知用)
 	@note DataStoreBase::Scope()内でpostProcessとペアで呼ばれる
 ** **/
-void KeyDataStore::preProcess(TransactionContext* txn, ClusterService* clsService) {
+void KeyDataStore::preProcess(
+		TransactionContext* txn, ClusterService* clsService) {
+	UNUSED_VARIABLE(txn);
+	UNUSED_VARIABLE(clsService);
+
 	ObjectManagerV4& objectManager = *(getObjectManager());
 	objectManager.checkDirtyFlag();
 	const double HOT_MODE_RATE = 1.0;
@@ -104,6 +108,8 @@ void KeyDataStore::preProcess(TransactionContext* txn, ClusterService* clsServic
 	@note チャンクの参照カウンターのリセット等を実施
 ** **/
 void KeyDataStore::postProcess(TransactionContext* txn) {
+	UNUSED_VARIABLE(txn);
+
 	ObjectManagerV4& objectManager = *(getObjectManager());
 	objectManager.checkDirtyFlag();
 	objectManager.resetRefCounter();
@@ -192,7 +198,10 @@ OId KeyDataStore::get(TransactionContext& txn, StoreType storeType) {
 	@param [in] id ContainerId
 	@return コンテナの情報
 ** **/
-KeyDataStoreValue KeyDataStore::get(util::StackAllocator& alloc, ContainerId id) {
+KeyDataStoreValue KeyDataStore::get(
+		util::StackAllocator& alloc, ContainerId id) {
+	UNUSED_VARIABLE(alloc);
+
 	try {
 		KeyDataStoreValue val = containerIdTable_.get(id);
 		if (val.oId_ == UNDEF_OID) {
@@ -215,7 +224,6 @@ KeyDataStoreValue KeyDataStore::get(util::StackAllocator& alloc, ContainerId id)
 ** **/
 KeyDataStoreValue KeyDataStore::get(TransactionContext& txn,
 	const FullContainerKey& containerKey, bool isCaseSensitive) {
-	util::StackAllocator& alloc = txn.getDefaultAllocator();
 	try {
 		KeyDataStoreValue ret = KeyDataStoreValue();
 		if (!isActive()) {
@@ -246,7 +254,6 @@ KeyDataStoreValue KeyDataStore::get(TransactionContext& txn,
 ** **/
 PutStatus KeyDataStore::put(TransactionContext& txn,
 	OId keyOId, KeyDataStoreValue& newValue) {
-	util::StackAllocator& alloc = txn.getDefaultAllocator();
 	PutStatus putStatus = PutStatus::CREATE;
 	try {
 		DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
@@ -303,8 +310,6 @@ PutStatus KeyDataStore::put(TransactionContext& txn,
 	@return 指定したコンテナキーの存在の有無
 ** **/
 bool KeyDataStore::remove(TransactionContext& txn, OId keyOId) {
-	util::StackAllocator& alloc = txn.getDefaultAllocator();
-	PutStatus status = PutStatus::CREATE;
 	try {
 		DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 		if (!isActive()) {
@@ -346,7 +351,13 @@ bool KeyDataStore::remove(TransactionContext& txn, OId keyOId) {
 	@return 汎用出力メッセージ
 	@note KeyDataStoreは内部向けデータストアであり性能重視のため汎用I/Fは利用しない
 ** **/
-Serializable* KeyDataStore::exec(TransactionContext* txn, KeyDataStoreValue* storeValue, Serializable* message) {
+Serializable* KeyDataStore::exec(
+		TransactionContext* txn, KeyDataStoreValue* storeValue,
+		Serializable* message) {
+	UNUSED_VARIABLE(txn);
+	UNUSED_VARIABLE(storeValue);
+	UNUSED_VARIABLE(message);
+
 	assert(false);
 	return NULL;
 }
@@ -574,7 +585,6 @@ void KeyDataStore::activate(
 ** **/
 void KeyDataStore::restoreContainerIdTable(
 	TransactionContext& txn, ClusterService* clusterService) {
-	util::StackAllocator& alloc = txn.getDefaultAllocator();
 
 	const DataStoreBase::Scope dsScope(&txn, this, clusterService);
 	if (!isActive()) {
@@ -600,7 +610,6 @@ void KeyDataStore::restoreContainerIdTable(
 			FullContainerKeyCursor keyCursor(*getObjectManager(),
 				allocateStrategy_, itr->first.oId_);
 			const FullContainerKey& containerKey = keyCursor.getKey();
-			FullContainerKeyComponents keyComponents = containerKey.getComponents(txn.getDefaultAllocator());
 
 			KeyDataStoreValue& value = itr->second;
 			const DatabaseId databaseVersionId =
@@ -852,8 +861,10 @@ OId KeyDataStore::getHeadOId(DSGroupId groupId) {
 	@return コンテナキーが所属するパーティションID
 ** **/
 PartitionId KeyDataStore::resolvePartitionId(
-	util::StackAllocator& alloc, const FullContainerKey& containerKey,
-	PartitionId partitionCount, ContainerHashMode hashMode) {
+		util::StackAllocator& alloc, const FullContainerKey& containerKey,
+		PartitionId partitionCount, ContainerHashMode hashMode) {
+	UNUSED_VARIABLE(hashMode);
+
 	assert(partitionCount > 0);
 
 	const FullContainerKeyComponents normalizedComponents =

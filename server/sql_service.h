@@ -224,6 +224,7 @@ public:
 	static const int32_t SQL_V4_1_MSG_VERSION;
 	static const int32_t SQL_V4_1_0_MSG_VERSION;
 	static const int32_t SQL_V5_5_MSG_VERSION;
+	static const int32_t SQL_V5_6_MSG_VERSION;
 	static const int32_t SQL_MSG_VERSION;
 	static const bool SQL_MSG_BACKWARD_COMPATIBLE;
 
@@ -344,6 +345,22 @@ public:
 		return addBatchMaxCount_;
 	}
 
+	void setTablePartitioningMaxAssignedNum(int32_t count) {
+		tablePartitioningMaxAssignedNum_ = count;
+	}
+
+	int32_t getTablePartitioningMaxAssignedNum() {
+		return tablePartitioningMaxAssignedNum_;
+	}
+
+	void setTablePartitioningMaxAssignedEntryNum(int32_t count) {
+		tablePartitioningMaxAssignedEntryNum_ = count;
+	}
+
+	int32_t getTablePartitioningMaxAssignedEntryNum() {
+		return tablePartitioningMaxAssignedEntryNum_;
+	}
+
 	void setJobMemoryLimit(int64_t limit) {
 		jobMemoryLimit_ = limit;
 	}
@@ -353,7 +370,7 @@ public:
 	}
 
 	void enableProfiler(bool isProfiler) {
-		isProfiler_ = isProfiler_;
+		isProfiler_ = isProfiler;
 	}
 
 	bool isEnableProfiler() {
@@ -601,6 +618,9 @@ private:
 	int32_t sendPendingJobLimit_;
 	int32_t sendPendingTaskConcurrency_;
 	int32_t addBatchMaxCount_;
+
+	int32_t tablePartitioningMaxAssignedNum_;
+	int32_t tablePartitioningMaxAssignedEntryNum_;
 
 	int64_t totalInternalConnectionCount_;
 	int64_t totalExternalConnectionCount_;

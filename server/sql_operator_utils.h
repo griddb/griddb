@@ -825,6 +825,8 @@ struct SQLOpUtils::AnalysisOptimizationInfo {
 struct SQLOpUtils::AnalysisIndexCondition {
 	enum ConditionType {
 		CONDITION_RANGE,
+		CONDITION_RANGE_FIRST,
+		CONDITION_RANGE_LAST,
 		CONDITION_EQ,
 
 		END_CONDITION

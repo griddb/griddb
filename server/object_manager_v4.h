@@ -120,7 +120,7 @@ public:
 	const ChunkManagerStats& getChunkManagerStats();
 
 	inline uint32_t getChunkSize() const {
-		return 1UL << CHUNK_EXP_SIZE_;
+		return static_cast<uint32_t>(1UL << CHUNK_EXP_SIZE_);
 	}
 	void drop();
 
@@ -459,6 +459,7 @@ struct ObjectManagerStats {
 */
 inline OId ObjectManagerV4::getOId(
 		DSGroupId groupId, ChunkId cId, DSObjectOffset offset) {
+	UNUSED_VARIABLE(groupId);
 
 	ChunkCategoryId categoryId = static_cast<ChunkCategoryId>(7); 
 	OId chunkIdOId = ((OId)cId << UNIT_CHUNK_SHIFT_BIT);
@@ -472,6 +473,7 @@ inline OId ObjectManagerV4::getOId(
 inline OId ObjectManagerV4::getOId(
 		uint32_t chunkExpSize, ChunkCategoryId categoryId,
 		ChunkId cId, DSObjectOffset offset) {
+	UNUSED_VARIABLE(categoryId);
 
 
 	const bool largeChunkMode = OIdBitUtils::isLargeChunkMode(chunkExpSize);
@@ -557,9 +559,10 @@ inline bool ObjectManagerV4::notEqualChunk(OId oId1, OId oId2) {
 */
 inline uint8_t ObjectManagerV4::getObjectExpSize(uint32_t requestSize) {
 	assert(0 < requestSize);
-	uint8_t k = util::nextPowerBitsOf2(requestSize + OBJECT_HEADER_SIZE);
+	uint8_t k = static_cast<uint8_t>(
+			util::nextPowerBitsOf2(requestSize + OBJECT_HEADER_SIZE));
 	if (k < minPower_) {
-		k = minPower_;
+		k = static_cast<uint8_t>(minPower_);
 	}
 	return k;
 }
@@ -642,7 +645,7 @@ inline void ObjectManagerV4::initV4ChunkHeader(ChunkBuddy &chunk, DSGroupId grou
 	chunk.setGroupId(groupId);
 	chunk.setChunkId(cId);
 
-	chunk.setChunkExpSize(CHUNK_EXP_SIZE_);
+	chunk.setChunkExpSize(static_cast<uint8_t>(CHUNK_EXP_SIZE_));
 	chunk.setChunkCategoryId(7); 
 	chunk.setChunkKey(0);
 	chunk.setAttribute(0);
@@ -659,7 +662,8 @@ T* GroupObjectAccessor::get(OId oId, bool isDirty) {
 	assert(group_);
 	int64_t chunkId = objMgr_->getChunkId(oId);
 	if (objMgr_->isV4OId(oId)) {
-		chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+		chunkId = objMgr_->getV5ChunkId(
+				group_->getId(), static_cast<ChunkId>(chunkId));
 	}
 	objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
 	if (isDirty) {
@@ -676,10 +680,13 @@ T* GroupObjectAccessor::get(OId oId, bool isDirty) {
 	@brief getしたオブジェクトの更新宣言
 */
 inline void GroupObjectAccessor::update(OId oId) {
+	UNUSED_VARIABLE(oId);
+
 #ifndef NDEBUG
 	int64_t chunkId = objMgr_->getChunkId(oId);
 	if (objMgr_->isV4OId(oId)) {
-		chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+		chunkId = objMgr_->getV5ChunkId(
+				group_->getId(), static_cast<ChunkId>(chunkId));
 	}
 	assert(chunkAccessor_.getChunkId() == chunkId);
 #endif 
@@ -725,7 +732,8 @@ inline void GroupObjectAccessor::pin(OId oId) {
 	assert(group_);
 	int64_t chunkId = objMgr_->getChunkId(oId);
 	if (objMgr_->isV4OId(oId)) {
-		chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+		chunkId = objMgr_->getV5ChunkId(
+				group_->getId(), static_cast<ChunkId>(chunkId));
 	}
 	objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
 }
@@ -734,12 +742,15 @@ inline void GroupObjectAccessor::pin(OId oId) {
 	@brief ピン留め解除(griddb V4のunfix、sqliteのunpin)
 */
 inline void GroupObjectAccessor::unpin(OId oId, bool isDirty) {
+	UNUSED_VARIABLE(oId);
+
 	assert(group_);
 	if (!chunkAccessor_.isEmpty()) {
 #ifndef NDEBUG
 		int64_t chunkId = objMgr_->getChunkId(oId);
 		if (objMgr_->isV4OId(oId)) {
-			chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+			chunkId = objMgr_->getV5ChunkId(
+					group_->getId(), static_cast<ChunkId>(chunkId));
 		}
 		assert(chunkAccessor_.getChunkId() == chunkId);
 #endif 
@@ -757,7 +768,8 @@ inline DSObjectSize GroupObjectAccessor::getSize(OId oId) {
 	assert(group_);
 	int64_t chunkId = objMgr_->getChunkId(oId);
 	if (objMgr_->isV4OId(oId)) {
-		chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+		chunkId = objMgr_->getV5ChunkId(
+				group_->getId(), static_cast<ChunkId>(chunkId));
 	}
 	objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
 	ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor_.getChunk());
@@ -765,7 +777,7 @@ inline DSObjectSize GroupObjectAccessor::getSize(OId oId) {
 	int32_t offset = objMgr_->getOffset(oId);
 	size_t size = chunk->getObjectSize(offset, ObjectManagerV4::OBJECT_HEADER_SIZE);
 	chunkAccessor_.unpin();
-	return size;
+	return static_cast<DSObjectSize>(size);
 }
 
 /*!

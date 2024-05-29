@@ -64,6 +64,7 @@ struct SQLScanOps {
 	class ScanContainerRange;
 	class ScanContainerIndex;
 	class ScanContainerMeta;
+	class ScanContainerVisited;
 	class Select;
 	class SelectPipe;
 	class Limit;
@@ -225,6 +226,12 @@ class SQLScanOps::ScanContainerMeta :
 		public SQLScanOps::BaseScanContainerOperator {
 public:
 	virtual void compile(OpContext &cxt) const;
+	virtual void execute(OpContext &cxt) const;
+};
+
+class SQLScanOps::ScanContainerVisited :
+		public SQLScanOps::BaseScanContainerOperator {
+public:
 	virtual void execute(OpContext &cxt) const;
 };
 

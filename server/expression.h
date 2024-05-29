@@ -517,8 +517,8 @@ public:
 	bool equals(Expr &e) {
 		return (*this == e);
 	}
-	virtual bool operator==(Expr &e);
-	virtual bool operator!=(Expr &e) {
+	virtual bool operator==(const Expr &e) const;
+	virtual bool operator!=(const Expr &e) const {
 		return !(*this == e);
 	}
 

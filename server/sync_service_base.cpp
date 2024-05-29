@@ -20,6 +20,8 @@
 */
 #include "sync_service.h"
 #include "transaction_service.h"
+#include "json.h"
+#include "uuid_utils.h"
 
 #ifndef _WIN32
 #include <signal.h>  
@@ -29,6 +31,7 @@ UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(SYNC_DETAIL);
+UTIL_TRACER_DECLARE(REDO_MANAGER);
 
 #define RM_THROW_LOG_REDO_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(LogRedoException, , errorCode, message)
@@ -64,8 +67,12 @@ SyncService::SyncService(
 	SyncManager& syncMgr,
 	ClusterVersionId versionId,
 	ServiceThreadErrorHandler& serviceThreadErrorHandler) :
+	varAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYNC, "syncAll")),
 	ee_(createEEConfig(config, eeConfig), source, name),
 	syncMgr_(&syncMgr),
+	redoMgr_(config, varAlloc_, this),
+	txnSvc_(NULL),
+	clsSvc_(NULL),
 	versionId_(versionId),
 	serviceThreadErrorHandler_(serviceThreadErrorHandler),
 	initialized_(false)
@@ -91,6 +98,7 @@ void SyncService::initialize(ManagerSet& mgrSet) {
 	txnSvc_ = mgrSet.txnSvc_;
 	partitionList_ = mgrSet.partitionList_;
 	syncMgr_->initialize(&mgrSet);
+	redoMgr_.initialize(mgrSet);
 	recvSyncMessageHandler_.initialize(mgrSet);
 	serviceThreadErrorHandler_.initialize(mgrSet);
 	initialized_ = true;
@@ -183,7 +191,7 @@ void SyncService::checkVersion(uint8_t versionId) {
 			GS_ERROR_CS_ENCODE_DECODE_VERSION_CHECK,
 			"Cluster message version is unmatched,  acceptableClusterVersion="
 			<< static_cast<int32_t>(versionId_)
-			<< ", connectClusterVersion=" << static_cast<int32_t>(versionId));
+			<< ", connectClusterVersion=" << static_cast<int32_t>(versionId) << " (sync)");
 	}
 }
 
@@ -254,10 +262,11 @@ void SyncService::requestDrop(
 }
 
 void SyncService::notifyCheckpointLongSyncReady(
-	EventContext& ec,
-	PartitionId pId,
-	LongtermSyncInfo* syncInfo,
-	bool errorOccured) {
+		EventContext& ec,
+		PartitionId pId,
+		LongtermSyncInfo* syncInfo,
+		bool errorOccured) {
+	UNUSED_VARIABLE(errorOccured);
 
 	clsSvc_->request(
 		ec, TXN_LONGTERM_SYNC_PREPARE_ACK,
@@ -265,10 +274,11 @@ void SyncService::notifyCheckpointLongSyncReady(
 }
 
 void SyncService::notifySyncCheckpointEnd(
-	EventContext& ec,
-	PartitionId pId,
-	LongtermSyncInfo* syncInfo,
-	bool errorOccured) {
+		EventContext& ec,
+		PartitionId pId,
+		LongtermSyncInfo* syncInfo,
+		bool errorOccured) {
+	UNUSED_VARIABLE(errorOccured);
 
 	clsSvc_->request(
 		ec, TXN_LONGTERM_SYNC_RECOVERY_ACK,
@@ -294,11 +304,13 @@ void SyncService::notifySyncCheckpointError(
 }
 
 void SyncHandler::sendEvent(
-	EventContext& ec,
-	EventEngine& ee,
-	NodeId targetNodeId,
-	Event& ev,
-	int32_t delayTime) {
+		EventContext& ec,
+		EventEngine& ee,
+		NodeId targetNodeId,
+		Event& ev,
+		int32_t delayTime) {
+	UNUSED_VARIABLE(ec);
+
 	if (targetNodeId == SELF_NODEID) {
 		if (delayTime == UNDEF_DELAY_TIME) {
 			delayTime = EE_PRIORITY_HIGH;
@@ -328,7 +340,6 @@ void ShortTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 	SyncContext* longSyncContext = NULL;
 	PartitionId pId = ev.getPartitionId();
 	EventType eventType = ev.getType();
-	const NodeDescriptor& senderNd = ev.getSenderND();
 	NodeId senderNodeId
 		= ClusterService::resolveSenderND(ev);
 	SyncId longSyncId;
@@ -338,8 +349,6 @@ void ShortTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 		util::StackAllocator& alloc
 			= ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
-		SyncVariableSizeAllocator& varSizeAlloc
-			= syncMgr_->getVariableSizeAllocator();
 		EventByteInStream in = ev.getInStream();
 
 		SyncRequestInfo syncRequestInfo(
@@ -378,7 +387,7 @@ void ShortTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 			executeSyncRequest(
 				ec, pId, context,
 				syncRequestInfo, syncResponseInfo);
-
+			
 			checkOwner(pt_->getLSN(pId), context);
 			break;
 		}
@@ -500,7 +509,6 @@ void ShortTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 		}
 	}
 	catch (LockConflictException& e) {
-		int32_t errorCode = e.getErrorCode();
 		if (context != NULL) {
 			addCheckEndEvent(
 				ec, pId, ec.getAllocator(),
@@ -508,7 +516,6 @@ void ShortTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 		}
 	}
 	catch (LogRedoException& e) {
-		int32_t errorCode = e.getErrorCode();
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, WARNING,
 			"Short term sync failed, log redo exception is occurred");
 		if (context != NULL) {
@@ -543,7 +550,6 @@ bool SyncRequestInfo::getLogs(
 	binaryLogRecords_.clear();
 	bool isSyncLog = false;
 	LogSequentialNumber lastLsn = 0;
-	int32_t callLogCount = 0;
 	condition_.logSize_
 		= syncMgr_->getConfig().getMaxMessageSize();
 	GS_OUTPUT_SYNC2("GetLog start, pId=" << pId << ", START LSN="
@@ -582,13 +588,16 @@ bool SyncRequestInfo::getLogs(
 					<< request_.startLsn_);
 			}
 		}
-		while (true) {
+		while (binaryLogRecords_.size() <= condition_.logSize_) {
 			util::StackAllocator::Scope scope(logMgr->getAllocator());
 			log = logIt.next(false);
 			if (log == NULL) break;
-			if (log->getLsn() <= request_.endLsn_ && binaryLogRecords_.size() <= condition_.logSize_) {
+			if (log->getLsn() <= request_.endLsn_) {
 				log->encode(logMgr->getAllocator(), binaryLogRecords_);
 				lastLsn = log->getLsn();
+			}
+			else {
+				break;
 			}
 		}
 		if (request_.endLsn_ <= lastLsn) {
@@ -613,16 +622,16 @@ bool SyncRequestInfo::getLogs(
 	@brief Gets Chunks
 */
 bool SyncRequestInfo::getChunks(
-	util::StackAllocator& alloc,
-	PartitionId pId,
-	PartitionTable* pt,
-	CheckpointService* cpSvc,
-	Partition* partition,
-	int64_t sId,
-	uint64_t& totalCount) {
+		util::StackAllocator& alloc,
+		PartitionId pId,
+		PartitionTable* pt,
+		CheckpointService* cpSvc,
+		Partition* partition,
+		int64_t sId,
+		uint64_t& totalCount) {
+	UNUSED_VARIABLE(pt);
 
 	bool lastChunkGet = false;
-	int32_t callLogCount = 0;
 	try {
 		chunks_.clear();
 		binaryLogRecords_.clear();
@@ -709,7 +718,6 @@ void SyncCheckEndHandler::operator()(EventContext& ec, Event& ev) {
 			pId, syncCheckEndInfo.getPartitionRole());
 
 		if (context != NULL) {
-			NodeId currentOwner = pt_->getOwner(pId);
 			PartitionRevisionNo nextRevision
 				= pt_->getPartitionRevision(
 					pId, PartitionTable::PT_CURRENT_OB);
@@ -748,8 +756,7 @@ void SyncCheckEndHandler::operator()(EventContext& ec, Event& ev) {
 				}
 				PartitionRole currentRole;
 				pt_->getPartitionRole(pId, currentRole);
-				pt_->clear(
-					pId, PartitionTable::PT_CURRENT_OB);
+				pt_->clear(pId);
 				PartitionRole afterRole;
 				pt_->getPartitionRole(pId, afterRole);
 				clsSvc_->requestChangePartitionStatus(
@@ -851,7 +858,6 @@ void DropPartitionHandler::operator()(EventContext& ec, Event& ev) {
 			"Drop partition pending, pId=" << pId
 			<< ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
-		int32_t errorCode = e.getErrorCode();
 		TRACE_SYNC_EXCEPTION(
 			e, eventType, pId, WARNING,
 			"Drop partition pending, "
@@ -1208,7 +1214,7 @@ void SyncManagerInfo::decode(EventByteInStream& in, const char8_t* bodyBuffer) {
 	uint32_t bodySize;
 	in >> bodySize;
 	const char8_t* dataBuffer = bodyBuffer + in.base().position();
-	uint32_t lastSize = in.base().position() + bodySize;
+	const size_t lastSize = in.base().position() + bodySize;
 	msgpack::unpacked msg;
 	msgpack::unpack(&msg, dataBuffer, static_cast<size_t>(bodySize));
 	msgpack::object obj = msg.get();
@@ -1379,7 +1385,6 @@ void SyncResponseInfo::Response::decode(EventByteInStream& in) {
 void SyncHandler::removePartition(PartitionId pId) {
 
 	SyncPartitionLock partitionLock(txnMgr_, pId);
-	LogSequentialNumber prevLsn = pt_->getLSN(pId, 0);
 	
 	Partition& partition = partitionList_->partition(pId);
 	partition.drop();
@@ -1394,7 +1399,8 @@ void ShortTermSyncHandler::undoPartition(
 	SyncContext* context,
 	PartitionId pId) {
 
-	if (!syncMgr_->isUndoCompleted(pId)) {
+	bool isStandy = clsMgr_->getStandbyInfo().isStandby();
+	if (!syncMgr_->isUndoCompleted(pId) && !isStandy) {
 		LogSequentialNumber prevLsn
 			= pt_->getLSN(pId);
 		const size_t undoNum
@@ -1472,15 +1478,15 @@ int64_t ShortTermSyncHandler::getTargetSSN(
 	return ssn;
 }
 
-
 void SyncHandler::sendRequest(
-	EventContext& ec,
-	EventEngine& ee,
-	EventType eventType,
-	PartitionId pId,
-	SyncRequestInfo& syncRequestInfo,
-	NodeId senderNodeId,
-	int32_t waitTime) {
+		EventContext& ec,
+		EventEngine& ee,
+		EventType eventType,
+		PartitionId pId,
+		SyncRequestInfo& syncRequestInfo,
+		NodeId senderNodeId,
+		int32_t waitTime) {
+	UNUSED_VARIABLE(waitTime);
 
 	Event requestEvent(
 		ec, eventType, pId);
@@ -1490,6 +1496,22 @@ void SyncHandler::sendRequest(
 		requestEvent, syncRequestInfo, out);
 	sendEvent(
 		ec, ee, senderNodeId, requestEvent);
+}
+
+template <typename T>
+void SyncHandler::sendSyncRequest(
+	EventContext& ec,
+	EventEngine& ee,
+	EventType eventType,
+	PartitionId pId,
+	T& syncRequestInfo,
+	NodeId senderNodeId,
+	int32_t waitTime) {
+
+	Event requestEvent(ec, eventType, pId);
+	EventByteOutStream out = requestEvent.getOutStream();
+	syncSvc_->encode(requestEvent, syncRequestInfo, out);
+	sendEvent(ec, ee, senderNodeId, requestEvent, waitTime);
 }
 
 template<typename T>
@@ -1695,15 +1717,19 @@ void ShortTermSyncHandler::executeSyncLog(
 
 	if (context != NULL) {
 		GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(ev.getType()) << ":START]", "");
-		syncMgr_->setShorttermSyncLog(
+		if (syncMgr_->setShorttermSyncLog(
 			context, syncRequestInfo, ev.getType(),
 			ec.getHandlerStartTime(),
-			ec.getHandlerStartMonotonicTime());
+			ec.getHandlerStartMonotonicTime())) {
+			txnEE_->add(ev);
+		}
+		else {
+			sendResponse(
+				ec, TXN_SHORTTERM_SYNC_LOG_ACK, pId,
+				syncRequestInfo, syncResponseInfo,
+				context, context->getRecvNodeId());
+		}
 		syncMgr_->setUndoCompleted(pId);
-		sendResponse(
-			ec, TXN_SHORTTERM_SYNC_LOG_ACK, pId,
-			syncRequestInfo, syncResponseInfo,
-			context, context->getRecvNodeId());
 	}
 }
 
@@ -1804,7 +1830,6 @@ void ShortTermSyncHandler::executeSyncEnd(
 			ec, TXN_SHORTTERM_SYNC_END_ACK, pId,
 			syncRequestInfo, syncResponseInfo,
 			context, senderNodeId);
-
 		context->endAll();
 		syncMgr_->removeSyncContext(
 			ec, pId, context, false);
@@ -1848,5 +1873,938 @@ void ShortTermSyncHandler::executeSyncEndAck(
 			syncMgr_->removeSyncContext(
 				ec, pId, context, false);
 		}
+	}
+}
+
+
+RedoManager::RedoManager(
+		const ConfigTable& config, 
+		GlobalVariableSizeAllocator& varAlloc,
+		SyncService* syncSvc) :
+		partitionNum_(config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
+		varAlloc_(varAlloc),
+		contextInfoList_(partitionNum_, RedoInfo()),
+		syncSvc_(NULL),
+		txnSvc_(NULL),
+		clsMgr_(NULL),
+		pt_(NULL) {
+	UNUSED_VARIABLE(syncSvc);
+	UUIDUtils::generate(uuid_);
+	uuidString_.resize(UUID_STRING_SIZE);
+	UUIDUtils::unparse(uuid_, const_cast<char*>(uuidString_.data()));
+	uuidString_.resize(UUID_STRING_SIZE - 1);
+	contextMapList_.assign(partitionNum_, ContextMap(varAlloc));
+}
+
+RedoManager::~RedoManager() {
+	for (size_t pos = 0; pos < contextMapList_.size(); pos++) {
+		ContextMap& cxtMap = contextMapList_[pos];
+		for (const auto& elem : cxtMap) {
+			ALLOC_VAR_SIZE_DELETE(varAlloc_, elem.second);
+		}
+	}
+}
+
+void RedoManager::initialize(ManagerSet& mgrSet) {
+	syncSvc_ = mgrSet.syncSvc_;
+	txnSvc_ = mgrSet.txnSvc_;
+	clsMgr_ = mgrSet.clsMgr_;
+	pt_ = mgrSet.pt_;
+}
+
+bool RedoManager::put(
+	const Event::Source& eventSource, util::StackAllocator& alloc, PartitionId pId, 
+	std::string& logFilePath,  std::string& logFileName,
+	LogSequentialNumber startLsn, LogSequentialNumber endLsn, std::string& uuidString,
+	RequestId &requestId, bool forceApply, RestContext& restCxt) {
+
+	try {
+		if (!checkRange(pId, restCxt)) {
+			return false;
+		}
+		if (!checkStandby(restCxt)) {
+			return false;
+		}
+		if (!checkExecutable(pId, restCxt)) {
+			return false;
+		}
+		ContextMap& cxtMap = contextMapList_[pId];
+		{
+			util::LockGuard<util::Mutex> guard(contextInfoList_[pId].lock_);
+			requestId = reserveId(pId);
+			ContextMap::iterator it = cxtMap.find(requestId);
+			if (it == cxtMap.end()) {
+				cxtMap.insert(std::make_pair(requestId,  ALLOC_VAR_SIZE_NEW(varAlloc_)
+					RedoContext(varAlloc_, logFilePath, logFileName, startLsn, endLsn, pId, requestId, uuidString_, forceApply)));
+				picojson::object redoInfo;
+				redoInfo["requestId"] = picojson::value(static_cast<double>(requestId));
+				redoInfo["uuid"] = picojson::value(uuidString_);
+				restCxt.result_ = picojson::value(redoInfo);
+			}
+			else {
+				GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_INTERNAL, "RequestId (" << requestId << ") is already exist");
+			}
+		}
+		sendRequest(eventSource, alloc, pId, requestId, TXN_SYNC_REDO_LOG);
+		return true;
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
+		util::NormalOStringStream oss;
+		oss << "Internal error orrcured  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
+		restCxt.setError(WEBAPI_REDO_INVALID_REQUEST_ID, oss.str().c_str());
+		return false;
+	}
+}
+
+bool RedoManager::getStatus(PartitionId pId, std::string& uuidString, RequestId requestId, RestContext& restCxt) {
+	try {
+		if (!checkRange(pId, restCxt)) {
+			return false;
+		}
+
+		ContextMap& cxtMap = contextMapList_[pId];
+		picojson::value& result = restCxt.result_;
+		util::LockGuard<util::Mutex> guard(contextInfoList_[pId].lock_);
+		if (requestId == UNDEF_SYNC_REQUEST_ID) {
+			if (!checkUuid(uuidString, restCxt, false)) {
+				return false;
+			}
+			RedoContextList list;
+			for (const auto& elem : cxtMap) {
+				list.append(elem.second);
+			}
+			JsonUtils::OutStream out(result);
+			util::ObjectCoder().encode(out, list);
+			return true;
+		}
+		else {
+			if (!checkUuid(uuidString, restCxt, true)) {
+				return false;
+			}
+			ContextMap::iterator it = cxtMap.find(requestId);
+			if (it != cxtMap.end()) {
+				JsonUtils::OutStream out(result);
+				util::ObjectCoder().encode(out, it->second);
+				return true;
+			}
+			else {
+				if (requestId < UNDEF_SYNC_REQUEST_ID || requestId >= contextInfoList_[pId].counter_) {
+					util::NormalOStringStream oss;
+					oss << "Specified requestId not found (pId=" << pId << ", uuid=" << uuidString << ", requestId=" << requestId << ")";
+					restCxt.setError(WEBAPI_REDO_REQUEST_ID_IS_NOT_FOUND, oss.str().c_str());
+					return false;
+				}
+				else {
+					return true;
+				}
+			}
+		}
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
+		util::NormalOStringStream oss;
+		oss << "Internal error orrcured  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
+		restCxt.setError(WEBAPI_REDO_INVALID_UUID, oss.str().c_str());
+		return false;
+	}
+}
+
+bool RedoManager::cancel(
+	const Event::Source& eventSource, util::StackAllocator& alloc, PartitionId pId, std::string& uuidString, RestContext& restCxt, RequestId requestId) {
+	try {
+		if (!checkRange(pId, restCxt)) {
+			return false;
+		}
+		if (!checkUuid(uuidString, restCxt, true)) {
+			return false;
+		}
+		sendRequest(eventSource, alloc, pId, requestId, TXN_SYNC_REDO_REMOVE);
+		return true;
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
+		util::NormalOStringStream oss;
+		oss << "Internal error orrcured  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
+		restCxt.setError(WEBAPI_REDO_INVALID_REQUEST_ID, oss.str().c_str());
+		return false;
+	}
+}
+
+RedoContext* RedoManager::get(PartitionId pId, RequestId requestId) {
+	try {
+		ContextMap& cxtMap = contextMapList_[pId];
+		util::LockGuard<util::Mutex> guard(contextInfoList_[pId].lock_);
+		ContextMap::iterator it = cxtMap.find(requestId);
+		if (it != cxtMap.end()) {
+			return (*it).second;
+		}
+		return NULL;
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+bool RedoManager::remove(PartitionId pId,  RequestId requestId) {
+	ContextMap& cxtMap = contextMapList_[pId];
+	util::LockGuard<util::Mutex> guard(contextInfoList_[pId].lock_);
+	if (requestId != UNDEF_SYNC_REQUEST_ID) {
+		ContextMap::iterator it = cxtMap.find(requestId);
+		if (it != cxtMap.end()) {
+			ALLOC_VAR_SIZE_DELETE(varAlloc_, it->second);
+			cxtMap.erase(it);
+			return true;
+		}
+		return false;
+	}
+	else {
+		for (const auto& elem : cxtMap) {
+			ALLOC_VAR_SIZE_DELETE(varAlloc_, elem.second);
+		}
+		cxtMap.clear();
+		return true;
+	}
+}
+
+int64_t RedoManager::getContextNum(PartitionId pId) {
+	util::LockGuard<util::Mutex> guard(contextInfoList_[pId].lock_);
+	return contextMapList_[pId].size();
+}
+
+int64_t RedoManager::getTotalContextNum() {
+	int64_t totalNum = 0;
+	for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
+		totalNum += getContextNum(pId);
+	}
+	return totalNum;
+}
+
+
+RequestId RedoManager::reserveId(PartitionId pId) {
+	return contextInfoList_[pId].counter_++;
+}
+
+bool RedoManager::checkRange(PartitionId pId, RestContext& cxt) {
+	if (pId >= partitionNum_) {
+		util::NormalOStringStream oss;
+		oss << "PartitionId=" << pId << " is out of range";
+		cxt.setError(WEBAPI_REDO_INVALID_PARTITION_ID, oss.str().c_str());
+		return false;
+	}
+	return true;
+}
+
+bool RedoManager::checkStandby(RestContext& cxt) {
+	if (!clsMgr_->getStandbyInfo().isStandby()) {
+		util::NormalOStringStream oss;
+		oss << "Redo log operation can execute only standby mode" << std::endl;
+		cxt.setError(WEBAPI_REDO_NOT_STANDBY_MODE, oss.str().c_str());
+		return false;
+	}
+	return true;
+}
+
+bool RedoManager::checkUuid(std::string& uuidString, RestContext& cxt, bool check) {
+	if (check && uuidString.empty()) {
+		util::NormalOStringStream oss;
+		oss << "Uuid must be specified (current=" << uuidString_ << ")";
+		cxt.setError(WEBAPI_REDO_INVALID_UUID, oss.str().c_str());
+		return false;
+	}
+	if (!uuidString.empty() && uuidString != uuidString_) {
+		util::NormalOStringStream oss;
+		oss << "Uuid is not match (specified=" << uuidString << ", expected=" << uuidString_ << ")";
+		cxt.setError(WEBAPI_REDO_INVALID_UUID, oss.str().c_str());
+		return false;
+	}
+	return true;
+}
+
+bool RedoManager::checkExecutable(PartitionId pId, RestContext& cxt) {
+	try {
+		syncSvc_->getManager()->checkActiveStatus();
+	}
+	catch (std::exception& e) {
+		util::NormalOStringStream oss;
+		oss << "Invalid cluster status (expected=MASTER or FOLLOWER, actual=" << pt_->dumpCurrentClusterStatus() << ")";
+		cxt.setError(WEBAPI_REDO_INVALID_CLUSTER_STATUS, oss.str().c_str());
+		return false;
+	}
+	if (!pt_->isOwner(pId)) {
+		util::NormalOStringStream oss;
+		oss << "Invalid partition role (expected=OWNER, actual=" << pt_->dumpPartitionRoleStatus(pt_->getPartitionRoleStatus(pId)) << ")";
+		cxt.setError(WEBAPI_REDO_NOT_OWNER, oss.str().c_str());
+		return false;
+	}
+	if (pt_->getPartitionStatus(pId) != PartitionTable::PT_ON) {
+		util::NormalOStringStream oss;
+		oss << "Invalid partition status (expected=ON, actual=OFF or SYNC)";
+		cxt.setError(WEBAPI_REDO_NOT_OWNER, oss.str().c_str());
+		return false;
+	}
+	return true;
+	
+}
+
+void RedoManager::sendRequest(
+	const Event::Source& eventSource, util::StackAllocator& alloc, PartitionId pId, RequestId requestId, EventType eventType) {
+	try {
+		SyncRedoRequestInfo syncRequestInfo(alloc);
+		syncRequestInfo.requestId_ = requestId;
+
+		Event requestEvent(eventSource, eventType, pId);
+		EventByteOutStream out = requestEvent.getOutStream();
+		syncSvc_->encode(requestEvent, syncRequestInfo, out);
+		txnSvc_->getEE()->add(requestEvent);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+
+
+RedoContext::RedoContext(GlobalVariableSizeAllocator& varAlloc, std::string& logFilePath, std::string& logFileName, LogSequentialNumber startLsn, LogSequentialNumber endLsn,
+	PartitionId pId, RequestId requestId, std::string& uuid, bool forceApply) : varAlloc_(varAlloc),
+	logFileDir_(logFilePath), logFileName_(logFileName), readOffset_(0), currentLsn_(UNDEF_LSN), 
+	orgStartLsn_(startLsn), orgEndLsn_(endLsn), startLsn_(UNDEF_LSN), endLsn_(UNDEF_LSN), prevReadLsn_(UNDEF_LSN),
+	status_(RedoStatus::Status::WAIT), errorCode_(0), partitionId_(pId), uuid_(uuid), requestId_(requestId),
+	start_(0), end_(0), checkAckCount_(0), ackCount_(0), sequenceNo_(0), isContinue_(false), isOwner_(false),
+	senderNodeId_(0), logMgrStats_(NULL), readfileSize_(-1), skipReadLog_(!forceApply), executionStatusValue_(ExecutionStatus::INIT), 
+	backupErrorList_(varAlloc_), backupErrorMap_(varAlloc_), counter_(0), retryCount_(0) {
+	start_ = util::DateTime::now(false).getUnixTime();
+	startTime_ = CommonUtility::getTimeStr(start_);
+	util::FileSystem::createPath(logFilePath.c_str(), logFileName.c_str(), logFilePathName_);
+}
+
+void RedoContext::begin() {
+	status_ = RedoStatus::RUNNING;
+}
+
+void RedoContext::end() {
+	end_ = util::DateTime::now(false).getUnixTime();
+	endTime_ = CommonUtility::getTimeStr(end_);
+}
+
+void RedoContext::setException(std::exception& e, const char* str) {
+	try {
+		end();
+		std::string message;
+		if (str) {
+			message = str;
+		}
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, message);
+		status_ = RedoStatus::FAIL;
+		executionStatus_ = getExecutionStatus();
+		const util::Exception checkException = GS_EXCEPTION_CONVERT(e, message);
+		errorCode_ = checkException.getErrorCode();
+		const char* errorStr = checkException.getNamedErrorCode().getName();
+		if (errorStr) {
+			errorName_ = checkException.getNamedErrorCode().getName();
+		}
+	}
+	catch (std::exception& e2) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e2, "");
+	}
+}
+
+bool RedoContext::checkLsn() {
+	GS_TRACE_INFO(REDO_MANAGER, GS_TRACE_SYNC_REDO_OPERATION,
+		"Redo complete (reqeustId=" << requestId_ << ", startLsn = " << startLsn_ << ", endLsn = " << endLsn_ << ", elapsedMills=" << watch_.elapsedMillis() << ")");
+	return true;
+}
+
+const char8_t* RedoManager::RedoStatus::Coder::operator()(Status status, const char8_t* name) const {
+	UNUSED_VARIABLE(name);
+	return getStatusName(status);
+}
+
+const char8_t* RedoManager::RedoStatus::Coder::getStatusName(Status status)  {
+	switch (status) {
+	case RedoStatus::WAIT: return "WAIT";
+	case RedoStatus::RUNNING: return "RUNNING";
+	case RedoStatus::FINISH: return "FINISH";
+	case RedoStatus::WARNING: return "WARNING";
+	case RedoStatus::FAIL: return "FAIL";
+	default: return "UNDEF";
+	}
+}
+
+SyncRedoRequestInfo::SyncRedoRequestInfo(util::StackAllocator& alloc) :
+	requestId_(RedoManager::UNDEF_SYNC_REQUEST_ID), sequenceNo_(0), startLsn_(UNDEF_LSN), endLsn_(UNDEF_LSN), errorCode_(0), binaryLogRecordsSize_(0), binaryLogRecords_(alloc) {}
+
+void SyncRedoRequestInfo::encode(EventByteOutStream& out) {
+	out << requestId_;
+	out << sequenceNo_;
+	out << startLsn_;
+	out << endLsn_;
+	out << binaryLogRecordsSize_;
+	out << errorCode_;
+	if (errorCode_ != 0) {
+		StatementHandler::encodeStringData(out, errorName_);
+	}
+	if (binaryLogRecordsSize_ > 0) {
+		StatementHandler::encodeBinaryData(out, binaryLogRecords_.data(), binaryLogRecords_.size());
+	}
+}
+
+void SyncRedoRequestInfo::decode(EventByteInStream& in, const char8_t* data) {
+	UNUSED_VARIABLE(data);
+
+	in >> requestId_;
+	in >> sequenceNo_;
+	in >> startLsn_;
+	in >> endLsn_;
+	in >> binaryLogRecordsSize_;
+	in >> errorCode_;
+	if (errorCode_ > 0) {
+		StatementHandler::decodeStringData(in, errorName_);
+	}
+	if (binaryLogRecordsSize_ > 0) {
+		StatementHandler::decodeBinaryData(in, binaryLogRecords_, true);
+	}
+}
+
+void SyncRedoRequestInfo::initLog() {
+	binaryLogRecordsSize_ = 0;
+	binaryLogRecords_.clear();
+}
+
+std::string SyncRedoRequestInfo::dump() {
+	util::NormalOStringStream oss;
+	oss << "Request (requestId=" << requestId_ << ", sequenceNo=" << sequenceNo_ << ")";
+	return oss.str();
+}
+
+#define TRACE_REDO_EXCEPTION(errorCode, message, cxt)       \
+	try {                                                       \
+		GS_THROW_USER_ERROR(errorCode, message);                \
+	}                                                           \
+	catch (std::exception & e) {                                \
+		cxt.setException(e); \
+	}
+
+#define TRACE_REDO_EXCEPTION_BACKUP(errorCode, message)       \
+	try {                                                       \
+		GS_THROW_USER_ERROR(errorCode, message);                \
+	}                                                           \
+	catch (std::exception & e) {                                \
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, ""); \
+	}
+
+
+void RedoLogHandler::operator()(EventContext& ec, Event& ev) {
+
+	PartitionId pId = ev.getPartitionId();
+	EventType eventType = ev.getType();
+	NodeId senderNodeId = ClusterService::resolveSenderND(ev);
+	util::StackAllocator& alloc = ec.getAllocator();
+	SyncRedoRequestInfo syncRedoRequestInfo(alloc);
+	RedoManager& redoMgr = syncSvc_->getRedoManager();
+
+	try {
+		EVENT_START(ec, ev, txnMgr_, UNDEF_DBID, false);
+
+		util::StackAllocator::Scope scope(alloc);
+		EventByteInStream in = ev.getInStream();
+		Partition& partition = partitionList_->partition(pId);
+		util::LockGuard<util::Mutex> guard(partition.mutex());
+		WATCHER_START;
+		try {
+			syncSvc_->decode(alloc, ev, syncRedoRequestInfo, in);
+		}
+		catch (std::exception& e) {
+			GS_RETHROW_USER_ERROR(e, "Redo decode failed");
+		}
+		switch (eventType) {
+		case TXN_SYNC_REDO_LOG: {
+			RedoContext* cxt = redoMgr.get(pId, syncRedoRequestInfo.requestId_);
+			if (cxt == NULL) {
+				return;
+			}
+			cxt->senderNodeId_ = senderNodeId;
+			switch (cxt->status_) {
+			case RedoManager::RedoStatus::WAIT: {
+				if (!prepareExecution(ec, *cxt, syncRedoRequestInfo)) {
+					return;
+				}
+				break;
+			}
+			case RedoManager::RedoStatus::RUNNING: {
+				if (!checkAck(*cxt, syncRedoRequestInfo)) {
+					return;
+				}
+				break;
+			}
+			default:
+				break;
+			}
+			if (!checkStandby(*cxt)) {
+				return;
+			}
+			if (!checkExecutable(*cxt)) {
+				return;
+			}
+			if (!readLogFile(ec, *cxt, syncRedoRequestInfo)) {
+				return;
+			}
+			if (!redoLog(ec, *cxt, syncRedoRequestInfo)) {
+				return;
+			}
+			if (!executeReplication(ec, *cxt, syncRedoRequestInfo)) {
+				return;
+			}
+			if (!postExecution(ec, *cxt, syncRedoRequestInfo)) {
+				return;
+			}
+			break;
+		}
+		case TXN_SYNC_REDO_LOG_REPLICATION: {
+			std::string uuid;
+			RedoContext cxt(redoMgr.getAllocator(), pId, redoMgr.getUuid(), senderNodeId);
+			do {
+				if (!checkStandby(cxt)) {
+					break;
+				}
+				if (!checkExecutable(cxt)) {
+					break;
+				}
+				if (!executeReplicationAck(ec, cxt, syncRedoRequestInfo)) {
+					break;
+				}
+				if (redoLog(ec, cxt, syncRedoRequestInfo)) {
+					break;
+				}
+			} while (false);
+			checkBackupError(ec, cxt, syncRedoRequestInfo);
+			break;
+		}
+		case TXN_SYNC_REDO_CHECK: {
+			RedoContext* cxt = redoMgr.get(pId, syncRedoRequestInfo.requestId_);
+			if (cxt != NULL) {
+				int32_t waitTime = 0;
+				switch (cxt->status_) {
+				case RedoManager::RedoStatus::RUNNING: {
+					if (!checkReplicationTimeout(*cxt)) {
+						return;
+					}
+					waitTime = syncMgr_->getConfig().getLogReplicationTimeoutInterval();
+					break;
+				}
+				case RedoManager::RedoStatus::FINISH: {
+					break;
+				}
+				case RedoManager::RedoStatus::FAIL: {
+					if (checkDisplayErrorStatus(ec, *cxt)) {
+						return;
+					}
+					waitTime = syncMgr_->getConfig().getReplicationCheckInterval();
+					break;
+				}
+				default:
+					break;
+				}
+				sendSyncRequest(ec, *txnSvc_->getEE(), TXN_SYNC_REDO_CHECK,
+					cxt->partitionId_, syncRedoRequestInfo, 0, waitTime);
+			}
+			break;
+		}
+		case TXN_SYNC_REDO_REMOVE: {
+			RedoContext* cxt = redoMgr.get(pId, syncRedoRequestInfo.requestId_);
+			if (cxt != NULL) {
+				redoMgr.remove(pId, cxt->requestId_);
+			}
+			break;
+		}
+		case TXN_SYNC_REDO_ERROR: {
+			RedoContext* cxt = redoMgr.get(pId, syncRedoRequestInfo.requestId_);
+			if (cxt != NULL) {
+				checkBackupError(ec, *cxt, syncRedoRequestInfo);
+			}
+			break;
+		}
+		}
+	}
+	catch (std::exception& e) {
+		util::NormalOStringStream oss;
+		oss << "Redo (pId=" << pId << ", event=" << EventTypeUtility::getEventTypeName(ev.getType()) << ") ";
+		if (syncRedoRequestInfo.requestId_ != RedoManager::UNDEF_SYNC_REQUEST_ID) {
+			RedoContext* cxt = redoMgr.get(pId, syncRedoRequestInfo.requestId_);
+			if (cxt) {
+				cxt->dump(oss);
+				cxt->setException(e, oss.str().c_str());
+			}
+		}
+		else {
+			UTIL_TRACE_EXCEPTION(SYNC_SERVICE, e, oss.str());
+		}
+	}
+}
+
+bool RedoLogHandler::isSemiSyncReplication() {
+	return false;
+}
+
+bool RedoLogHandler::checkStandby(RedoContext& cxt) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::CHECK_STANDBY;
+	if (!clsMgr_->getStandbyInfo().isStandby()) {
+		TRACE_REDO_EXCEPTION(GS_ERROR_SYNC_REDO_NOT_STANDBY_MODE, "Not standby mode", cxt);
+		return false;
+	}
+	return true;
+}
+
+bool RedoLogHandler::prepareExecution(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::PREPARE_EXECUTION;
+	pt_->getPartitionRole(cxt.partitionId_, cxt.role_);
+	cxt.isOwner_ = cxt.role_.isOwner();
+	syncRedoRequestInfo.startLsn_ = pt_->getLSN(cxt.partitionId_);
+	if (cxt.isOwner_ && cxt.status_ == RedoManager::RedoStatus::WAIT) {
+		cxt.begin();
+		cxt.ackCount_ = cxt.role_.getBackupSize();
+		sendSyncRequest(ec, *txnSvc_->getEE(), TXN_SYNC_REDO_CHECK,
+			cxt.partitionId_, syncRedoRequestInfo, 0, syncMgr_->getConfig().getLogReplicationTimeoutInterval());
+	}
+	return true;
+}
+
+bool RedoLogHandler::checkAck(RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	if (!cxt.isOwner_) {
+		return false;
+	}
+	if (!isSemiSyncReplication()) {
+		return true;
+	}
+	if (cxt.senderNodeId_ == 0) {
+		return true;
+	}
+	if (cxt.checkAckCount_ > 0) {
+		return false;
+	}
+	if (cxt.sequenceNo_ != syncRedoRequestInfo.sequenceNo_) {
+		return false;
+	}
+	cxt.ackCount_++;
+	if (cxt.checkAckCount_ != cxt.ackCount_) {
+		return false;
+	}
+	cxt.sequenceNo_++;
+	return true;
+}
+
+bool RedoLogHandler::checkExecutable(RedoContext& cxt) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::CHECK_CLUSTER;
+	try {
+		syncMgr_->checkActiveStatus();
+	}
+	catch (std::exception& e) {
+		TRACE_REDO_EXCEPTION(GS_ERROR_SYNC_REDO_DENY_BY_CLUSTER_ROLE,
+			"Invalid cluster (" << pt_->dumpCurrentClusterStatus() << ")", cxt);
+		return false;
+	}
+
+	PartitionId pId = cxt.partitionId_;
+	PartitionRole currentRole;
+	pt_->getPartitionRole(pId, currentRole);
+	if (cxt.isOwner_) {
+		if (!(pt_->isOwner(pId) && (pt_->getPartitionStatus(pId) == PartitionTable::PT_ON))) {
+			TRACE_REDO_EXCEPTION(GS_ERROR_SYNC_REDO_DENY_BY_PARTITION_ROLE,
+				"Deny owner partition role (role=" << pt_->dumpPartitionRoleStatus(pt_->getPartitionRoleStatus(pId))
+				<< ", status=" << pt_->dumpPartitionStatus(pt_->getPartitionStatus(pId)) << ")", cxt);
+			return false;
+		}
+	}
+	else {
+		if (pt_->isOwner(pId)) {
+			TRACE_REDO_EXCEPTION(GS_ERROR_SYNC_REDO_DENY_BY_PARTITION_ROLE,
+				"Deny backup partition role (role is owner)", cxt);
+			return false;
+		}
+	}
+	return true;
+}	
+
+bool RedoLogHandler::readLogFile(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::READ_LOG;
+	if (!cxt.isOwner_) {
+		return false;
+	}
+	cxt.isContinue_ = true;
+	Partition& partition = partitionList_->partition(cxt.partitionId_);
+	util::StackAllocator& alloc = ec.getAllocator();
+	util::XArray<uint8_t>& logList = syncRedoRequestInfo.binaryLogRecords_;
+	syncRedoRequestInfo.initLog();
+	try {
+		if (!util::FileSystem::exists(cxt.logFilePathName_.c_str())) {
+			GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_INVALID_READ_LOG_FILE_PATH,
+				"Specified log file is not found (LogFilePath=" << cxt.logFilePathName_ << ")");
+		}
+		std::unique_ptr<Log> log;
+		WALBuffer xWALBuffer(cxt.partitionId_, cxt.logMgrStats_);
+		WALBuffer cpWALBuffer(cxt.partitionId_, cxt.logMgrStats_);
+
+		std::unique_ptr<MutexLocker> locker(UTIL_NEW MutexLocker());
+		LogManager<MutexLocker> logManager(partition.getConfig(), std::move(locker), alloc,
+			xWALBuffer, cpWALBuffer,
+			cxt.logFilePathName_.c_str(), cxt.partitionId_, cxt.logMgrStats_);
+
+		LogIterator<MutexLocker> logIt(&logManager, 0, cxt.readOffset_, cxt.readfileSize_);
+		logIt.add(cxt.logFilePathName_);
+		int32_t limitSize = syncMgr_->getConfig().getMaxRedoMessageSize();
+		LogSequentialNumber currentLsn = UNDEF_LSN;
+		LogSequentialNumber &prevLsn = cxt.prevReadLsn_;
+		LogSequentialNumber actualLsn = pt_->getLSN(cxt.partitionId_);
+		while (logList.size() <= static_cast<size_t>(limitSize)) {
+			log = logIt.next(false);
+			if (log == NULL) {
+				if (logIt.getFileSize() == -1) {
+					GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_INVALID_READ_LOG_FILE_PATH,
+						"Specified log file is not found (LogFilePath=" << cxt.logFilePathName_ << ")");
+				}
+				else if (logIt.getFileSize() == 0) {
+					GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_INVALID_READ_LOG,
+						"Specified log file is empty (LogFilePath=" << cxt.logFilePathName_ << ")");
+				}
+				cxt.isContinue_ = false;
+				syncRedoRequestInfo.endLsn_ = currentLsn;
+				syncRedoRequestInfo.binaryLogRecordsSize_ = logList.size();
+				break;
+			}
+			if (!log->checkSum()) {
+				GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_INVALID_READ_LOG,
+					"Log check sum error(LogFilePath=" << cxt.logFilePathName_ << ")");
+			}
+			if (!(log->getType() == OBJLog || log->getType() == TXNLog)) {
+				continue;
+			}
+			currentLsn = log->getLsn();
+			if (prevLsn == UNDEF_LSN) {
+				if (currentLsn > actualLsn + 1) {
+					if (cxt.watch_.elapsedMillis() >= static_cast<uint32_t>(syncMgr_->getConfig().getRetryTimeoutInterval())) {
+						GS_THROW_USER_ERROR(
+							GS_ERROR_SYNC_REDO_READ_LOG_RETRY_TIMEOUT, "Retry timeout (expect lsn=" << currentLsn << ", actual lsn=" << actualLsn << ")");
+					}
+					else {
+						sendSyncRequest(ec, *txnSvc_->getEE(), TXN_SYNC_REDO_LOG,
+							cxt.partitionId_, syncRedoRequestInfo, 0, static_cast<uint32_t>(syncMgr_->getConfig().getRetryCheckInterval()));
+						cxt.retryCount_++;
+						return false;
+					}
+				}
+				syncRedoRequestInfo.startLsn_ = currentLsn;
+			}
+			else {
+				if (currentLsn != prevLsn + 1) {
+					GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_INVALID_READ_LOG,
+						"Invalid log lsn gap (currentLsn=" << currentLsn << ", prevLsn=" << prevLsn << ")");
+				}
+			}
+			prevLsn = currentLsn;
+			if ((currentLsn != actualLsn + 1) && cxt.skipReadLog_) {
+				continue;
+			}
+			actualLsn = currentLsn;
+			log->encode(alloc, logList);
+		}
+		if (logList.size() == 0) {
+			complete(cxt);
+			return false;
+		}
+		cxt.readOffset_ = logIt.getOffset();
+		cxt.readfileSize_ = logIt.getFileSize();
+		syncRedoRequestInfo.endLsn_ = currentLsn;
+		syncRedoRequestInfo.binaryLogRecordsSize_ = logList.size();
+		return true;
+	}
+	catch (std::exception& e) {
+		syncRedoRequestInfo.initLog();
+		cxt.setException(e);
+		return false;
+	}
+}
+
+bool RedoLogHandler::redoLog(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::REDO;
+	util::Stopwatch logWatch;
+	util::StackAllocator& alloc = ec.getAllocator();
+	Partition& partition = partitionList_->partition(cxt.partitionId_);
+	size_t logOffset = 0;
+	LogSequentialNumber startLsn = pt_->getLSN(cxt.partitionId_);
+	LogSequentialNumber endLsn = startLsn;
+	try {
+		syncMgr_->checkRestored(cxt.partitionId_);
+		partition.redoLogList(&alloc, REDO_MODE_ARCHIVE,
+			ec.getHandlerStartTime(), ec.getHandlerStartMonotonicTime(),
+			reinterpret_cast<uint8_t*>(syncRedoRequestInfo.binaryLogRecords_.data()),
+			syncRedoRequestInfo.binaryLogRecords_.size(),
+			logOffset, &logWatch, UINT32_MAX);
+		endLsn = pt_->getLSN(cxt.partitionId_);
+		if (startLsn != endLsn) {
+			if (cxt.startLsn_ == UNDEF_LSN) {
+				cxt.startLsn_ = startLsn;
+			}
+			cxt.endLsn_ = endLsn;
+		}
+		return true;
+	}
+	catch (std::exception& e) {
+		syncRedoRequestInfo.initLog();
+		cxt.setException(e);
+		LogSequentialNumber endLsn = pt_->getLSN(cxt.partitionId_);
+		if (startLsn != endLsn) {
+			if (cxt.startLsn_ == UNDEF_LSN) {
+				cxt.startLsn_ = startLsn;
+			}
+			cxt.endLsn_ = endLsn;
+		}
+		if (pt_->checkClearRole(cxt.partitionId_)) {
+			clsSvc_->requestChangePartitionStatus(ec,
+				alloc, cxt.partitionId_, PartitionTable::PT_OFF, PT_CHANGE_NORMAL);
+			GS_TRACE_ERROR(REDO_MANAGER, GS_TRACE_SYNC_REDO_OPERATION,
+				"Role is changed to none (reason=Failed to redo)");
+		}
+		return false;
+	}
+}
+
+bool RedoLogHandler::executeReplication(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::REPLICATION;
+	if (!cxt.isOwner_) {
+		return false;
+	}
+	int32_t backupSize = cxt.role_.getBackupSize();
+	if (backupSize > 0) {
+		cxt.watch_.start();
+		cxt.ackCount_ = cxt.checkAckCount_;
+		Event requestEvent(ec, TXN_SYNC_REDO_LOG_REPLICATION, cxt.partitionId_);
+		EventByteOutStream out = requestEvent.getOutStream();
+		syncSvc_->encode(requestEvent, syncRedoRequestInfo, out);
+		NodeIdList& backups = cxt.role_.getBackups();
+		for (size_t pos = 0; pos < backups.size(); pos++) {
+			sendEvent(ec, *txnEE_, backups[pos], requestEvent);
+		}
+	}
+	return true;
+}
+
+bool RedoLogHandler::postExecution(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	cxt.executionStatusValue_ = RedoContext::ExecutionStatus::POST_EXECUTION;
+	cxt.counter_++;
+	if (!cxt.isOwner_) {
+		return false;
+	}
+	if (!cxt.isContinue_) {
+		if (cxt.checkLsn()) {
+			complete(cxt);
+		}
+		return true;
+	}
+	sendSyncRequest(ec, *txnSvc_->getEE(), TXN_SYNC_REDO_LOG,
+		cxt.partitionId_, syncRedoRequestInfo, 0, 0);
+	return false;
+}
+
+bool RedoLogHandler::executeReplicationAck(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	if (cxt.isOwner_) {
+		return false;
+	}
+	if (!isSemiSyncReplication()) {
+		return true; 
+	}
+	syncRedoRequestInfo.binaryLogRecordsSize_ = 0;
+	sendSyncRequest(ec, *txnSvc_->getEE(), TXN_SYNC_REDO_LOG,
+		cxt.partitionId_, syncRedoRequestInfo, cxt.senderNodeId_, 0);
+	return true;
+}
+
+bool RedoLogHandler::checkReplicationTimeout(RedoContext& cxt) {
+	if (!cxt.isOwner_) {
+		return false;
+	}
+	return true;
+}
+
+bool RedoLogHandler::checkDisplayErrorStatus(EventContext& ec, RedoContext& cxt) {
+	UNUSED_VARIABLE(ec);
+
+	if (!cxt.isOwner_) {
+		return false;
+	}
+	if (cxt.status_ != RedoManager::RedoStatus::FAIL && cxt.status_ != RedoManager::RedoStatus::WARNING) {
+		return true;
+	}
+	int64_t current = util::DateTime::now(false).getUnixTime();
+	if (cxt.end_ + syncMgr_->getConfig().getLogErrorKeepInterval() <= current) {
+		syncSvc_->getRedoManager().remove(cxt.partitionId_, cxt.requestId_);
+		return true;
+	}
+	return false;
+}
+
+void RedoLogHandler::complete(RedoContext& cxt) {
+	try {
+		if (cxt.backupErrorMap_.size() > 0) {
+			try {
+				GS_THROW_USER_ERROR(GS_ERROR_SYNC_REDO_BACKUP_REDO_FAILED, "");
+			}
+			catch (std::exception& e) {
+				cxt.setException(e);
+			}
+		}
+		else {
+			syncSvc_->getRedoManager().remove(cxt.partitionId_, cxt.requestId_);
+		}
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
+	}
+}
+
+void RedoLogHandler::checkBackupError(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo) {
+	try {
+		if (cxt.isOwner_) {
+			std::string nodeAddress(pt_->dumpNodeAddress(cxt.senderNodeId_));
+			cxt.appendBackupError(cxt.senderNodeId_, nodeAddress,
+				syncRedoRequestInfo.errorCode_, syncRedoRequestInfo.errorName_, syncRedoRequestInfo.endLsn_);
+		}
+		else {
+			if (cxt.errorCode_ > 0 && !cxt.errorName_.empty()) {
+				syncRedoRequestInfo.endLsn_ = pt_->getLSN(cxt.partitionId_);
+				syncRedoRequestInfo.initLog();
+				syncRedoRequestInfo.errorCode_ = cxt.errorCode_;
+				syncRedoRequestInfo.errorName_ = cxt.errorName_;
+				sendSyncRequest(ec, *txnSvc_->getEE(), TXN_SYNC_REDO_ERROR,
+					cxt.partitionId_, syncRedoRequestInfo, cxt.senderNodeId_, 0);
+			}
+		}
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
+	}
+}
+
+RedoContext::~RedoContext() {
+	for (const auto& elem : backupErrorList_) {
+		ALLOC_VAR_SIZE_DELETE(varAlloc_, elem);
+	}
+}
+
+void RedoContext::appendBackupError(NodeId nodeId, std::string& node, int32_t errorCode, std::string& errorName, LogSequentialNumber lsn) {
+	try {
+		std::map<NodeId, ErrorInfo*>::iterator it = backupErrorMap_.find(nodeId);
+		if (it != backupErrorMap_.end()) {
+			ErrorInfo* errorInfo = (*it).second;
+			if (errorInfo) {
+				errorInfo->update(errorCode, errorName, lsn);
+			}
+		}
+		else {
+			backupErrorList_.push_back(ALLOC_VAR_SIZE_NEW(varAlloc_) ErrorInfo(varAlloc_, node, errorCode, errorName, lsn));
+			backupErrorMap_.insert(std::make_pair(nodeId, backupErrorList_.back()));
+		}
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
 	}
 }

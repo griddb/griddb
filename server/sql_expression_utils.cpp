@@ -19,6 +19,7 @@
 #include "sql_expression_base.h"
 #include "query_function.h"
 
+
 SQLExprs::ExprRewriter::ExprRewriter(util::StackAllocator &alloc) :
 		alloc_(alloc),
 		localEntry_(alloc),
@@ -4138,7 +4139,9 @@ SQLExprs::IndexCondition::IndexCondition() :
 		compositeAndOrdinal_(0),
 		bulkOrCount_(1),
 		bulkOrOrdinal_(0),
-		specId_(0) {
+		specId_(0),
+		firstHitOnly_(false),
+		descending_(false) {
 }
 
 SQLExprs::IndexCondition SQLExprs::IndexCondition::createNull() {
@@ -4391,9 +4394,29 @@ size_t SQLExprs::IndexSelector::getIndexColumnList(
 }
 
 void SQLExprs::IndexSelector::select(const Expression &expr) {
+	selectDetail(NULL, &expr);
+}
+
+void SQLExprs::IndexSelector::selectDetail(
+		const Expression *proj, const Expression *pred) {
 	condList_.clear();
 	placeholderAffected_ = false;
-	selectSub(expr, false, false);
+	do {
+		if (proj != NULL) {
+			AggregationMatcher matcher(stdAlloc_, *this, localValuesHolder_);
+			if (matcher.match(*proj, pred, condList_)) {
+				break;
+			}
+		}
+
+		if (pred != NULL) {
+			selectSub(*pred, false, false);
+			break;
+		}
+
+		condList_.push_back(Condition());
+	}
+	while (false);
 
 	for (ConditionList::iterator it = condList_.begin();
 			it != condList_.end(); ++it) {
@@ -4501,8 +4524,10 @@ bool SQLExprs::IndexSelector::bindCondition(
 		}
 
 		const TupleValue &value = (i == 0 ? value1 : value2);
+		const bool rangePreferred = false;
 		if (!applyValue(
-				subCond, &value, Condition::EMPTY_IN_COLUMN, valuesHolder)) {
+				subCond, &value, Condition::EMPTY_IN_COLUMN, valuesHolder,
+				rangePreferred)) {
 			cond = Condition();
 			return false;
 		}
@@ -4603,17 +4628,13 @@ void SQLExprs::IndexSelector::selectSub(
 	const ExprType exprType = expr.getCode().getType();
 
 	if (exprType == SQLType::EXPR_CONSTANT) {
-		const TupleValue *value = findConst(expr);
-		if (SQLValues::ValueUtils::isNull(*value)) {
-			condList_.push_back(Condition::createNull());
-		}
-		else {
-			bool boolValue = SQLValues::ValueUtils::isTrue(*value);
-			if (negative) {
-				boolValue = !boolValue;
-			}
-			condList_.push_back(Condition::createBool(boolValue));
-		}
+		const TupleValue &value = expr.getCode().getValue();
+
+		bool nullFound;
+		const bool boolValue = isTrueValue(value, negative, nullFound);
+
+		condList_.push_back((nullFound ?
+				Condition::createNull() : Condition::createBool(boolValue)));
 	}
 	else if (exprType ==
 			ExprTypeUtils::getLogicalOp(SQLType::EXPR_AND, negative)) {
@@ -4633,8 +4654,8 @@ void SQLExprs::IndexSelector::selectSub(
 		selectSub(expr.child(), !negative, inAndCond);
 	}
 	else {
-		condList_.push_back(
-				makeValueCondition(expr, negative, localValuesHolder_));
+		condList_.push_back(makeValueCondition(
+				expr, negative, placeholderAffected_, localValuesHolder_));
 
 		if (!inAndCond) {
 			Range range;
@@ -5306,8 +5327,9 @@ size_t SQLExprs::IndexSelector::getOrConditionCount(
 
 SQLExprs::IndexSelector::Condition
 SQLExprs::IndexSelector::makeValueCondition(
-		const Expression &expr, bool negative,
-		SQLValues::ValueSetHolder &valuesHolder) {
+		const Expression &expr, bool negative, bool &placeholderAffected,
+		SQLValues::ValueSetHolder &valuesHolder,
+		bool topColumnOnly, bool treeIndexExtended) const {
 	ExprType opType = expr.getCode().getType();
 
 	const ExprType negativeOpType = ExprTypeUtils::negateCompOp(opType);
@@ -5323,9 +5345,9 @@ SQLExprs::IndexSelector::makeValueCondition(
 	const Expression *valueExpr = &columnExpr->next();
 	uint32_t inColumn = Condition::EMPTY_IN_COLUMN;
 
-	placeholderAffected_ |= ExprRewriter::isConstWithPlaceholder(
+	placeholderAffected |= ExprRewriter::isConstWithPlaceholder(
 			*exprFactory_, *columnExpr).first;
-	placeholderAffected_ |= ExprRewriter::isConstWithPlaceholder(
+	placeholderAffected |= ExprRewriter::isConstWithPlaceholder(
 			*exprFactory_, *valueExpr).first;
 
 	const TupleValue *value = findConst(*valueExpr);
@@ -5345,13 +5367,16 @@ SQLExprs::IndexSelector::makeValueCondition(
 	}
 	cond.opType_ = opType;
 
-	if (!applyValue(cond, value, inColumn, valuesHolder)) {
+	const bool rangePreferred = treeIndexExtended;
+	if (!applyValue(cond, value, inColumn, valuesHolder, rangePreferred)) {
 		return Condition();
 	}
 
 	if (cond.opType_ != SQLType::EXPR_CONSTANT) {
 		IndexSpecId specId;
-		if (!getAvailableIndex(cond, false, NULL, &specId, NULL)) {
+		if (!getAvailableIndex(
+				cond, false, NULL, &specId, NULL, topColumnOnly,
+				treeIndexExtended)) {
 			return Condition();
 		}
 		cond.specId_ = specId;
@@ -5362,7 +5387,7 @@ SQLExprs::IndexSelector::makeValueCondition(
 
 bool SQLExprs::IndexSelector::applyValue(
 		Condition &cond, const TupleValue *value, uint32_t inColumn,
-		SQLValues::ValueSetHolder &valuesHolder) const {
+		SQLValues::ValueSetHolder &valuesHolder, bool rangePreferred) const {
 	if (value == NULL) {
 		assert(inColumn != Condition::EMPTY_IN_COLUMN);
 		cond.inColumnPair_.first = inColumn;
@@ -5391,16 +5416,16 @@ bool SQLExprs::IndexSelector::applyValue(
 
 		switch (columnType) {
 		case TupleTypes::TYPE_BYTE:
-			applyIntegralBounds<TupleTypes::TYPE_BYTE>(cond);
+			applyIntegralBounds<TupleTypes::TYPE_BYTE>(cond, rangePreferred);
 			break;
 		case TupleTypes::TYPE_SHORT:
-			applyIntegralBounds<TupleTypes::TYPE_SHORT>(cond);
+			applyIntegralBounds<TupleTypes::TYPE_SHORT>(cond, rangePreferred);
 			break;
 		case TupleTypes::TYPE_INTEGER:
-			applyIntegralBounds<TupleTypes::TYPE_INTEGER>(cond);
+			applyIntegralBounds<TupleTypes::TYPE_INTEGER>(cond, rangePreferred);
 			break;
 		case TupleTypes::TYPE_LONG:
-			applyIntegralBounds<TupleTypes::TYPE_LONG>(cond);
+			applyIntegralBounds<TupleTypes::TYPE_LONG>(cond, rangePreferred);
 			break;
 		case TupleTypes::TYPE_FLOAT:
 			applyFloatingBounds<TupleTypes::TYPE_FLOAT>(cond);
@@ -5409,7 +5434,7 @@ bool SQLExprs::IndexSelector::applyValue(
 			applyFloatingBounds<TupleTypes::TYPE_DOUBLE>(cond);
 			break;
 		case TupleTypes::TYPE_BOOL:
-			applyBoolBounds(cond);
+			applyBoolBounds(cond, rangePreferred);
 			break;
 		default:
 			if (SQLValues::TypeUtils::isTimestampFamily(columnType)) {
@@ -5447,43 +5472,51 @@ bool SQLExprs::IndexSelector::applyValue(
 		cond.inclusivePair_.first = true;
 	}
 
-	switch (opType) {
-	case SQLType::OP_LT:
-	case SQLType::OP_LE:
-	case SQLType::OP_GT:
-	case SQLType::OP_GE:
+	if (isRangeConditionType(opType)) {
 		cond.opType_ = SQLType::EXPR_BETWEEN;
-		break;
-	default:
-		break;
 	}
 
 	return true;
 }
 
-void SQLExprs::IndexSelector::applyBoolBounds(Condition &cond) {
+bool SQLExprs::IndexSelector::isRangeConditionType(ExprType type) {
+	switch (type) {
+	case SQLType::OP_LT:
+	case SQLType::OP_LE:
+	case SQLType::OP_GT:
+	case SQLType::OP_GE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+void SQLExprs::IndexSelector::applyBoolBounds(
+		Condition &cond, bool rangePreferred) {
 	const int64_t min = 0;
 	const int64_t max = 1;
 	int64_t value;
-	if (applyIntegralBounds(cond, min, max, value)) {
+	if (applyIntegralBounds(cond, min, max, rangePreferred, value)) {
 		cond.valuePair_.first = SQLValues::ValueUtils::toAnyByBool(!!value);
 	}
 }
 
 template<TupleColumnType T>
-void SQLExprs::IndexSelector::applyIntegralBounds(Condition &cond) {
+void SQLExprs::IndexSelector::applyIntegralBounds(
+		Condition &cond, bool rangePreferred) {
 	typedef typename SQLValues::TypeUtils::Traits<T>::ValueType ValueType;
 
 	const int64_t min = std::numeric_limits<ValueType>::min();
 	const int64_t max = std::numeric_limits<ValueType>::max();
 	int64_t value;
-	if (applyIntegralBounds(cond, min, max, value)) {
+	if (applyIntegralBounds(cond, min, max, rangePreferred, value)) {
 		cond.valuePair_.first = TupleValue(static_cast<ValueType>(value));
 	}
 }
 
 bool SQLExprs::IndexSelector::applyIntegralBounds(
-		Condition &cond, int64_t min, int64_t max, int64_t &value) {
+		Condition &cond, int64_t min, int64_t max, bool rangePreferred,
+		int64_t &value) {
 	const TupleValue &condValue = cond.valuePair_.first;
 
 	const bool strict = false;
@@ -5550,7 +5583,9 @@ bool SQLExprs::IndexSelector::applyIntegralBounds(
 			cond = Condition::createBool(false);
 			break;
 		case SQLType::OP_LE:
-			cond.opType_ = SQLType::OP_EQ;
+			if (!rangePreferred) {
+				cond.opType_ = SQLType::OP_EQ;
+			}
 			break;
 		case SQLType::OP_GE:
 			cond = Condition::createBool(true);
@@ -5568,7 +5603,9 @@ bool SQLExprs::IndexSelector::applyIntegralBounds(
 			cond = Condition::createBool(false);
 			break;
 		case SQLType::OP_GE:
-			cond.opType_ = SQLType::OP_EQ;
+			if (!rangePreferred) {
+				cond.opType_ = SQLType::OP_EQ;
+			}
 			break;
 		default:
 			break;
@@ -5841,7 +5878,8 @@ bool SQLExprs::IndexSelector::matchIndexColumn(
 
 bool SQLExprs::IndexSelector::getAvailableIndex(
 		const Condition &cond, bool withSpec, SQLType::IndexType *indexType,
-		IndexSpecId *specId, IndexMatchList *matchList) const {
+		IndexSpecId *specId, IndexMatchList *matchList,
+		bool topColumnOnly, bool treeIndexExtended) const {
 	assert(completed_);
 	assert((!withSpec) == (specId != NULL));
 
@@ -5868,7 +5906,9 @@ bool SQLExprs::IndexSelector::getAvailableIndex(
 		}
 
 		const IndexFlags flags = indexList_[cond.column_].get(forComposite ?
-				IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_ALL :
+				(topColumnOnly ?
+						IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_TOP :
+						IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_ALL) :
 				IndexFlagsEntry::FLAGS_TYPE_SINGLE);
 		if (flags == 0) {
 			continue;
@@ -5876,7 +5916,9 @@ bool SQLExprs::IndexSelector::getAvailableIndex(
 
 		bool foundLocal = false;
 		if (cond.opType_ == SQLType::EXPR_BETWEEN) {
-			if ((flags & (1 << SQLType::INDEX_TREE_RANGE)) != 0 &&
+			if (((flags & (1 << SQLType::INDEX_TREE_RANGE)) != 0 ||
+					(treeIndexExtended &&
+							(flags & (1 << SQLType::INDEX_TREE_EQ)) != 0)) &&
 					(cond.isBinded() || !bulkGrouping_)) {
 				foundType = SQLType::INDEX_TREE_RANGE;
 				foundLocal = true;
@@ -5984,6 +6026,22 @@ const TupleValue* SQLExprs::IndexSelector::findConst(
 	}
 
 	return &expr.getCode().getValue();
+}
+
+bool SQLExprs::IndexSelector::isTrueValue(
+		const TupleValue &value, bool negative, bool &nullFound) {
+	nullFound = false;
+
+	if (SQLValues::ValueUtils::isNull(value)) {
+		nullFound = true;
+		return false;
+	}
+
+	bool boolValue = SQLValues::ValueUtils::isTrue(value);
+	if (negative) {
+		boolValue = !boolValue;
+	}
+	return boolValue;
 }
 
 SQLExprs::IndexSpec SQLExprs::IndexSelector::createIndexSpec(
@@ -6303,7 +6361,7 @@ bool SQLExprs::IndexSelector::BulkRewriter::isBulkTarget(
 	for (size_t i = 0; i < size; i++) {
 		const Condition &cond = getCondition(condList, pos.get() + i);
 		if (cond.compositeAndCount_ > 1 || cond.opType_ != SQLType::OP_EQ ||
-				!cond.isBinded()) {
+				!cond.isBinded() || cond.firstHitOnly_ || cond.descending_) {
 			return false;
 		}
 	}
@@ -6407,6 +6465,179 @@ SQLExprs::IndexSelector::BulkConditionLess::BulkConditionLess(
 bool SQLExprs::IndexSelector::BulkConditionLess::operator()(
 		const BulkPosition &pos1, const BulkPosition &pos2) const {
 	return (BulkRewriter::compareBulkCondition(condList_, pos1, pos2) < 0);
+}
+
+
+SQLExprs::IndexSelector::AggregationMatcher::AggregationMatcher(
+		const util::StdAllocator<void, void> &alloc,
+		const IndexSelector &base,
+		SQLValues::ValueSetHolder &valuesHolder) :
+		matcherAlloc_(alloc),
+		base_(base),
+		valuesHolder_(valuesHolder) {
+}
+
+bool SQLExprs::IndexSelector::AggregationMatcher::match(
+		const Expression &proj, const Expression *pred,
+		IndexConditionList &condList) {
+	condList.clear();
+
+	AllocIndexConditionList localCondList(matcherAlloc_);
+	AggregationKeySet keySet(matcherAlloc_);
+
+	if (!matchProjection(proj, localCondList, keySet, true)) {
+		return false;
+	}
+
+	if (pred != NULL && !matchPredicate(*pred, localCondList, false)) {
+		return false;
+	}
+
+	condList.assign(localCondList.begin(), localCondList.end());
+	return true;
+}
+
+bool SQLExprs::IndexSelector::AggregationMatcher::matchProjection(
+		const Expression &expr, AllocIndexConditionList &condList,
+		AggregationKeySet &keySet, bool top) {
+	if (!top) {
+		const ExprType exprType = expr.getCode().getType();
+		if (ExprTypeUtils::isAggregation(exprType)) {
+			if (matchAggregationExpr(expr, condList, keySet)) {
+				return true;
+			}
+			return false;
+		}
+
+		if (exprType == SQLType::EXPR_CONSTANT) {
+			return true;
+		}
+		else if (exprType == SQLType::EXPR_COLUMN) {
+			return false;
+		}
+	}
+
+	for (Expression::Iterator it(expr); it.exists(); it.next()) {
+		if (!matchProjection(it.get(), condList, keySet, false)) {
+			return false;
+		}
+	}
+
+	if (top && condList.empty()) {
+		return false;
+	}
+
+	return true;
+}
+
+bool SQLExprs::IndexSelector::AggregationMatcher::matchPredicate(
+		const Expression &expr, AllocIndexConditionList &condList,
+		bool negative) {
+	const ExprCode &code = expr.getCode();
+	const ExprType exprType = code.getType();
+
+	if (exprType == SQLType::EXPR_CONSTANT) {
+		bool nullFound;
+		return isTrueValue(code.getValue(), negative, nullFound);
+	}
+	else if (exprType ==
+			ExprTypeUtils::getLogicalOp(SQLType::EXPR_AND, negative)) {
+		for (Expression::Iterator it(expr); it.exists(); it.next()) {
+			if (!matchPredicate(it.get(), condList, negative)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	else if (exprType == SQLType::OP_NOT) {
+		return matchPredicate(expr.child(), condList, !negative);
+	}
+	else {
+		return matchValueCondition(expr, condList, negative);
+	}
+}
+
+bool SQLExprs::IndexSelector::AggregationMatcher::matchAggregationExpr(
+		const Expression &expr, AllocIndexConditionList &condList,
+		AggregationKeySet &keySet) {
+	bool descending;
+	if (!matchAggregationType(expr, descending) || expr.getChildCount() != 1) {
+		return false;
+	}
+
+	Condition cond;
+	if (!base_.findColumn(expr.child(), cond.column_, true)) {
+		return false;
+	}
+	cond.opType_ = SQLType::EXPR_BETWEEN;
+
+	const bool topColumnOnly = true;
+	const bool treeIndexExtended = true;
+	IndexSpecId specId;
+	if (!base_.getAvailableIndex(
+			cond, false, NULL, &specId, NULL, topColumnOnly,
+			treeIndexExtended)) {
+		return false;
+	}
+
+	cond.firstHitOnly_ = true;
+	cond.descending_ = descending;
+	cond.specId_ = specId;
+
+	const bool inserted =
+			keySet.insert(AggregationKey(cond.column_, descending)).second;
+	if (inserted) {
+		condList.push_back(cond);
+	}
+	return true;
+}
+
+bool SQLExprs::IndexSelector::AggregationMatcher::matchAggregationType(
+		const Expression &expr, bool &descending) {
+	descending = false;
+
+	switch (expr.getCode().getType()) {
+	case SQLType::AGG_MIN:
+		break;
+	case SQLType::AGG_MAX:
+		descending = true;
+		break;
+	default:
+		return false;
+	}
+	return true;
+}
+
+bool SQLExprs::IndexSelector::AggregationMatcher::matchValueCondition(
+		const Expression &expr, AllocIndexConditionList &condList,
+		bool negative) {
+	bool placeholderAffected = false;
+	const bool topColumnOnly = true;
+	const bool treeIndexExtended = true;
+	const Condition cond = base_.makeValueCondition(
+			expr, negative, placeholderAffected, valuesHolder_, topColumnOnly,
+			treeIndexExtended);
+
+	if (cond.isEmpty()) {
+		return false;
+	}
+
+	if (cond.opType_ == SQLType::EXPR_CONSTANT) {
+		return cond.equals(true);
+	}
+
+	for (AllocIndexConditionList::iterator it = condList.begin();
+			it != condList.end(); ++it) {
+		Condition destCond;
+		if (!base_.tryMakeNarrower(*it, cond, destCond) ||
+				destCond.isEmpty() ||
+				destCond.opType_ == SQLType::EXPR_CONSTANT) {
+			return false;
+		}
+		*it = destCond;
+	}
+
+	return true;
 }
 
 
@@ -6648,6 +6879,14 @@ SQLExprs::DataPartitionUtils::intervalHashFromAffinity(
 			partitioning.partitioningCount_,
 			partitioning.clusterPartitionCount_,
 			affinityRevList, affinity);
+}
+
+bool SQLExprs::DataPartitionUtils::isFixedIntervalPartitionAffinity(
+		const PlanPartitioningInfo &partitioning, int64_t affinity) {
+	return isFixedIntervalPartitionAffinity(
+			partitioning.partitioningType_,
+			partitioning.clusterPartitionCount_,
+			affinity);
 }
 
 void SQLExprs::DataPartitionUtils::makeAffinityRevList(
@@ -6922,6 +7161,74 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 	return affinitySet.size() < availableCount;
 }
 
+bool SQLExprs::DataPartitionUtils::isReduceableTablePartitionCondition(
+		const PlanPartitioningInfo &partitioning, TupleColumnType columnType,
+		const util::Vector<uint32_t> &affinityRevList, int64_t nodeAffinity,
+		ExprType condType, uint32_t condColumn, const TupleValue &condValue) {
+	switch (partitioning.partitioningType_) {
+	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE:
+		break;
+	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE_HASH:
+		break;
+	default:
+		return false;
+	}
+
+	if (static_cast<uint32_t>(partitioning.partitioningColumnId_) !=
+			condColumn) {
+		return false;
+	}
+
+	if (isFixedIntervalPartitionAffinity(partitioning, nodeAffinity)) {
+		return false;
+	}
+
+	const SQLValues::CompColumn compOp =
+			ExprTypeUtils::toCompColumn(condType, 0, 0, true);
+	if (!compOp.isEitherUnbounded()) {
+		return false;
+	}
+
+	if (SQLValues::ValueUtils::isNull(condValue)) {
+		return false;
+	}
+
+	const int64_t unit = partitioning.intervalValue_;
+	const int64_t targetInterval = intervalHashFromAffinity(
+			partitioning, affinityRevList, nodeAffinity).first;
+
+	const int64_t targetRawInterval = intervalToRaw(targetInterval);
+	const int64_t condRawInterval = rawIntervalFromValue(condValue, unit);
+	const int32_t intervalComp = SQLValues::ValueUtils::compareIntegral(
+			targetRawInterval, condRawInterval);
+
+	const bool lower = compOp.isLowerUnbounded();
+	const bool exclusive = compOp.isEitherExclusive();
+	const int32_t typeDir =
+			SQLValues::ValueUtils::getTypeBoundaryDirectionAsLong(
+					condValue, columnType, !lower);
+	if (lower) {
+		if (typeDir > 0 ||
+				(!exclusive && (SQLValues::ValueUtils::isUpperBoundaryAsLong(
+						condValue, unit) || typeDir == 0))) {
+			return intervalComp <= 0;
+		}
+		else {
+			return intervalComp < 0;
+		}
+	}
+	else {
+		if (typeDir < 0 ||
+				(!exclusive && (SQLValues::ValueUtils::isLowerBoundaryAsLong(
+						condValue, unit) || typeDir == 0))) {
+			return intervalComp >= 0;
+		}
+		else {
+			return intervalComp > 0;
+		}
+	}
+}
+
 void SQLExprs::DataPartitionUtils::getTablePartitionKey(
 		const PlanPartitioningInfo &partitioning,
 		const util::Vector<uint32_t> &affinityRevList, int64_t nodeAffinity,
@@ -7180,6 +7487,22 @@ SQLExprs::DataPartitionUtils::intervalHashFromAffinity(
 	}
 
 	return std::make_pair(interval, hash);
+}
+
+bool SQLExprs::DataPartitionUtils::isFixedIntervalPartitionAffinity(
+		SyntaxTree::TablePartitionType partitioningType,
+		uint32_t clusterPartitionCount, int64_t affinity) {
+	switch (partitioningType) {
+	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE:
+		break;
+	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE_HASH:
+		break;
+	default:
+		return false;
+	}
+
+	return (affinity >= 0 &&
+			static_cast<uint64_t>(affinity) < clusterPartitionCount);
 }
 
 void SQLExprs::DataPartitionUtils::makeAffinityRevList(

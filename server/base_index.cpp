@@ -21,6 +21,9 @@
 #include "base_index.h"
 #include "schema.h"
 
+BaseIndex::CustomSuspendLimitter::~CustomSuspendLimitter() {
+}
+
 BaseIndex::SearchContextPool::SearchContextPool(
 		util::StackAllocator &alloc, util::StackAllocator &settingAlloc) :
 		condValuePool_(alloc),
@@ -155,12 +158,12 @@ std::string BaseIndex::SearchContext::dump() {
 		strstrm << columnIdList_[i];
 	}
 	strstrm << "]";
-	strstrm << ", {\"isResume_\" : " << (int)isResume_ << "}";
-	strstrm << ", {\"nullCond_\" : " << nullCond_ << "}";
+	strstrm << ", {\"isResume_\" : " << static_cast<int32_t>(isResume_) << "}";
+	strstrm << ", {\"nullCond_\" : " << static_cast<int32_t>(nullCond_) << "}";
 	strstrm << ", {\"limit_\" : " << limit_ << "}";
 
-	strstrm << ", {\"isSuspended_\" : " << (int)isSuspended_ << "}";
-	strstrm << ", {\"isNullSuspended_\" : " << (int)isNullSuspended_ << "}";
+	strstrm << ", {\"isSuspended_\" : " << static_cast<int32_t>(isSuspended_) << "}";
+	strstrm << ", {\"isNullSuspended_\" : " << static_cast<int32_t>(isNullSuspended_) << "}";
 	strstrm << ", {\"suspendRowId_\" : " << suspendRowId_ << "}";
 	strstrm << ", {\"suspendLimit_\" : " << suspendLimit_ << "}";
 
@@ -305,20 +308,21 @@ void BaseIndex::Setting::initialize(
 						COLUMN_TYPE_COMPOSITE, COLUMN_TYPE_COMPOSITE, 
 						DSExpression::LE, UNDEF_COLUMNID, object, funcInfo_->getFixedAreaSize());
 					greaterCompareNum_ = columnSchema->getColumnNum();
-					lessCompareNum_ = eqPosList.size();
+					lessCompareNum_ = static_cast<uint32_t>(eqPosList.size());
 				} else {
 					startCondition_ = ALLOC_NEW(alloc) TermCondition(
 						COLUMN_TYPE_COMPOSITE, COLUMN_TYPE_COMPOSITE, 
 						DSExpression::GE, UNDEF_COLUMNID, object, funcInfo_->getFixedAreaSize());
 					endCondition_ = restartCond;
-					greaterCompareNum_ = eqPosList.size();
+					greaterCompareNum_ = static_cast<uint32_t>(eqPosList.size());
 					lessCompareNum_ = columnSchema->getColumnNum();
 				}
 			} else {
 				startCondition_ = ALLOC_NEW(alloc) TermCondition(
 					COLUMN_TYPE_COMPOSITE, COLUMN_TYPE_COMPOSITE, 
 					DSExpression::EQ, UNDEF_COLUMNID, object, funcInfo_->getFixedAreaSize());
-				lessCompareNum_ = greaterCompareNum_ = eqPosList.size();
+				lessCompareNum_ = greaterCompareNum_ =
+						static_cast<uint32_t>(eqPosList.size());
 			}
 		} else {
 			bool isGreaterRewrite = false;
@@ -397,7 +401,7 @@ void BaseIndex::Setting::initialize(
 				endCondition_ = ALLOC_NEW(alloc) TermCondition(
 					COLUMN_TYPE_COMPOSITE, COLUMN_TYPE_COMPOSITE, 
 					DSExpression::LT, UNDEF_COLUMNID, object, funcInfo_->getFixedAreaSize());
-				lessCompareNum_ = eqPosList.size() + 1;
+				lessCompareNum_ = static_cast<uint32_t>(eqPosList.size() + 1);
 			}
 		}
 
@@ -434,7 +438,8 @@ CompositeInfoObject *TreeFuncInfo::createCompositeInfo(util::StackAllocator &all
 	util::XArray<uint32_t> varSizeList(alloc);
 	uint32_t totalVariableSize = 0;
 	for (size_t i = 0; i < valueList.size(); i++) {
-		ColumnInfo& columnInfo = columnSchema->getColumnInfo(i);
+		ColumnInfo& columnInfo =
+				columnSchema->getColumnInfo(static_cast<uint32_t>(i));
 
 		const void *fieldValue = valueList[i].data_;
 		uint32_t fieldSize = valueList[i].size_;
@@ -445,10 +450,10 @@ CompositeInfoObject *TreeFuncInfo::createCompositeInfo(util::StackAllocator &all
 				varList.push_back(fieldValue);
 				varSizeList.push_back(fieldSize);
 			} else {
-				compositeInfo->setFixedField(*this, i, fieldValue);
+				compositeInfo->setFixedField(*this, static_cast<uint32_t>(i), fieldValue);
 			}
 		} else {
-			compositeInfo->setNull(i);
+			compositeInfo->setNull(static_cast<uint32_t>(i));
 			if (columnInfo.isVariable()) {
 				const void *defaultValue = Value::getDefaultVariableValue(columnInfo.getColumnType());
 				uint32_t encodeSize = ValueProcessor::getEncodedVarSize(defaultValue);
@@ -460,7 +465,8 @@ CompositeInfoObject *TreeFuncInfo::createCompositeInfo(util::StackAllocator &all
 		}
 	}
 
-	for (size_t i = valueList.size(); i < columnSchema->getColumnNum(); i++) {
+	for (uint32_t i = static_cast<int32_t>(valueList.size());
+			i < columnSchema->getColumnNum(); i++) {
 		compositeInfo->setNull(i);
 	}
 
@@ -481,7 +487,8 @@ CompositeInfoObject *TreeFuncInfo::createCompositeInfo(util::StackAllocator &all
 			const void *addr = varList[i];
 			uint32_t varSize = varSizeList[i];
 			uint32_t encodeSizeLen = ValueProcessor::getEncodedVarSize(varSize);
-			uint32_t encodeSize = ValueProcessor::encodeVarSize(varSize);
+			uint32_t encodeSize = static_cast<uint32_t>(
+					ValueProcessor::encodeVarSize(varSize));
 			memcpy(destAddr, &encodeSize, encodeSizeLen);
 			memcpy(destAddr + encodeSizeLen, addr, varSize);
 			destAddr += encodeSizeLen + varSize;
@@ -504,9 +511,11 @@ void TreeFuncInfo::initialize(const util::Vector<ColumnId> &columnIds, const Col
 	UNUSED_VARIABLE(force);
 	if (columnIds.size() != 1) {
 		columnSchema_ = ALLOC_NEW(alloc_) ColumnSchema();
-		columnSchema_ = static_cast<ColumnSchema *>(alloc_.allocate(ColumnSchema::getAllocateSize(columnIds.size(), 0)));
+		columnSchema_ = static_cast<ColumnSchema *>(alloc_.allocate(
+				ColumnSchema::getAllocateSize(
+						static_cast<uint32_t>(columnIds.size()), 0)));
 
-		columnSchema_->initialize(columnIds.size());
+		columnSchema_->initialize(static_cast<uint32_t>(columnIds.size()));
 		columnSchema_->set(alloc_, srcSchema, columnIds);
 
 		uint32_t fixedColumnsSize = columnSchema_->getRowFixedColumnSize();
@@ -576,13 +585,13 @@ uint8_t CompositeInfoObject::getType() const {
 void CompositeInfoObject::setType(uint8_t type) {
 	uint8_t *header = reinterpret_cast<uint8_t *>(const_cast<CompositeInfoObject *>(this));
 	*header &= 0x7F; 
-	*header |= (type << 7);
+	*header |= static_cast<uint8_t>(type << 7);
 }
 
 uint8_t CompositeInfoObject::getNullBitSize() const {
 	uint8_t *header = reinterpret_cast<uint8_t *>(const_cast<CompositeInfoObject *>(this));
-	uint8_t bitSize = ((*header & 0x60) >> 6);
-	return bitSize + 1;
+	uint8_t bitSize = static_cast<uint8_t>((*header & 0x60) >> 6);
+	return static_cast<uint8_t>(bitSize + 1);
 }
 
 void CompositeInfoObject::setNullBitSize(uint16_t columnNum) {
@@ -590,7 +599,7 @@ void CompositeInfoObject::setNullBitSize(uint16_t columnNum) {
 	assert(bitSize < 4); 
 	uint8_t *header = reinterpret_cast<uint8_t *>(const_cast<CompositeInfoObject *>(this));
 	*header &= 0x9F; 
-	*header |= (bitSize << 6);
+	*header |= static_cast<uint8_t>(bitSize << 6);
 }
 
 bool CompositeInfoObject::hasVariable() const {
@@ -723,7 +732,7 @@ void CompositeInfoObject::setFixedField(TreeFuncInfo &funcInfo, uint32_t pos, co
 uint32_t CompositeInfoObject::calcSize(uint32_t columnNum, uint32_t fixedColumnsSize, bool hasVariable) {
 	uint32_t fixedSize = HEADER_SIZE + ValueProcessor::calcNullsByteSize(columnNum) + fixedColumnsSize;
 	if (hasVariable) {
-		fixedSize += sizeof(OId);
+		fixedSize += static_cast<uint32_t>(sizeof(OId));
 	}
 	if ((fixedSize & 0x7) != 0) {
 		fixedSize &= 0xFFFFFFF8;
@@ -742,7 +751,7 @@ void CompositeInfoObject::initialize(util::StackAllocator &alloc, TreeFuncInfo &
 	memset(this, 0, allocSize);
 	setType(KEY_ON_MEMORY);
 	setVariable(hasVariable);
-	setNullBitSize(columnSchema->getColumnNum());
+	setNullBitSize(static_cast<uint16_t>(columnSchema->getColumnNum()));
 }
 
 void CompositeInfoObject::serialize(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,

@@ -193,6 +193,8 @@ bool LoginHandler::checkLocalAuthNode() {
 }
 
 bool LoginHandler::checkUserCache(EventContext &ec, LoginContext &login) {
+	UNUSED_VARIABLE(ec);
+
 	UTIL_TRACE_DEBUG(AUTH_OPERATION, "checkUserCache()");
 	TEST_PRINT("checkUserCache() S\n");
 
@@ -241,9 +243,13 @@ bool LoginHandler::checkUserCache(EventContext &ec, LoginContext &login) {
 	return status;
 }
 
-void LoginHandler::addUserCache(EventContext &ec, const char8_t *dbName, const char8_t *userName, const char8_t *digest,
-	DatabaseId dbId, EventMonotonicTime authTime, PrivilegeType priv,
-	bool isLDAPAuthentication, const char8_t *roleName) {
+void LoginHandler::addUserCache(
+		EventContext &ec, const char8_t *dbName, const char8_t *userName,
+		const char8_t *digest,
+		DatabaseId dbId, EventMonotonicTime authTime, PrivilegeType priv,
+		bool isLDAPAuthentication, const char8_t *roleName) {
+	UNUSED_VARIABLE(ec);
+
 	TEST_PRINT("addUserCache() S\n");
 
 	UserCache *uc = transactionService_->userCache_;
@@ -550,7 +556,6 @@ void LoginHandler::authInternalUser(util::StackAllocator &alloc, LoginContext &l
 	Event &ev = login.ev_;
 	Request &request = login.request_;
 	const Response &response = login.response_;
-	const bool systemMode = login.systemMode_;
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 	const char8_t *dbName = login.dbName_;
 	const char8_t *userName = login.userName_;
@@ -1191,6 +1196,8 @@ void AuthenticationAckHandler::replySuccess(
 		StatementExecStatus status, const Request &request,
 		const AuthenticationContext &authContext)  
 {
+	UNUSED_VARIABLE(status);
+
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)     \
 	"(nd=" << authContext.getConnectionND()            \
 		   << ", pId=" << authContext.getPartitionId() \
@@ -1311,6 +1318,8 @@ void AuthenticationHandler::replyAuthenticationAck(
 */
 void AuthenticationAckHandler::authHandleError(
 		EventContext &ec, AuthenticationAck &ack, std::exception &e) {
+	UNUSED_VARIABLE(e);
+
 	try {
 		TEST_PRINT("authHandleError() S\n");
 		AuthenticationContext &authContext = transactionManager_->getAuth(
@@ -1360,7 +1369,6 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 	TEST_PRINT("<<<AuthenticationAckHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	AuthenticationAck ack(ev.getPartitionId());

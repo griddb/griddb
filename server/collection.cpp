@@ -1785,7 +1785,8 @@ void Collection::appendRowInternal(TransactionContext& txn,
 			bool isRowArraySizeControlMode = false;
 			uint32_t smallRowArrayNum =
 				calcRowArrayNum(txn, isRowArraySizeControlMode, getSmallRowArrayNum());
-			rowArray.initialize(txn, rowId, smallRowArrayNum);
+			rowArray.initialize(
+					txn, rowId, static_cast<uint16_t>(smallRowArrayNum));
 		}
 		else {
 			rowArray.initialize(txn, rowId, getNormalRowArrayNum());
@@ -1965,8 +1966,9 @@ void Collection::deleteRowInternal(
 				neighborRowArray.begin();
 				convertRowArraySchema(txn, neighborRowArray, false); 
 			}
-			if (isExist &&
-				activeNum + neighborRowArray.getActiveRowNum(rowArray.getMaxRowNum() - activeNum + 1) <=
+			if (isExist && activeNum + neighborRowArray.getActiveRowNum(
+					static_cast<uint16_t>(
+							rowArray.getMaxRowNum() - activeNum + 1)) <=
 					rowArray.getMaxRowNum()) {
 				merge(txn, rowArray, neighborRowArray);
 			}
@@ -2089,8 +2091,10 @@ bool Collection::searchRowKeyWithRowIdMap(TransactionContext& txn,
 	sc.setLimit(1);
 	for (size_t i = 0; i < keyColumnIdList.size(); i++) {
 		ColumnInfo &columnInfo = getColumnInfo(keyColumnIdList[i]);
-		TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
-			DSExpression::EQ, i, keyFieldList[i].data_, keyFieldList[i].size_);
+		TermCondition cond(
+				columnInfo.getColumnType(), columnInfo.getColumnType(),
+				DSExpression::EQ, static_cast<uint32_t>(i),
+				keyFieldList[i].data_, keyFieldList[i].size_);
 		sc.addCondition(txn, cond, true);
 	}
 
@@ -2150,7 +2154,7 @@ bool Collection::searchRowKeyWithMvccMap(TransactionContext& txn,
 	BtreeMap::SearchContext sc(txn.getDefaultAllocator(), keyColumnIdList);
 	sc.setLimit(1);
 	for (size_t i = 0; i < keyColumnIdList.size(); i++) {
-		ColumnInfo &columnInfo = getColumnInfo(i);
+		ColumnInfo &columnInfo = getColumnInfo(static_cast<uint32_t>(i));
 		TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 			DSExpression::EQ, keyColumnIdList[i], keyFieldList[i].data_, keyFieldList[i].size_);
 		sc.addCondition(txn, cond, true);

@@ -51,11 +51,11 @@ public:
 	static const unsigned char gsLowerToUpper[256];
 
 	static inline char ToUpper(char x) {
-		if (x >= 'a' && x <= 'z') return x + 'A' - 'a';
+		if (x >= 'a' && x <= 'z') return static_cast<char8_t>(x + 'A' - 'a');
 		return x;
 	}
 	static inline char ToLower(char x) {
-		if (x >= 'A' && x <= 'Z') return x + 'a' - 'A';
+		if (x >= 'A' && x <= 'Z') return static_cast<char8_t>(x + 'a' - 'A');
 		return x;
 	}
 

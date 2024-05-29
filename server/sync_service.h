@@ -24,6 +24,7 @@
 #include "cluster_service.h"
 #include "event_engine.h"
 #include "sync_manager.h"
+#include "log_manager.h"
 
 class ClusterService;
 class TransactionService;
@@ -42,12 +43,15 @@ class MutexLocker;
 class Partition;
 template <class L> class LogManager;
 class PartitionList;
+struct SyncRedoRequestInfo;
 
 #define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
 	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
 		str << ", eventType=" << EventTypeUtility::getEventTypeName(eventType) \
 				<< ", pId=" << pId << ", reason=" << ", reason=" << GS_EXCEPTION_MESSAGE(e))
 
+#include "uuid_utils.h"
+typedef util::VariableSizeAllocator<util::Mutex> GlobalRedoVariableSizeAllocator;
 /*!
 	@brief Represents the information for SyncManager
 */
@@ -494,6 +498,12 @@ protected:
 		NodeId senderNodeId, int32_t waitTime = 0);
 
 	template <typename T>
+	void sendSyncRequest(
+		EventContext& ec, EventEngine& ee, EventType eventType,
+		PartitionId pId, T& requestInfo,
+		NodeId senderNodeId, int32_t waitTime);
+
+	template <typename T>
 	void sendMultiRequest(
 		EventContext& ec, EventEngine& ee, EventType eventType,
 		PartitionId pId, SyncRequestInfo& requestInfo,
@@ -661,6 +671,244 @@ public:
 };
 
 /*!
+	@brief RedoManager
+*/
+class RedoManager {
+	struct RedoInfo;
+public:
+	typedef int64_t RequestId;
+	static const RequestId UNDEF_SYNC_REQUEST_ID = -1;
+
+	struct RedoStatus {
+		class Coder;
+		enum Status {
+			WAIT,
+			RUNNING,
+			FINISH,
+			WARNING,
+			FAIL
+		};
+	};
+
+	class RedoStatus::Coder {
+	public:
+		const char8_t* operator()(Status status, const char8_t* name = NULL) const;
+		static const char8_t* getStatusName(Status status);
+	};
+
+	struct RedoContext {
+
+		RedoContext(GlobalVariableSizeAllocator& varAlloc, PartitionId pId, std::string& uuid, NodeId senderNodeId) :
+			varAlloc_(varAlloc), readOffset_(0), currentLsn_(UNDEF_LSN), orgStartLsn_(UNDEF_LSN), orgEndLsn_(UNDEF_LSN),
+			startLsn_(UNDEF_LSN), endLsn_(UNDEF_LSN), prevReadLsn_(UNDEF_LSN),
+			status_(RedoStatus::Status::WAIT), errorCode_(0), partitionId_(pId), uuid_(uuid), requestId_(UNDEF_SYNC_REQUEST_ID),
+			start_(0), end_(0), checkAckCount_(0), ackCount_(0), sequenceNo_(0), isContinue_(false), isOwner_(false),
+			senderNodeId_(senderNodeId), logMgrStats_(NULL), readfileSize_(-1), skipReadLog_(true), executionStatusValue_(ExecutionStatus::INIT),
+			backupErrorList_(varAlloc_), backupErrorMap_(varAlloc_), counter_(0), retryCount_(0) {
+			start_ = util::DateTime::now(false).getUnixTime();
+			startTime_ = CommonUtility::getTimeStr(start_);
+		}
+
+		RedoContext(util::VariableSizeAllocator<util::Mutex>& varAlloc, std::string& logFilePath, std::string& logFileName, LogSequentialNumber startLsn, LogSequentialNumber endLsn,
+			PartitionId pId, RequestId requestId, std::string& uuid, bool forceApply);
+
+		~RedoContext();
+
+		void begin();
+
+		void end();
+
+		void setException(std::exception& exception, const char* str = NULL);
+
+		void appendBackupError(NodeId nodeId, std::string& node, int32_t errorCode, std::string& errorName, LogSequentialNumber lsn);
+		GlobalVariableSizeAllocator& varAlloc_;
+		std::string logFileDir_;
+		std::string logFileName_;
+		std::string logFilePathName_;
+		int64_t readOffset_;
+		LogSequentialNumber currentLsn_;
+		LogSequentialNumber orgStartLsn_;
+		LogSequentialNumber orgEndLsn_;
+		LogSequentialNumber startLsn_;
+		LogSequentialNumber endLsn_;
+		LogSequentialNumber prevReadLsn_;
+		RedoStatus::Status status_;
+		int32_t errorCode_;
+		std::string errorName_;
+		PartitionId partitionId_;
+		std::string& uuid_;
+		RequestId requestId_;
+		int64_t start_;
+		int64_t end_;
+		std::string startTime_;
+		std::string endTime_;
+		PartitionRole role_;
+		int32_t checkAckCount_;
+		int32_t ackCount_;
+		int64_t sequenceNo_;
+		util::Stopwatch watch_;
+		bool isContinue_;
+		bool isOwner_;
+		NodeId senderNodeId_;
+		LogManagerStats logMgrStats_;
+		int64_t readfileSize_;
+		bool skipReadLog_;
+		enum ExecutionStatus {
+			INIT,
+			PREPARE_EXECUTION,
+			CHECK_STANDBY,
+			CHECK_CLUSTER,
+			READ_LOG,
+			REDO,
+			REPLICATION,
+			POST_EXECUTION,
+			FINISH
+		} executionStatusValue_;
+		std::string executionStatus_;
+
+		const char* getExecutionStatus() {
+			switch (executionStatusValue_) {
+				case INIT: return "INIT";
+				case PREPARE_EXECUTION: return "PREPARE_EXECUTION";
+				case CHECK_STANDBY: return "CHECK_STANDBY";
+				case CHECK_CLUSTER: return "CHECK_CLUSTER";
+				case READ_LOG: return "READ_LOG";
+				case REDO: return "REDO";
+				case REPLICATION: return "REPLICATION";
+				case POST_EXECUTION: return "POST_EXECUTION";
+				case FINISH: return "FINISH";
+				default: return "UNDEF";
+			}
+		}
+
+		struct ErrorInfo {
+			ErrorInfo(GlobalVariableSizeAllocator& varAlloc, std::string &node, int32_t errorCode, std::string& errorName, LogSequentialNumber  lsn) :
+				varAlloc_(varAlloc), node_(node), lastErrorCode_(errorCode), lastErrorName_(errorName), lsn_(lsn), errorCount_(0){}
+			void update(int32_t errorCode, std::string& errorName, LogSequentialNumber  lsn) {
+				lastErrorCode_ = errorCode;
+				lastErrorName_ = errorName;
+				lsn_ = lsn;
+				errorCount_++;
+			}
+			GlobalVariableSizeAllocator& varAlloc_;
+			std::string node_;
+			int32_t lastErrorCode_;
+			std::string lastErrorName_;
+			LogSequentialNumber  lsn_;
+			int32_t errorCount_;
+			UTIL_OBJECT_CODER_MEMBERS(node_, lastErrorCode_, lastErrorName_, lsn_, errorCount_);
+		};
+		util::AllocVector<ErrorInfo*> backupErrorList_;
+		util::AllocMap<NodeId, ErrorInfo*> backupErrorMap_;
+		int64_t counter_;
+		int32_t retryCount_;
+		bool checkLsn();
+
+		void dump(util::NormalOStringStream& oss) {
+			oss << "Context (";
+			oss << "role=" << (isOwner_ ? "owner" : "backup");
+			oss << ", pId=" << partitionId_ << ", uuid=" << uuid_ << ", requestId=" << requestId_ << ", status=" << RedoStatus::Coder::getStatusName(status_) << ", phase=" << getExecutionStatus();
+			if (isOwner_) {
+				oss << ", count=" << counter_;
+			}
+			if (errorCode_ != 0) {
+				oss << ", errorName=" << errorName_;
+			}
+			if (!backupErrorList_.empty()) {
+				oss << ", backupError=";
+				std::vector<std::string> nodeList;
+				for (size_t pos = 0; pos < backupErrorList_.size(); pos++) {
+					nodeList.push_back(backupErrorList_[pos]->node_);
+				}
+				CommonUtility::dumpValueList(oss, nodeList);
+			}
+		}
+
+		UTIL_OBJECT_CODER_MEMBERS(
+			logFileDir_, logFileName_,
+			UTIL_OBJECT_CODER_OPTIONAL(startLsn_, UNDEF_LSN),
+			UTIL_OBJECT_CODER_OPTIONAL(endLsn_, UNDEF_LSN),
+			partitionId_, uuid_, requestId_,
+			UTIL_OBJECT_CODER_OPTIONAL(errorCode_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(errorName_, ""),
+			UTIL_OBJECT_CODER_ENUM(status_, RedoStatus::Coder()),
+			UTIL_OBJECT_CODER_OPTIONAL(startTime_, ""),
+			UTIL_OBJECT_CODER_OPTIONAL(endTime_, ""),
+			backupErrorList_,counter_,
+			UTIL_OBJECT_CODER_OPTIONAL(executionStatus_, "")
+		);
+	};
+
+	struct RedoContextList {
+		void append(RedoContext* context) {
+			requestList_.push_back(context);
+		}
+		std::vector<RedoContext*> requestList_;
+		UTIL_OBJECT_CODER_MEMBERS(requestList_);
+	};
+
+	RedoManager(const ConfigTable& config, GlobalVariableSizeAllocator& varAlloc, SyncService* syncSvc);
+	~RedoManager();
+	void initialize(ManagerSet& mgrSet);
+	GlobalVariableSizeAllocator& getAllocator() {
+		return varAlloc_;
+	}
+	std::string& getUuid() {
+		return uuidString_;
+	}
+
+	bool getStatus(PartitionId pId, std::string& uuid, RequestId requestId, RestContext& restCxt);
+	bool put(const Event::Source& eventSource, util::StackAllocator& alloc, PartitionId pId, std::string& redoFilePath, std::string& redoFileName,
+		LogSequentialNumber startLsn, LogSequentialNumber endLsn, std::string& uuidString, RequestId& requestId, bool forceApply, RestContext& restCxt);
+	bool cancel(const Event::Source& eventSource, util::StackAllocator& alloc,
+		PartitionId pId, std::string& uuid, RestContext& restCxt, RequestId requestId = UNDEF_SYNC_REQUEST_ID);
+
+	RedoContext* get(PartitionId pId, RequestId RequestId);
+	bool remove(PartitionId pId, RequestId RequestId = UNDEF_SYNC_REQUEST_ID);
+	int64_t getTotalContextNum();
+	int64_t getContextNum(PartitionId pId);
+
+private:
+
+	struct RedoInfo {
+	public:
+		RedoInfo(const RedoInfo& another) : counter_(another.counter_) {}
+		RedoInfo() : counter_(0) {}
+
+	private:
+		RedoInfo& operator=(const RedoInfo& another);
+
+	public:
+		int64_t counter_;
+		util::Mutex lock_;
+	};
+
+	RequestId reserveId(PartitionId pId);
+	bool checkRange(PartitionId pId, RestContext& cxt);
+	bool checkStandby(RestContext& cxt);
+	bool checkExecutable(PartitionId pId, RestContext& cxt);
+
+	bool checkUuid(std::string& uuidString, RestContext& cxt, bool check);
+	void sendRequest(const Event::Source& eventSource, util::StackAllocator& alloc, PartitionId pId, RequestId requestId, EventType eventType);
+
+	util::Mutex lock_;
+	typedef  util::AllocMap<RequestId, RedoContext*> ContextMap;
+	uint32_t partitionNum_;
+	GlobalVariableSizeAllocator& varAlloc_;
+	UUIDValue uuid_;
+	std::string uuidString_;
+	std::vector<ContextMap> contextMapList_;
+	std::vector<RedoInfo> contextInfoList_;
+	SyncService* syncSvc_;
+	TransactionService* txnSvc_;
+	ClusterManager* clsMgr_;
+	PartitionTable* pt_;
+};
+
+typedef RedoManager::RequestId RequestId;
+typedef RedoManager::RedoContext RedoContext;
+
+/*!
 	@brief SyncService
 */
 class SyncService {
@@ -718,13 +966,18 @@ public:
 		return syncMgr_;
 	}
 
+	RedoManager& getRedoManager() {
+		return redoMgr_;
+	}
 private:
 	void checkVersion(ClusterVersionId decodedVersion);
 	uint16_t getLogVersion(PartitionId pId);
 	void setClusterHandler();
 
+	util::VariableSizeAllocator<util::Mutex> varAlloc_;
 	EventEngine ee_;
 	SyncManager* syncMgr_;
+	RedoManager redoMgr_; 
 	TransactionService* txnSvc_;
 	ClusterService* clsSvc_;
 	PartitionList* partitionList_;
@@ -734,6 +987,53 @@ private:
 	ServiceThreadErrorHandler serviceThreadErrorHandler_;
 	UnknownSyncEventHandler unknownSyncEventHandler_;
 	bool initialized_;
+};
+
+/*!
+	@brief SyncRedoRequestInfo
+*/
+struct SyncRedoRequestInfo {
+
+	SyncRedoRequestInfo(util::StackAllocator& alloc);
+	void encode(EventByteOutStream& out);
+	void decode(EventByteInStream& in, const char8_t*data);
+	void initLog();
+	std::string dump();
+
+	int64_t requestId_;
+	int64_t sequenceNo_;
+	LogSequentialNumber startLsn_;
+	LogSequentialNumber endLsn_;
+	int32_t errorCode_;
+	std::string errorName_;
+	int64_t binaryLogRecordsSize_;
+	util::XArray<uint8_t> binaryLogRecords_;
+};
+
+/*!
+	@brief RedoLogHandler
+*/
+class RedoLogHandler : public SyncHandler {
+public:
+	RedoLogHandler() {}
+	void operator()(EventContext& ec, EventEngine::Event& ev);
+
+private:
+
+	bool isSemiSyncReplication();
+	bool checkStandby(RedoContext& cxt);
+	bool prepareExecution(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool checkAck(RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool checkExecutable(RedoContext& cxt);
+	bool readLogFile(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool redoLog(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool executeReplication(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool postExecution(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool executeReplicationAck(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
+	bool checkReplicationTimeout(RedoContext& cxt);
+	bool checkDisplayErrorStatus(EventContext& ec, RedoContext& cxt);
+	void complete(RedoContext& cxt);
+	void checkBackupError(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
 };
 
 #endif

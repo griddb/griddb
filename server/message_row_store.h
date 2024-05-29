@@ -92,14 +92,16 @@ public:
 	typename ColumnTypeTraits<C>::PrimitiveType getField(
 			ColumnId columnId);
 
-	virtual uint32_t getArrayLength(ColumnId columnId) const;
+	virtual uint32_t getArrayLength(ColumnId columnId);
 
-	virtual uint32_t getTotalArraySize(ColumnId columnId) const;
+	virtual uint32_t getTotalArraySize(ColumnId columnId);
 
-	virtual void getArrayElement(ColumnId columnId,
-			uint32_t arrayIndex, const void *&data, uint32_t &size) const;
-	void getArrayElement(ColumnId columnId,
-			uint32_t arrayIndex, const uint8_t *&data, uint32_t &size) const;
+	virtual void getArrayElement(
+			ColumnId columnId, uint32_t arrayIndex, const void *&data,
+			uint32_t &size);
+	void getArrayElement(
+			ColumnId columnId, uint32_t arrayIndex, const uint8_t *&data,
+			uint32_t &size);
 
 	virtual bool isNullValue(ColumnId columnId) const;
 	virtual const uint8_t *getNullsAddr() const;
@@ -239,8 +241,14 @@ public:
 
 	uint32_t getTotalArraySize(ColumnId columnId);
 
-	void getArrayElement(ColumnId columnId,
-			uint32_t arrayIndex, const void *&data, uint32_t &size);
+	void getArrayElement(
+			ColumnId columnId, uint32_t arrayIndex, const void *&data,
+			uint32_t &size);
+	void getArrayElement(
+			ColumnId columnId, uint32_t arrayIndex, const uint8_t *&data,
+			uint32_t &size) {
+		MessageRowStore::getArrayElement(columnId, arrayIndex, data, size);
+	}
 
 	void getPartialRowSet(uint64_t startPos, uint64_t rowNum, uint64_t &fixedOffset,
 		uint64_t &fixedSize, uint64_t &varOffset, uint64_t &varSize);

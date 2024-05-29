@@ -1375,7 +1375,6 @@ void SQLCompiler::setMultiIndexScanEnabled(bool enabled) {
 }
 
 void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *control) {
-
 	{
 		std::string value;
 
@@ -1974,7 +1973,8 @@ void SQLCompiler::dumpPlanNode(Plan &plan) {
 	for (; itr != plan.nodeList_.end(); ++itr) {
 		SQLPreparedPlan::Node &node = (*itr);
 		util::NormalOStringStream oss;
-		oss << "id," << node.id_ << ",type," << node.type_ << ",name,";
+		oss << "id," << node.id_ <<
+				",type," << static_cast<int32_t>(node.type_) << ",name,";
 		if (node.qName_ && node.qName_->name_) {
 			oss << node.qName_->name_->c_str();
 		}
@@ -2190,12 +2190,16 @@ void SQLCompiler::genUpdate(const Select &select, Plan &plan) {
 	
 			const SQLTableInfo::PartitioningInfo *partitioning =
 					tableInfo.partitioning_;
-			if (partitioning != NULL && columnId == partitioning->partitioningColumnId_) {
+			if (partitioning != NULL &&
+					columnId == static_cast<ColumnId>(
+							partitioning->partitioningColumnId_)) {
 				GS_THROW_USER_ERROR(
 						GS_ERROR_SQL_COMPILE_PARTITIONING_KEY_NOT_UPDATABLE,
 						"Partitioning column='" << orgColumnName << "' is not updatable");
 			}
-			if (partitioning != NULL && columnId == partitioning->subPartitioningColumnId_) {
+			if (partitioning != NULL &&
+					columnId == static_cast<ColumnId>(
+							partitioning->subPartitioningColumnId_)) {
 				GS_THROW_USER_ERROR(
 						GS_ERROR_SQL_COMPILE_PARTITIONING_KEY_NOT_UPDATABLE,
 						"Sub partitioning column='" << orgColumnName << "' is not updatable");
@@ -2479,13 +2483,13 @@ int32_t SQLCompiler::makeInsertColumnMap(const SQLTableInfo &tableInfo,
 	util::Set<ColumnId> checkColumnSet(alloc_);
 	std::pair<util::Set<ColumnId>::iterator, bool> outResult;
 	bool isChange = false;
-	for (size_t pos = 0; pos < static_cast<int32_t>(insertList->size()); pos++) {
+	for (size_t pos = 0; pos < insertList->size(); pos++) {
 		Expr *insertExpr = (*insertList)[pos];
 		
 		util::String key(static_cast<const char*>(insertExpr->qName_->name_->c_str()),
 				strlen(insertExpr->qName_->name_->c_str()), alloc_);
 
-		ColumnId foundColumnId = -1;
+		ColumnId foundColumnId = static_cast<ColumnId>(-1);
 		if (insertExpr->qName_->nameCaseSensitive_) {
 			util::Map<util::String, int32_t>::iterator it = realSensitiveColumnMap.find(key);
 			if (it == realSensitiveColumnMap.end()) {
@@ -2503,7 +2507,7 @@ int32_t SQLCompiler::makeInsertColumnMap(const SQLTableInfo &tableInfo,
 			}
 			foundColumnId = (*it).second;
 		}
-		if (foundColumnId != -1) {
+		if (foundColumnId != static_cast<ColumnId>(-1)) {
 			if (tableInfo.nosqlColumnOptionList_[foundColumnId] == SyntaxTree::COLUMN_OPT_VIRTUAL) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INVALID_INSERT_COLUMN,
 						"INSERT operation disallowed on virtual columns");
@@ -2519,7 +2523,8 @@ int32_t SQLCompiler::makeInsertColumnMap(const SQLTableInfo &tableInfo,
 		}
 	}
 	for (size_t i = 0; i < insertColumnMap.size(); i++) {
-		if (insertColumnMap[i] == -1 || insertColumnMap[i] != i) {
+		if (insertColumnMap[i] == -1 ||
+				insertColumnMap[i] != static_cast<ptrdiff_t>(i)) {
 			isChange = true;
 			break;
 		}
@@ -4442,9 +4447,6 @@ void SQLCompiler::preparePseudoWindowOption(
 
 void SQLCompiler::genPseudoWindowResult(
 		GenRAContext &cxt, GenOverContext &overCxt, Plan &plan) {
-
-	const Select &select = cxt.select_;
-	const bool inSubQuery = cxt.inSubQuery_;
 	assert(cxt.selectTopColumnId_ != UNDEF_COLUMNID);
 
 	ColumnId colId = static_cast<ColumnId>(cxt.selectTopColumnId_ + overCxt.windowExprPos_);
@@ -5529,7 +5531,8 @@ void SQLCompiler::Meta::appendMetaTableInfoId(
 
 void SQLCompiler::Meta::genDriverTypeInfo(
 		const Expr* &whereExpr, Plan &plan, const SystemTableInfo &info) {
-	static_cast<void>(whereExpr);
+	UNUSED_VARIABLE(whereExpr);
+	UNUSED_VARIABLE(info);
 
 
 	util::Vector<PlanNodeId> planNodeIdList(alloc_);
@@ -5615,7 +5618,8 @@ void SQLCompiler::Meta::genDriverTypeInfo(
 
 void SQLCompiler::Meta::genDriverTableTypes(
 		const Expr* &whereExpr, Plan &plan, const SystemTableInfo &info) {
-	static_cast<void>(whereExpr);
+	UNUSED_VARIABLE(whereExpr);
+	UNUSED_VARIABLE(info);
 
 
 	util::Vector<PlanNodeId> planNodeIdList(alloc_);
@@ -6093,11 +6097,7 @@ void SQLCompiler::validateGroupBy(
 		const PlanExprList &groupByList, const PlanExprList &selectList) {
 	PlanExprList::const_iterator itr = selectList.begin();
 	for (; itr != selectList.end(); ++itr) {
-		bool error = true;
-		if (validateColumnExpr(*itr, groupByList)) {
-			error = false;
-			continue;
-		}
+		validateColumnExpr(*itr, groupByList);
 	}
 }
 
@@ -6122,6 +6122,7 @@ bool SQLCompiler::validateColumnExpr(
 				}
 			}
 		}
+		UNUSED_VARIABLE(nullOnly);
 	}
 	if (expr.left_) {
 		if (!validateColumnExpr(*expr.left_, groupByList)) {
@@ -6160,6 +6161,7 @@ bool SQLCompiler::validateColumnExpr(
 				}
 			}
 		}
+		UNUSED_VARIABLE(nullOnly);
 	}
 	return true;
 }
@@ -6806,8 +6808,6 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 	const Expr *exprLeft = inExpr.left_;
 	const Expr *exprRight = inExpr.right_;
 	const ExprList *exprNext = inExpr.next_;
-
-	Expr *timestampField = NULL;
 
 	if (inExpr.op_ == SQLType::EXPR_FUNCTION) {
 		exprType = resolveFunction(inExpr);
@@ -8138,7 +8138,8 @@ bool SQLCompiler::splitExprListSub(
 			outExprList.push_back(followingExpr);
 
 			target->next_->push_back(ALLOC_NEW(alloc_) Expr(genColumnExprBase(
-					NULL, NULL, inputId, columnId + i, &followingExpr)));
+					NULL, NULL, inputId, static_cast<ColumnId>(columnId + i),
+					&followingExpr)));
 		}
 
 		return true;
@@ -8733,6 +8734,8 @@ TupleList::TupleColumnType SQLCompiler::followAdvanceColumnType(
 		Plan &plan, PlanNode &node, const Expr &expr,
 		bool forOutput, bool binding, const PlanExprList *outputList,
 		const ColumnId *outputColumnId) {
+	UNUSED_VARIABLE(outputList);
+	UNUSED_VARIABLE(outputColumnId);
 
 	if (node.aggPhase_ == SQLType::AGG_PHASE_ADVANCE_PIPE) {
 		Expr localExpr = expr;
@@ -8777,6 +8780,8 @@ TupleList::TupleColumnType SQLCompiler::followAdvanceColumnType(
 TupleList::TupleColumnType SQLCompiler::getAggregationFollowingColumnType(
 		Type nodeType, const PlanExprList &outputList, ColumnId columnId,
 		bool forOutput, bool binding, AggregationPhase phase, bool forWindow) {
+	UNUSED_VARIABLE(forOutput);
+
 	if (phase != SQLType::AGG_PHASE_ADVANCE_PIPE ||
 			columnId <= 0 || columnId >= outputList.size() ||
 			outputList[columnId].op_ != SQLType::EXPR_AGG_FOLLOWING) {
@@ -9236,6 +9241,7 @@ SQLCompiler::OptimizationOption SQLCompiler::makeJoinPushDownHintsOption() {
 	option.support(OPT_PUSH_DOWN_LIMIT, true);
 	option.support(OPT_REMOVE_REDUNDANCY, true);
 	option.support(OPT_REMOVE_INPUT_REDUNDANCY, true);
+	option.support(OPT_REMOVE_PARTITION_COND_REDUNDANCY, true);
 	option.support(OPT_MAKE_INDEX_JOIN, true);
 	option.setCheckOnly(OPT_MAKE_INDEX_JOIN);
 	return option;
@@ -9375,6 +9381,11 @@ void SQLCompiler::optimize(Plan &plan) {
 	}
 	while (false);
 
+
+	{
+		OptimizationUnit unit(cxt, OPT_REMOVE_PARTITION_COND_REDUNDANCY);
+		unit(unit() && removePartitionCondRedundancy(plan));
+	}
 }
 
 bool SQLCompiler::mergeSubPlan(Plan &plan) {
@@ -9576,7 +9587,7 @@ bool SQLCompiler::mergeSubPlan(Plan &plan) {
 		}
 
 		assert(std::count(updatedSet.begin(), updatedSet.end(), true) ==
-				updatedList.size());
+				static_cast<ptrdiff_t>(updatedList.size()));
 		assert(!updatedList.empty());
 
 		targetList.clear();
@@ -10504,6 +10515,42 @@ bool SQLCompiler::removeAggregationRedundancy(Plan &plan) {
 	return found;
 }
 
+bool SQLCompiler::removePartitionCondRedundancy(Plan &plan) {
+	util::Vector<uint32_t> affinityRevList(alloc_);
+	bool found = false;
+
+	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
+			nodeIt != plan.nodeList_.end(); ++nodeIt) {
+		PlanNode &node = *nodeIt;
+		if (node.type_ != SQLType::EXEC_SCAN) {
+			continue;
+		}
+
+		const SQLTableInfo::IdInfo &idInfo = node.tableIdInfo_;
+		const SQLTableInfo &tableInfo = tableInfoList_->resolve(idInfo.id_);
+		if (tableInfo.partitioning_ == NULL ||
+				idInfo.type_ != SQLType::TABLE_CONTAINER) {
+			continue;
+		}
+
+		PlanExprList &predList = node.predList_;
+		if (predList.empty()) {
+			continue;
+		}
+
+		const int32_t subContainerId = idInfo.subContainerId_;
+		ProcessorUtils::getTablePartitionAffinityRevList(tableInfo, affinityRevList);
+
+		Expr &pred = predList.front();
+		reduceTablePartitionCond(
+				plan, pred, tableInfo, affinityRevList, subContainerId);
+
+		found = true;
+	}
+
+	return found;
+}
+
 bool SQLCompiler::assignJoinPrimaryCond(Plan &plan, bool &complexFound) {
 	const Expr trueExpr(genConstExpr(plan, makeBoolValue(true), MODE_ON));
 
@@ -10633,8 +10680,6 @@ bool SQLCompiler::makeIndexJoin(Plan &plan, bool checkOnly) {
 
 		for (uint32_t i = 0; i < joinCount; i++) {
 			const uint32_t smaller = (i + start) % joinCount;
-
-			PlanNode &smallerNode = node.getInput(plan, smaller);
 
 			const uint32_t larger = (smaller == 0 ? 1 : 0);
 			if (!findIndexedPredicate(plan, node, larger, checkOnly)) {
@@ -12351,7 +12396,6 @@ void SQLCompiler::fixMinimizingTargetNodes(
 		bool subqueryAware) {
 	typedef util::Vector<bool> CheckEntry;
 
-	bool unionAffected = false;
 	for (PlanNodeList::const_iterator nodeIt = plan.nodeList_.begin();
 			nodeIt != plan.nodeList_.end(); ++nodeIt) {
 		const PlanNode &node = *nodeIt;
@@ -12367,6 +12411,7 @@ void SQLCompiler::fixMinimizingTargetNodes(
 
 		assert(node.outputList_.size() == retainEntry->size());
 		assert(node.outputList_.size() == modEntry->size());
+		UNUSED_VARIABLE(modEntry);
 
 		CheckEntry::iterator checkIt = retainEntry->end();
 		if (node.type_ != SQLType::EXEC_GROUP || subqueryAware) {
@@ -12644,7 +12689,6 @@ bool SQLCompiler::checkAndAcceptJoinExpansion(
 	}
 
 	JoinBoolList noneList;
-	JoinSizeList inSizeList;
 	for (uint32_t i = 0; i < inCount; i++) {
 		const PlanNode &inNode = node.getInput(plan, i);
 
@@ -12654,8 +12698,6 @@ bool SQLCompiler::checkAndAcceptJoinExpansion(
 				(inNode.type_ == SQLType::EXEC_UNION &&
 				inNode.unionType_ == SQLType::UNION_ALL &&
 				inNode.limit_ < 0 && inNode.offset_ <= 0);
-
-		inSizeList[i] = (unionList[i] ? inNode.inputList_.size() : 1);
 
 		if (unionList[i]) {
 			joinInputList[i] = inNode.inputList_;
@@ -12891,7 +12933,6 @@ void SQLCompiler::makeJoinExpansionEntries(
 
 	do {
 		JoinExpansionEntry entry;
-		size_t ordinal = 1;
 
 		bool single = false;
 		for (size_t ordinal = 1;; ordinal--) {
@@ -13513,7 +13554,7 @@ bool SQLCompiler::getJoinUnitDividableExpansionLimit(
 	if (drivingOptList != NULL) {
 		dividingSide = ((*drivingOptList)[left] ? right : left);
 		sideLimit = unitSizeList[dividingSide];
-		unitLimit = std::max<uint32_t>(baseUnitLimit, 1U);
+		unitLimit = std::max<uint64_t>(baseUnitLimit, 1U);
 	}
 	else if (baseUnitLimit <= 1 || (!leftDividable && !rightDividable)) {
 		dividingSide = (leftSize <= rightSize ? left : right);
@@ -17463,6 +17504,9 @@ void SQLCompiler::checkReference(
 
 	for (PlanExprList::const_iterator it = exprList.begin();
 			it != exprList.end(); ++it) {
+		assert(!forOutput ||
+				static_cast<size_t>(it - exprList.begin()) <
+				checkList[nodeId]->size());
 		if (forOutput && !(*checkList[nodeId])[it - exprList.begin()]) {
 			continue;
 		}
@@ -17498,6 +17542,7 @@ void SQLCompiler::checkReference(
 		else {
 			for (PlanNode::IdList::const_iterator it = node.inputList_.begin();
 					it != node.inputList_.end(); ++it) {
+				assert(expr.columnId_ < checkList[*it]->size());
 				(*checkList[*it])[expr.columnId_] = true;
 			}
 		}
@@ -18139,6 +18184,51 @@ bool SQLCompiler::isNarrowingPredicate(
 	else {
 		return false;
 	}
+}
+
+void SQLCompiler::reduceTablePartitionCond(
+		const Plan &plan, Expr &expr, const TableInfo &tableInfo,
+		const util::Vector<uint32_t> &affinityRevList,
+		int32_t subContainerId) {
+	const Expr *dest = reduceTablePartitionCondSub(
+			expr, tableInfo, affinityRevList, subContainerId);
+	if (dest != &expr) {
+		if (dest == NULL) {
+			expr = genConstExpr(plan, makeBoolValue(true), MODE_WHERE);
+		}
+		else {
+			expr = *dest;
+		}
+	}
+}
+
+const SQLCompiler::Expr* SQLCompiler::reduceTablePartitionCondSub(
+		const Expr &expr, const TableInfo &tableInfo,
+		const util::Vector<uint32_t> &affinityRevList,
+		int32_t subContainerId) {
+	if (expr.op_ == SQLType::EXPR_AND) {
+		const Expr *leftExpr = reduceTablePartitionCondSub(
+				*expr.left_, tableInfo, affinityRevList, subContainerId);
+		const Expr *rightExpr = reduceTablePartitionCondSub(
+				*expr.right_, tableInfo, affinityRevList, subContainerId);
+
+		if (leftExpr != expr.left_ || rightExpr != expr.right_) {
+			Expr *outExpr;
+			mergeAndOpBase(
+					(leftExpr == NULL ?
+							NULL : ALLOC_NEW(alloc_) Expr(*leftExpr)),
+					(rightExpr == NULL ?
+							NULL : ALLOC_NEW(alloc_) Expr(*rightExpr)),
+					NULL, MODE_WHERE, outExpr);
+			return outExpr;
+		}
+	}
+	else if (ProcessorUtils::isReduceableTablePartitionCondition(
+			expr, tableInfo, affinityRevList, subContainerId)) {
+		return NULL;
+	}
+
+	return &expr;
 }
 
 bool SQLCompiler::findIndexedPredicate(
@@ -22163,6 +22253,7 @@ const util::NameCoderEntry<SQLCompiler::OptimizationUnitType>
 	UTIL_NAME_CODER_ENTRY(OPT_PUSH_DOWN_LIMIT),
 	UTIL_NAME_CODER_ENTRY(OPT_REMOVE_REDUNDANCY),
 	UTIL_NAME_CODER_ENTRY(OPT_REMOVE_INPUT_REDUNDANCY),
+	UTIL_NAME_CODER_ENTRY(OPT_REMOVE_PARTITION_COND_REDUNDANCY),
 	UTIL_NAME_CODER_ENTRY(OPT_ASSIGN_JOIN_PRIMARY_COND),
 	UTIL_NAME_CODER_ENTRY(OPT_MAKE_SCAN_COST_HINTS),
 	UTIL_NAME_CODER_ENTRY(OPT_MAKE_JOIN_PUSH_DOWN_HINTS),

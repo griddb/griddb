@@ -29,6 +29,7 @@
 #include "sql_job_manager.h"
 
 #define SQL_PROCESSOR_CONFIG_MANAGER_ENABLED 1
+
 #define SQL_PROCESSOR_PROFILER_MANAGER_ENABLED 1
 
 struct DataStoreConfig;
@@ -84,6 +85,7 @@ public:
 	int64_t sortTopNBatchSize_;
 	int64_t interruptionProjectionCount_;
 	int64_t interruptionScanCount_;
+	int64_t scanCountBased_;
 
 	UTIL_OBJECT_CODER_MEMBERS(
 			UTIL_OBJECT_CODER_OPTIONAL(workMemoryLimitBytes_, -1),
@@ -111,7 +113,8 @@ public:
 			UTIL_OBJECT_CODER_OPTIONAL(sortTopNBatchThreshold_, -1),
 			UTIL_OBJECT_CODER_OPTIONAL(sortTopNBatchSize_, -1),
 			UTIL_OBJECT_CODER_OPTIONAL(interruptionProjectionCount_, -1),
-			UTIL_OBJECT_CODER_OPTIONAL(interruptionScanCount_, -1));
+			UTIL_OBJECT_CODER_OPTIONAL(interruptionScanCount_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(scanCountBased_, -1));
 
 private:
 	static const SQLProcessorConfig DEFAULT_CONFIG;

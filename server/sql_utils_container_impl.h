@@ -116,6 +116,7 @@ struct SQLContainerImpl {
 
 	class SearchResult;
 	class IndexConditionUpdator;
+	class ExtendedSuspendLimitter;
 	class IndexSearchContext;
 
 	class CursorScope;
@@ -154,6 +155,7 @@ public:
 	virtual bool scanIndex(OpContext &cxt, const IndexScanInfo &info);
 	virtual bool scanMeta(
 			OpContext &cxt, const Projection &proj, const Expression *pred);
+	virtual bool scanVisited(OpContext &cxt, const Projection &proj);
 
 	virtual uint32_t getOutputIndex();
 	virtual void setOutputIndex(uint32_t index);
@@ -177,6 +179,11 @@ public:
 			SQLExprs::IndexConditionList::const_iterator condEnd,
 			const util::Vector<ContainerColumnType> &condTypeList,
 			BtreeSearchContext &sc);
+
+	static TermCondition makeTermCondition(
+			ColumnType columnType, ColumnType valueType,
+			DSExpression::Operation opType, uint32_t columnId,
+			const void *value, uint32_t valueSize);
 
 private:
 	enum RowsTargetType {
@@ -237,7 +244,7 @@ private:
 
 	static bool checkUpdatesStart(
 			TupleUpdateRowIdHandler &handler, OIdTable &oIdTable);
-	RowIdFilter* restartRangeScanWithUpdates(
+	RowIdFilter& restartRangeScanWithUpdates(
 			OpContext &cxt, TransactionContext &txn, const Projection &proj,
 			BaseContainer &container, OIdTable &oIdTable);
 	bool detectRangeScanFinish(
@@ -313,16 +320,12 @@ private:
 	TransactionContext& resolveTransactionContext();
 
 	RowIdFilter* checkRowIdFilter(
-			OpContext &cxt, TransactionContext& txn, BaseContainer &container,
-			bool readOnly);
+			TransactionContext& txn, BaseContainer &container, bool readOnly);
 	void finishRowIdFilter(RowIdFilter *rowIdFilter);
 
 	void setUpOIdTable(
 			OpContext &cxt, OIdTable &oIdTable,
 			const SQLExprs::IndexConditionList &condList);
-
-	RowIdFilter* findRowIdFilter();
-	RowIdFilter& resolveRowIdFilter(OpContext &cxt, RowId maxRowId);
 
 	Accessor &accessor_;
 	Data &data_;
@@ -429,6 +432,7 @@ public:
 	int64_t getIndexLimit();
 	int64_t getMemoryLimit();
 	const std::pair<uint64_t, uint64_t>& getPartialExecSizeRange();
+	bool isPartialExecCountBased();
 
 	void startScope(ExtOpContext &cxt, const TupleColumnList &inColumnList);
 	void finishScope() throw();
@@ -509,9 +513,10 @@ public:
 	OIdTable& prepareOIdTable(BaseContainer &container);
 	OIdTable* findOIdTable();
 
-	bool isRowIdFilterLimitReached(RowIdFilter *rowIdFilter);
-	void restoreRowIdFilter(RowIdFilter &rowIdFilter);
-	void finishRowIdFilter(RowIdFilter *rowIdFilter);
+	RowIdFilter& prepareRowIdFilter(
+			TransactionContext &txn, BaseContainer &container);
+	RowIdFilter* findRowIdFilter();
+	void clearRowIdFilter();
 
 	static TransactionContext& prepareTransactionContext(ExtOpContext &cxt);
 
@@ -608,6 +613,7 @@ private:
 
 	util::AllocUniquePtr<CursorScope> scope_;
 	util::AllocUniquePtr<OIdTable> oIdTable_;
+	util::AllocUniquePtr<RowIdFilter> rowIdFilter_;
 	util::AllocUniquePtr<TupleUpdateRowIdHandler> updateRowIdHandler_;
 
 	NullsStats initialNullsStats_;
@@ -615,9 +621,9 @@ private:
 	int64_t indexLimit_;
 	int64_t memLimit_;
 	std::pair<uint64_t, uint64_t> partialExecSizeRange_;
+	bool partialExecCountBased_;
 
 	const SQLExprs::IndexSelector *indexSelection_;
-	util::LocalUniquePtr<uint32_t> rowIdFilterId_;
 };
 
 template<TupleColumnType T, bool VarSize>
@@ -1488,6 +1494,22 @@ private:
 	Entry mvccEntry_;
 };
 
+class SQLContainerImpl::ExtendedSuspendLimitter :
+		public BaseIndex::CustomSuspendLimitter {
+public:
+	ExtendedSuspendLimitter(
+			util::Stopwatch &watch, uint32_t partialExecMaxMillis,
+			const std::pair<uint64_t, uint64_t> &partialExecSizeRange);
+	virtual ~ExtendedSuspendLimitter();
+
+	virtual bool isLimitReachable(ResultSize &nextLimit);
+
+private:
+	util::Stopwatch &watch_;
+	uint32_t partialExecMaxMillis_;
+	std::pair<uint64_t, uint64_t> partialExecSizeRange_;
+};
+
 class SQLContainerImpl::IndexConditionUpdator {
 public:
 	class ByValue;
@@ -1535,6 +1557,8 @@ public:
 	virtual void next();
 
 private:
+	void updateKeySet();
+
 	TransactionContext &txn_;
 	util::StackAllocator &alloc_;
 
@@ -1549,41 +1573,218 @@ private:
 
 class SQLContainerImpl::IndexConditionUpdator::ByReader :
 		public SQLContainerImpl::BtreeConditionUpdator {
+private:
+	struct Data;
+	struct Entry;
+
 public:
-	explicit ByReader(TransactionContext &txn);
+	typedef bool (*KeyUpdatorFunc)(ByReader&, Entry&);
+
+	template<typename Compo>
+	struct Generator;
+	template<typename Promo>
+	struct SubGenerator;
+
 	virtual ~ByReader();
 
 	static bool isAcceptable(
 			const SQLExprs::IndexConditionList &condList, size_t pos);
 
-	void assign(
-			BaseContainer &container, SQLValues::ValueSetHolder &valuesHolder,
+	static BtreeConditionUpdator& create(
+			TransactionContext &txn, BaseContainer &container,
+			SQLValues::ValueSetHolder &valuesHolder,
 			const SQLExprs::IndexSelector *selector,
 			const SQLExprs::IndexConditionList &condList,
 			const util::Vector<SQLValues::TupleColumn> &columnList,
-			TupleListReader &reader, size_t pos, size_t &nextPos);
+			TupleListReader &reader, size_t pos, size_t &nextPos,
+			util::AllocUniquePtr<ByReader> &updator);
 
 	virtual void update(BtreeSearchContext &sc);
-	virtual void next();
+	virtual void next() = 0;
+
+protected:
+	explicit ByReader(Data &src);
+
+	template<typename SomePromo, typename Compo, typename T>
+	void nextAt();
 
 private:
-	bool readValues();
-	bool readValuesDetail();
+	template<typename SomePromo, typename Compo, typename T>
+	class Typed;
 
-	TransactionContext &txn_;
-	util::StackAllocator &alloc_;
+	template<typename T>
+	struct TypeChecker;
 
-	const SQLExprs::IndexSelector *selector_;
-	SQLValues::ValueSetHolder *valuesHolder_;
+	struct Data {
+		Data(
+				TransactionContext &txn, SQLValues::ValueSetHolder &valuesHolder,
+				const SQLExprs::IndexSelector *selector, TupleListReader &reader);
 
-	SQLExprs::IndexConditionList subCondList_;
-	SQLExprs::IndexConditionList localSubCondList_;
-	util::Vector<SQLValues::TupleColumn> columnList_;
-	util::Vector<ContainerColumnType> columnTypeList_;
-	util::Vector<TermCondition> termCondList_;
-	Value::Pool valuePool_;
+		TransactionContext &txn_;
+		util::StackAllocator &alloc_;
 
-	TupleListReader *reader_;
+		SQLValues::ValueSetHolder &valuesHolder_;
+		const SQLExprs::IndexSelector &selector_;
+
+		util::Vector<Entry> entryList_;
+		util::Vector<ContainerColumnType> columnTypeList_;
+		util::Vector<TermCondition> termCondList_;
+
+		TupleListReader &reader_;
+		bool bindable_;
+	};
+
+	static void generateTypedUpdator(
+			bool somePromotable, bool composite, TupleColumnType frontKeyType,
+			Data &data, util::AllocUniquePtr<ByReader> &updator);
+	template<typename SomePromo, typename Compo, typename T>
+	static void generateTypedUpdatorAt(
+			Data &data, util::AllocUniquePtr<ByReader> &updator);
+
+	static KeyUpdatorFunc generateKeyUpdator(
+			bool promotable, TupleColumnType keyType);
+
+	bool updateKeySet();
+	template<typename SomePromo, typename Compo, typename T>
+	bool updateKeySetAt();
+
+	template<typename SomePromo, typename Compo, typename T>
+	bool updateCurrentKeySet();
+	template<typename SomePromo>
+	void updateFollowingKeySet();
+
+	template<typename Promo, typename T>
+	static bool executeKeyUpdator(ByReader &updator, Entry &entry);
+	template<typename, typename T>
+	bool updateKey(Entry &entry, const util::TrueType&);
+	template<typename Promo, typename T>
+	bool updateKey(Entry &entry, const util::FalseType&);
+
+	template<typename>
+	bool readKey(Entry &entry, const util::TrueType&);
+	template<typename T>
+	bool readKey(Entry &entry, const util::FalseType&);
+
+	static void swapElements(Data &src, Data &dest);
+	static void clearElements(Data &data);
+
+	static size_t setUpEntries(
+			const BaseContainer &container,
+			const SQLExprs::IndexConditionList &condList,
+			const util::Vector<SQLValues::TupleColumn> &columnList,
+			size_t pos, util::Vector<ContainerColumnType> &columnTypeList,
+			util::Vector<Entry> &entryList, bool &somePromotable);
+	static bool tryAppendEntry(
+			const SQLExprs::IndexCondition &cond,
+			const util::Vector<SQLValues::TupleColumn> &columnList,
+			const util::Vector<ContainerColumnType> &columnTypeList,
+			util::Vector<Entry> &entryList, bool &promotable);
+
+	void applyKeyConditions(
+			BtreeSearchContext &sc, bool withValues, const size_t *keyCount);
+	const void* prepareKeyData(
+			bool withValues, Entry &entry, uint32_t &keySize);
+
+	static bool isAssignableKey(
+			size_t keyPos, const SQLExprs::IndexCondition &cond);
+	static TupleColumnType getKeyType(ContainerColumnType src);
+	static TupleValue& getKeyRef(Entry &entry);
+
+	static SQLValues::TupleColumn getInputColumn(
+			const SQLExprs::IndexCondition &cond,
+			const util::Vector<SQLValues::TupleColumn> &columnList);
+	static bool findInputColumnPos(
+			const SQLExprs::IndexCondition &cond, uint32_t *columnPos);
+
+	static bool isPromotable(
+			TupleColumnType keyType, const SQLValues::TupleColumn &inColumn);
+	static bool isComposite(const util::Vector<Entry> &entryList);
+
+	Data data_;
+};
+
+struct SQLContainerImpl::IndexConditionUpdator::ByReader::Entry {
+	Entry(
+			size_t keyPos, TupleColumnType keyType,
+			const SQLExprs::IndexCondition &subCond,
+			const SQLValues::TupleColumn &inColumn, KeyUpdatorFunc func);
+
+	size_t keyPos_;
+	TupleColumnType keyType_;
+	SQLExprs::IndexCondition subCond_;
+	SQLExprs::IndexCondition localSubCond_;
+	SQLValues::TupleColumn inColumn_;
+	KeyUpdatorFunc keyUpdatorFunc_;
+};
+
+template<typename Compo>
+struct SQLContainerImpl::IndexConditionUpdator::ByReader::Generator {
+	typedef void RetType;
+	template<typename T>
+	struct TypeAt {
+		explicit TypeAt(Generator&) {
+		}
+
+		RetType operator()(
+				Data &data, util::AllocUniquePtr<ByReader> &updator) const {
+			if (!TypeChecker<T>::UPDATOR_ACCEPTABLE) {
+				assert(false);
+				return;
+			}
+			typedef typename util::FalseType SomePromo;
+			typedef typename TypeChecker<T>::Type Type;
+			generateTypedUpdatorAt<SomePromo, Compo, Type>(data, updator);
+		}
+	};
+};
+
+template<typename Promo>
+struct SQLContainerImpl::IndexConditionUpdator::ByReader::SubGenerator {
+	typedef KeyUpdatorFunc RetType;
+	template<typename T>
+	struct TypeAt {
+		explicit TypeAt(SubGenerator&) {
+		}
+
+		RetType operator()() const {
+			if (!TypeChecker<T>::UPDATOR_ACCEPTABLE) {
+				assert(false);
+				return NULL;
+			}
+			typedef typename TypeChecker<T>::Type Type;
+			return &executeKeyUpdator<Promo, Type>;
+		}
+	};
+};
+
+template<typename SomePromo, typename Compo, typename T>
+class SQLContainerImpl::IndexConditionUpdator::ByReader::Typed :
+		public SQLContainerImpl::IndexConditionUpdator::ByReader {
+public:
+	explicit Typed(Data &data) : ByReader(data) {
+	}
+
+	virtual ~Typed() {
+	}
+
+	virtual void next() {
+		nextAt<SomePromo, Compo, T>();
+	}
+};
+
+template<typename T>
+struct SQLContainerImpl::IndexConditionUpdator::ByReader::TypeChecker {
+	typedef typename SQLValues::TypeUtils::Traits<T::COLUMN_TYPE> TraitsType;
+
+	enum {
+		UPDATOR_ACCEPTABLE = (
+				TraitsType::FOR_NORMAL_FIXED ||
+				TraitsType::SIZE_VAR_OR_LARGE_EXPLICIT)
+	};
+
+	typedef SQLValues::Types::Long UnacceptableType;
+	typedef typename util::Conditional<
+			UPDATOR_ACCEPTABLE, T, UnacceptableType>::Type Type;
 };
 
 class SQLContainerImpl::IndexSearchContext {
@@ -1591,7 +1792,9 @@ public:
 	IndexSearchContext(
 			TransactionContext &txn, SQLValues::VarContext &varCxt,
 			SQLOps::OpAllocatorManager &allocManager,
-			util::StackAllocator::BaseAllocator &baseAlloc);
+			util::StackAllocator::BaseAllocator &baseAlloc,
+			util::Stopwatch &watch, const uint32_t *partialExecMaxMillis,
+			const std::pair<uint64_t, uint64_t> &partialExecSizeRange);
 
 	void clear();
 
@@ -1623,6 +1826,7 @@ private:
 	IndexConditionUpdator indexConditionUpdator_;
 
 	SearchResult result_;
+	util::LocalUniquePtr<ExtendedSuspendLimitter> suspendLimitter_;
 };
 
 class SQLContainerImpl::CursorScope {
@@ -1638,7 +1842,9 @@ public:
 	IndexSearchContext& prepareIndexSearchContext(
 			SQLValues::VarContext &varCxt, const IndexScanInfo *info,
 			SQLOps::OpAllocatorManager &allocManager,
-			util::StackAllocator::BaseAllocator &baseAlloc);
+			util::StackAllocator::BaseAllocator &baseAlloc,
+			const uint32_t *partialExecMaxMillis,
+			const std::pair<uint64_t, uint64_t> &partialExecSizeRange);
 	IndexSearchContext* findIndexSearchContext();
 
 	int64_t getStartPartialExecCount();
@@ -1829,7 +2035,8 @@ struct SQLContainerImpl::BitUtils::DenseValues {
 	typedef V ValueType;
 
 	struct ValueConstants {
-		static const uint32_t FULL_BIT_COUNT = (sizeof(ValueType) * CHAR_BIT);
+		static const uint32_t FULL_BIT_COUNT =
+				static_cast<uint32_t>(sizeof(ValueType) * CHAR_BIT);
 		static const uint32_t LOW_BIT_COUNT =
 				util::ILog2<FULL_BIT_COUNT>::VALUE;
 		static const ValueType LOW_BIT_MASK =
@@ -1923,6 +2130,8 @@ public:
 	bool isCursorFinished();
 	void restartCursor();
 
+	void setSuspendable(bool suspendable);
+
 	bool getModificationProfile(
 			IndexProfiler::ModificationType modification, bool onMvcc,
 			int64_t &count) const;
@@ -2005,7 +2214,7 @@ private:
 	bool checkRemovedSub(
 			EntryType type, Entry &entry, HotSlot &removalSlot);
 
-	static bool isLimitReached(
+	bool isLimitReached(
 			const SearchResult &result, uint64_t limit, uint32_t rowArraySize);
 	static void entryToResult(
 			EntryType type, const Entry &entry, SearchResult &result);
@@ -2072,6 +2281,7 @@ private:
 
 	uint32_t stageSizeLimit_;
 	bool large_;
+	bool suspendable_;
 
 	GroupMap groupMap_;
 	SlotList freeSlotList_;
@@ -2297,28 +2507,26 @@ struct SQLContainerImpl::OIdTable::CoderConstants {
 
 class SQLContainerImpl::RowIdFilter {
 public:
+	class RowIdCursor;
+
 	RowIdFilter(
+			const OpContext::Source &cxtSrc,
 			SQLOps::OpAllocatorManager &allocManager,
-			util::StackAllocator::BaseAllocator &baseAlloc, RowId maxRowId);
+			util::StackAllocator::BaseAllocator &baseAlloc, RowId maxRowId,
+			int64_t memoryLimit);
 
 	bool accept(RowId rowId);
 
-	void load(OpContext::Source &cxtSrc, uint32_t input);
-	uint32_t save(OpContext::Source &cxtSrc);
-
-	void load(TupleListReader &reader);
-	void save(TupleListWriter &writer);
+	static bool tryAdjust(RowIdFilter *filter);
+	void adjust();
+	bool isDuplicatable();
 
 	void setReadOnly();
 	bool isReadOnly();
 
-	uint64_t getTotalAllocationSize();
-
 private:
 	enum {
-		BITS_KEY_COLUMN_POS = 0,
-		BITS_VALUE_COLUMN_POS = 1,
-		BITS_STORE_COLUMN_COUNT = 2
+		BITS_ENTRY_POS_COUNT = sizeof(int64_t) * CHAR_BIT
 	};
 
 	typedef BitUtils::DenseValues<RowId> RowIdValues;
@@ -2326,13 +2534,51 @@ private:
 
 	typedef SQLAlgorithmUtils::DenseBitSet<> BitSet;
 
+	TupleListReader& getBitsEntryReader(
+			util::LocalUniquePtr<OpContext> &localCxt);
+	bool hasCurrentRowId();
+	RowId getCurrentRowId();
+	void prepareCurrentRowId(TupleListReader &reader, bool forNext);
+
+	void adjustDetail(OpContext &cxt);
+	void initializeBits();
+
+	void readBitsEntry(TupleListReader &reader, BitSet::CodedEntry &entry);
+	void writeBits(TupleListWriter &writer);
+
+	bool isAllocationLimitReached();
+	uint64_t getAllocationUsageSize();
+
+	OpContext::Source cxtSrc_;
 	SQLOps::OpAllocatorManager &allocManager_;
 	SQLOps::OpStore::AllocatorRef allocRef_;
 	util::StackAllocator &alloc_;
+	util::LocalUniquePtr<util::StackAllocator::Scope> allocScope_;
 
 	RowId maxRowId_;
-	BitSet rowIdBits_;
+	BitSet *rowIdBits_;
 	bool readOnly_;
+	bool duplicatable_;
+	bool cursorStarted_;
+	int64_t memLimit_;
+
+	util::LocalUniquePtr<uint32_t> tupleListIndex_;
+	BitSet::CodedEntry currentBitsEntry_;
+	int32_t currentBitsPos_;
+};
+
+class SQLContainerImpl::RowIdFilter::RowIdCursor {
+public:
+	explicit RowIdCursor(RowIdFilter &filter);
+
+	bool exists();
+	RowId get();
+	void next();
+
+private:
+	RowIdFilter &filter_;
+	util::LocalUniquePtr<OpContext> localCxt_;
+	TupleListReader &reader_;
 };
 
 struct SQLContainerImpl::ScanSimulatorUtils {

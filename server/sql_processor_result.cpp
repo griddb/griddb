@@ -70,8 +70,9 @@ ResultProcessor::~ResultProcessor() {
 }
 
 bool ResultProcessor::applyInfo(
-	Context& cxt, const Option& option,
-	const TupleInfoList& inputInfo, TupleInfo& outputInfo) {
+		Context& cxt, const Option& option,
+		const TupleInfoList& inputInfo, TupleInfo& outputInfo) {
+	UNUSED_VARIABLE(option);
 
 	try {
 		if (inputInfo.size() != 1) {
@@ -80,7 +81,6 @@ bool ResultProcessor::applyInfo(
 				"Result processor input size must be 1, but current=" << inputInfo.size());
 		}
 
-		size_t inputSize = inputInfo.size();
 		const TupleInfo& tupleInfo = inputInfo[0];
 		columnSize_ = tupleInfo.size();
 		columnList_ = static_cast<TupleList::TupleColumnType*>(
@@ -114,8 +114,10 @@ bool ResultProcessor::applyInfo(
 	}
 }
 
-bool ResultProcessor::pipe(Context& cxt,
-	InputId inputId, const Block& block) {
+bool ResultProcessor::pipe(
+		Context& cxt, InputId inputId, const Block& block) {
+	UNUSED_VARIABLE(inputId);
+
 	try {
 		if (isExplainAnalyze_) {
 			return false;
@@ -157,6 +159,7 @@ bool ResultProcessor::pipe(Context& cxt,
 }
 
 bool ResultProcessor::finish(Context& cxt, InputId inputId) {
+	UNUSED_VARIABLE(inputId);
 
 	try {
 		cxt.getTask()->setResultCompleted();
@@ -190,7 +193,9 @@ bool ResultProcessor::finish(Context& cxt, InputId inputId) {
 }
 
 void ResultProcessor::exportTo(
-	Context& cxt, const OutOption& option) const {
+		Context& cxt, const OutOption& option) const {
+	UNUSED_VARIABLE(cxt);
+	UNUSED_VARIABLE(option);
 }
 
 SQLDetailProfs::SQLDetailProfs(
@@ -308,7 +313,7 @@ bool SQLDetailProfs::check(int64_t& startTime, uint32_t& elapsedMills) {
 		}
 		if (execTime_ >= traceLimitInterval_) {
 			startTime = startTime_;
-			elapsedMills = execTime_;
+			elapsedMills = static_cast<uint32_t>(execTime_);
 			return true;
 		}
 	}

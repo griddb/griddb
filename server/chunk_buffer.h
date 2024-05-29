@@ -138,6 +138,7 @@ struct ChunkBufferStats {
 */
 struct CompressorParam {
 	static const int32_t DEFAULT_MIN_SPACE_SAVINGS = 10; 
+	static const int32_t DEFAULT_ZSTD_COMPRESSION_LEVEL = 1; 
 
 	ChunkCompressionTypes::Mode mode_; 
 
@@ -163,7 +164,9 @@ private:
 	static const int64_t DISABLE_COLD = INT64_MAX;
 
 	L* locker_;
-	std::unique_ptr<ChunkCompressorBase> chunkCompressor_;
+	ChunkCompressorBase *chunkCompressor_;
+	std::unique_ptr<ChunkCompressorBase> zlibCompressor_;
+	std::unique_ptr<ChunkCompressorBase> zstdCompressor_;
 	PartitionList* partitionList_;
 	PartitionGroupId pgId_;
 	PartitionId beginPId_;
@@ -632,19 +635,22 @@ inline LRUFrame* LRUTable::Cursor::next(int32_t &pos) {
 inline void BufferHashMap::insert(
 		uint32_t pId, uint64_t bufferId, int32_t pos) {
 
+	const BufferMapKey key(
+			static_cast<int32_t>(pId), static_cast<int32_t>(bufferId));
 #ifdef NDEBUG
-	map_.emplace(BufferMapKey(pId, bufferId), pos);
+	map_.emplace(key, pos);
 #else
-	bool result = map_.emplace(BufferMapKey(pId, bufferId), pos).second;
+	bool result = map_.emplace(key, pos).second;
 	assert(result); 
 #endif
 };
 
 
 inline int32_t BufferHashMap::find(uint32_t pId, uint64_t bufferId) const {
-	BufferMap::const_iterator itr = map_.find(BufferMapKey(pId, bufferId));
+	BufferMap::const_iterator itr = map_.find(BufferMapKey(
+			static_cast<int32_t>(pId), static_cast<int32_t>(bufferId)));
 	if (itr != map_.end()) {
-		return itr->second;
+		return static_cast<int32_t>(itr->second);
 	}
 	else {
 		return -1;
@@ -652,7 +658,8 @@ inline int32_t BufferHashMap::find(uint32_t pId, uint64_t bufferId) const {
 };
 
 inline bool BufferHashMap::remove(uint32_t pId, uint64_t bufferId) {
-	BufferMap::iterator itr = map_.find(BufferMapKey(pId, bufferId));
+	BufferMap::iterator itr = map_.find(BufferMapKey(
+			static_cast<int32_t>(pId), static_cast<int32_t>(bufferId)));
 	if (itr != map_.end()) {
 		map_.erase(itr);
 		return true;
@@ -665,13 +672,15 @@ inline bool BufferHashMap::remove(uint32_t pId, uint64_t bufferId) {
 inline bool BufferHashMap::swapPosition(
 		uint32_t pId, uint64_t bufferId1, uint64_t bufferId2,
 		int32_t &pos1, int32_t &pos2) {
-	BufferMap::iterator itr1 = map_.find(BufferMapKey(pId, bufferId1));
-	BufferMap::iterator itr2 = map_.find(BufferMapKey(pId, bufferId2));
+	BufferMap::iterator itr1 = map_.find(BufferMapKey(
+			static_cast<int32_t>(pId), static_cast<int32_t>(bufferId1)));
+	BufferMap::iterator itr2 = map_.find(BufferMapKey(
+			static_cast<int32_t>(pId), static_cast<int32_t>(bufferId2)));
 	if (itr1 == map_.end() || itr2 == map_.end()) {
 		return false;
 	}
-	pos1 = itr1->second;
-	pos2 = itr2->second;
+	pos1 = static_cast<int32_t>(itr1->second);
+	pos2 = static_cast<int32_t>(itr2->second);
 	std::swap(itr1->second, itr2->second);
 	return true;
 }
@@ -1190,9 +1199,9 @@ inline void LRUTable::rebalance() {
 	int32_t hotCount = static_cast<int32_t>(
 			static_cast<double>(currentNumElems_) * hotRate_ + 0.5);
 	if (hotCount < hotNumElems_) {
-		int32_t moved = shiftHotToCold(hotNumElems_ - hotCount);
+		shiftHotToCold(hotNumElems_ - hotCount);
 	} else if (hotCount > hotNumElems_) {
-		int32_t moved = shiftColdToHot(hotCount - hotNumElems_);
+		shiftColdToHot(hotCount - hotNumElems_);
 	}
 }
 
@@ -1298,7 +1307,7 @@ inline int32_t LRUTable::getColdNumElems() {
 }
 
 inline int32_t LRUTable::getSize() const {
-	return table_.size();
+	return static_cast<int32_t>(table_.size());
 }
 
 inline LRUFrame* LRUTable::get(int32_t pos) {

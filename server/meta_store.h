@@ -350,10 +350,6 @@ public:
 			ContainerAttribute attribute, BaseContainer &container,
 			BaseContainer *subContainer) const;
 
-	void setErasableTimeLimit(Timestamp limit) {
-		limit = erasableTimeLimit_;
-	}
-
 private:
 	static const char8_t* containerTypeToName(ContainerType type);
 	static const char8_t* expirationTypeToName(ExpireType type);
@@ -588,7 +584,8 @@ public:
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
-	virtual void createIndex(TransactionContext &txn, const IndexInfo &indexInfo,
+	virtual void createIndex(
+			TransactionContext &txn, const IndexInfo &indexInfo,
 			IndexCursor& indexCursor,
 			bool isIndexNameCaseSensitive = false, 
 		    CreateDropIndexMode mode = INDEX_MODE_NOSQL,
@@ -597,6 +594,8 @@ public:
 		static_cast<void>(indexInfo);
 		static_cast<void>(indexCursor);
 		static_cast<void>(isIndexNameCaseSensitive);
+		static_cast<void>(mode);
+		static_cast<void>(skippedByMode);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 	virtual void continueCreateIndex(TransactionContext& txn,
@@ -606,13 +605,16 @@ public:
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
-	virtual void dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
+	virtual void dropIndex(
+			TransactionContext &txn, IndexInfo &indexInfo,
 			bool isIndexNameCaseSensitive = false,
 			CreateDropIndexMode mode = INDEX_MODE_NOSQL,
 			bool *skippedByMode = NULL) {
 		static_cast<void>(txn);
 		static_cast<void>(indexInfo);
 		static_cast<void>(isIndexNameCaseSensitive);
+		static_cast<void>(mode);
+		static_cast<void>(skippedByMode);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
@@ -780,7 +782,8 @@ protected:
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+	virtual bool getIndexData(
+			TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
 			MapType mapType, bool withUncommitted, IndexData &indexData,
 			bool withPartialMatch = false) const {
 		static_cast<void>(txn);
@@ -788,6 +791,7 @@ protected:
 		static_cast<void>(mapType);
 		static_cast<void>(withUncommitted);
 		static_cast<void>(indexData);
+		static_cast<void>(withPartialMatch);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 	virtual bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,

@@ -341,7 +341,6 @@ bool LocalTempStore::BufferManager::allocateMemory(BlockId id, BlockInfo* &block
 */
 void LocalTempStore::BufferManager::allocate(
 		BlockInfo* &blockInfo, uint64_t affinity, bool force) {
-	bool swapped = false;
 	static_cast<void>(affinity);
 	BlockId id = UNDEF_BLOCKID;
 	try {
@@ -1192,6 +1191,7 @@ LocalTempStore::BlockInfo::BlockInfo(LocalTempStore &store, BlockId blockId)
 : data_(NULL), baseBlockInfo_(NULL), store_(&store)
 , blockId_(0)   
 , refCount_(0) {
+	UNUSED_VARIABLE(blockId); 
 }
 
 void LocalTempStore::BlockInfo::initialize(LocalTempStore &store, BlockId id) {
@@ -1259,6 +1259,7 @@ void LocalTempStore::BlockInfo::assign(const void *data, size_t size, bool isPar
 	const size_t blockSize = static_cast<size_t>(
 			1 << LocalTempStore::Block::Header::getBlockExpSize(data_));
 	assert(isPartial ? true : (size == blockSize));
+	UNUSED_VARIABLE(isPartial);
 
 	if (size > blockSize) {
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_BLOCK_VALIDATION_FAILED,

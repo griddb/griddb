@@ -29,22 +29,49 @@ UTIL_TRACER_DECLARE(SQL_DETAIL);
 
 typedef TableLatch TableLatch;
 
+const char8_t* getCommandString(DDLCommandType type) {
+	switch (type) {
+	case DDL_CREATE_DATABASE: return "CREATE DATABASE";
+	case DDL_DROP_DATABASE: return "DROP DATABASE";
+	case DDL_CREATE_TABLE: return "CREATE TABLE";
+	case DDL_DROP_TABLE: return "DROP TABLE";
+	case DDL_CREATE_INDEX: return "CREATE INDEX";
+	case DDL_DROP_INDEX: return "DROP INDEX";
+	case DDL_CREATE_USER: return "CREATE USER";
+	case DDL_DROP_USER: return "DROP USER";
+	case DDL_SET_PASSWORD: return "SET PASSWORD";
+	case DDL_GRANT: return "GRANT";
+	case DDL_REVOKE: return "REVOKE";
+	case DDL_BEGIN: return "BEGIN";
+	case DDL_COMMIT: return "COMMIT";
+	case DDL_ROLLBACK: return "ROLLBACK";
+	case CMD_GET_TABLE: return "GET TABLE";
+	case DDL_DROP_PARTITION: return "DROP PARTITION";
+	case DDL_ADD_COLUMN: return "ADD COLUMN";
+	case DDL_RENAME_COLUMN: return "RENAME COLUMN";
+	case DDL_CREATE_VIEW: return "CREATE VIEW";
+	case DDL_DROP_VIEW: return "DROP VIEW";
+	default: return "UNSUPPORTED";
+	}
+}
+
 DBConnection::DBConnection(
-	ConfigTable& config,
-	SQLVariableSizeGlobalAllocator& globalVarAlloc,
-	int32_t cacheSize,
-	PartitionTable* pt,
-	PartitionList* partitionList,
-	SQLService* sqlSvc) :
-	globalVarAlloc_(globalVarAlloc),
-	cacheSize_(cacheSize),
-	basicStoreList_(globalVarAlloc),
-	storeMap_(
-		NoSQLStoreMap::key_compare(), globalVarAlloc),
-	pt_(pt),
-	partitionList_(partitionList),
-	dsConfig_(NULL),
-	sqlSvc_(sqlSvc) {
+		ConfigTable& config,
+		SQLVariableSizeGlobalAllocator& globalVarAlloc,
+		int32_t cacheSize,
+		PartitionTable* pt,
+		PartitionList* partitionList,
+		SQLService* sqlSvc) :
+		globalVarAlloc_(globalVarAlloc),
+		cacheSize_(cacheSize),
+		basicStoreList_(globalVarAlloc),
+		storeMap_(
+			NoSQLStoreMap::key_compare(), globalVarAlloc),
+		pt_(pt),
+		partitionList_(partitionList),
+		dsConfig_(NULL),
+		sqlSvc_(sqlSvc) {
+	UNUSED_VARIABLE(config);
 
 	NoSQLStore* store = NULL;
 
@@ -223,8 +250,8 @@ NoSQLStore* DBConnection::getNoSQLStore(
 
 void NoSQLStore::createCache() {
 	if (cache_ == NULL) {
-		cache_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
-			SQLTableCache(cacheSize_, globalVarAlloc_);
+		cache_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_) SQLTableCache(
+				static_cast<int32_t>(cacheSize_), globalVarAlloc_);
 	}
 }
 
@@ -445,7 +472,9 @@ void NoSQLStore::checkAdministrator(SQLExecution* execution) {
 	@brief 指定名称が妥当(NULL或いは空でない)か
 */
 void NoSQLStore::checkValidName(
-	DDLCommandType commandType, const char* name) {
+		DDLCommandType commandType, const char* name) {
+	UNUSED_VARIABLE(commandType);
+
 	if (name == NULL || (name && strlen(name) == 0)) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_SQL_INVALID_NAME, "Invalid symbol name=" << name);
@@ -580,7 +609,7 @@ void NoSQLStore::grant(
 	util::StackAllocator& alloc = ec.getAllocator();
 	try {
 		const char* connectedDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(connectedDbName);
+		adjustConnectedDb(connectedDbName);
 		ExecuteCondition condition(&userName, &dbName, NULL, NULL);
 		checkExecutable(alloc, commandType, execution, false, condition);
 		const NameWithCaseSensitivity gsUsers(GS_USERS);
@@ -621,7 +650,7 @@ void NoSQLStore::revoke(
 	util::StackAllocator& alloc = ec.getAllocator();
 	try {
 		const char* connectedDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(connectedDbName);
+		adjustConnectedDb(connectedDbName);
 		ExecuteCondition condition(&userName, &dbName, NULL, NULL);
 		checkExecutable(alloc, commandType, execution, false, condition);
 		const NameWithCaseSensitivity gsUsers(GS_USERS);
@@ -761,12 +790,11 @@ public:
 		ownerNodeIdList_.assign(pt_->getPartitionNum(), UNDEF_NODEID);
 		nodeNum_ = pt_->getNodeNum();
 		pt_->getLiveNodeIdList(activeNodeList_);
-		activeNodeNum_ = activeNodeList_.size();
+		activeNodeNum_ = static_cast<int32_t>(activeNodeList_.size());
 		if (nodeNum_ == 0 || activeNodeNum_ == 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INVALID_NODE_ASSIGN, "Active node is not found");
 		}
 		assignCountList_.assign(activeNodeNum_, 0);
-		PartitionId partitionNum = pt_->getPartitionNum();
 		NodeId ownerNodeId;
 		int32_t nodePos;
 		activeNodeMap_.assign(nodeNum_, -1);
@@ -782,7 +810,8 @@ public:
 			util::Vector<PartitionId> tmpIdList(alloc);
 			divideList_.push_back(tmpIdList);
 		}
-		for (uint32_t pId = 0; pId < partitionNum_; pId++) {
+		for (uint32_t pId = 0;
+				pId < static_cast<PartitionId>(partitionNum_); pId++) {
 			ownerNodeId = pt_->getNewSQLOwner(pId);
 			ownerNodeIdList_[pId] = ownerNodeId;
 			if (ownerNodeId == UNDEF_NODEID || ownerNodeId >= nodeNum_) {
@@ -804,7 +833,7 @@ public:
 		int32_t min = INT32_MAX;
 		int32_t count = 0;
 		for (nodePos = 0; nodePos < activeNodeNum_; nodePos++) {
-			count = static_cast<int64_t>(divideList_.size());
+			count = static_cast<int32_t>(divideList_.size());
 			if (count > max) {
 				max = count;
 			}
@@ -817,7 +846,11 @@ public:
 		}
 	}
 
-	void setOptionalIntervalAssignment(const PartitionGroupConfig& config, int32_t workerGroupNo, int32_t workerGroupPos, bool setGroupPositionOption) {
+	void setOptionalIntervalAssignment(
+			const PartitionGroupConfig& config, int32_t workerGroupNo,
+			int32_t workerGroupPos, bool setGroupPositionOption) {
+		UNUSED_VARIABLE(setGroupPositionOption);
+
 		assert(workerNum_ >= 0);
 		if (ownerLoss_) {
 			return;
@@ -846,13 +879,17 @@ public:
 				partitionDevideList_[i].push_back(pId);
 				ownerCountList[ownerNodeIdList_[pId]]++;
 			}
-			for (PartitionId pId = startPId; pId < groupBasePId; pId++) {
+			for (PartitionId pId = startPId;
+					pId < static_cast<PartitionId>(groupBasePId); pId++) {
 				partitionDevideList_[i].push_back(pId);
 				ownerCountList[ownerNodeIdList_[pId]]++;
 			}
 
 			if (workerGroupPos == UNDEF_WORKER_GROUP_POS) {
-				randomShuffle(partitionDevideList_[i], partitionDevideList_[i].size(), random_);
+				randomShuffle(
+						partitionDevideList_[i],
+						static_cast<int32_t>(partitionDevideList_[i].size()),
+						random_);
 			}
 		}
 	}
@@ -940,7 +977,7 @@ private:
 				int32_t randomPos = random_.nextInt32(static_cast<int32_t>(candList.size()));
 				targetPId = candList[randomPos];
 			}
-			assert(targetPId != -1);
+			assert(targetPId != static_cast<PartitionId>(-1));
 			if (ownerNodeIdList_[targetPId] != UNDEF_NODEID) {
 				nodePos = activeNodeMap_[ownerNodeIdList_[targetPId]];
 				if (nodePos != -1) {
@@ -972,7 +1009,8 @@ private:
 		condenseIdList.assign(partitionNum_, 0);
 		int32_t nodePos;
 		if (useRandom_) {
-			for (PartitionId pId = 0; pId < partitionNum_; pId++) {
+			for (PartitionId pId = 0;
+					pId < static_cast<PartitionId>(partitionNum_); pId++) {
 				condenseIdList[pId] = pId;
 			}
 			randomShuffle(condenseIdList, partitionNum_, random_);
@@ -980,7 +1018,10 @@ private:
 		}
 		for (nodePos = 0; nodePos < activeNodeNum_; nodePos++) {
 			if (divideList_[nodePos].size() != 0) {
-				randomShuffle(divideList_[nodePos], divideList_[nodePos].size(), random_);
+				randomShuffle(
+						divideList_[nodePos],
+						static_cast<int32_t>(divideList_[nodePos].size()),
+						random_);
 			}
 		}
 		uint32_t minVal = UINT32_MAX;
@@ -1047,7 +1088,9 @@ private:
 						candList.push_back(nodePos);
 					}
 				}
-				randomShuffle(candList, candList.size(), random_);
+				randomShuffle(
+						candList, static_cast<int32_t>(candList.size()),
+						random_);
 			}
 			for (int32_t i = 0; i < workerNum_; i++) {
 				currentWorkerGroupNo = groupPos++ % workerNum_;
@@ -1057,8 +1100,8 @@ private:
 					partitionDevideList_[currentWorkerGroupNo].erase(partitionDevideList_[currentWorkerGroupNo].begin());
 				}
 				else {
-					for (int32_t j = 0; j < candList.size(); j++) {
-						for (int32_t k = 0; k < partitionDevideList_[currentWorkerGroupNo].size(); k++) {
+					for (size_t j = 0; j < candList.size(); j++) {
+						for (size_t k = 0; k < partitionDevideList_[currentWorkerGroupNo].size(); k++) {
 							if (ownerNodeIdList_[partitionDevideList_[currentWorkerGroupNo][k]] == candList[j]) {
 								condenseIdList[pos] = partitionDevideList_[currentWorkerGroupNo][k];
 								partitionDevideList_[currentWorkerGroupNo].erase((partitionDevideList_[currentWorkerGroupNo].begin() + k));
@@ -1101,7 +1144,8 @@ private:
 	void generateIntervalHashAssignment(util::Vector<PartitionId>& condenseIdList,
 		util::Vector<NodeAffinityNumber>& assignIdList) {
 		generateIntervalAssignment(condenseIdList, assignIdList);
-		for (PartitionId pId = 0;pId < partitionNum_; pId++) {
+		for (PartitionId pId = 0;
+				pId < static_cast<PartitionId>(partitionNum_); pId++) {
 			condenseIdList[pId] *= tablePartitioningNum_;
 		}
 	}
@@ -1145,7 +1189,6 @@ void NoSQLStore::createTable(
 	if (tableName.isCaseSensitive_) {
 		option.caseSensitivity_.setContainerNameCaseSensitive();
 	}
-	CreateTableInfo* createTableInfo = static_cast<CreateTableInfo*>(baseInfo);
 	bool appendCache = false;
 	bool appendSchema = false;
 	typedef std::vector<ColumnId, util::StdAllocator<
@@ -1153,7 +1196,7 @@ void NoSQLStore::createTable(
 	ColumnIdList* columnIdList = NULL;
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(
 			tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
@@ -1327,15 +1370,18 @@ void NoSQLStore::createTable(
 			if (primaryKeyList.size() > 0) {
 				bool find = false;
 				for (size_t pos = 0; pos < primaryKeyList.size(); pos++) {
-					if (primaryKeyList[pos] == partitionColumnId) {
+					if (primaryKeyList[pos] ==
+							static_cast<ColumnId>(partitionColumnId)) {
 						find = true;
 						break;
 					}
 				}
-				if (find && subPartitionColumnId != UNDEF_PARTITIONID) {
+				if (find && static_cast<ColumnId>(subPartitionColumnId) !=
+						UNDEF_PARTITIONID) {
 					find = false;
 					for (size_t pos = 0; pos < primaryKeyList.size(); pos++) {
-						if (primaryKeyList[pos] == subPartitionColumnId) {
+						if (primaryKeyList[pos] ==
+								static_cast<ColumnId>(subPartitionColumnId)) {
 							find = true;
 							break;
 						}
@@ -1372,30 +1418,38 @@ void NoSQLStore::createTable(
 						[partitionColumnId]->columnName_->name_->c_str()
 						<< "' must be specifed 'NOT NULL' constraint");
 				}
-				intervalValue = createTableOption.optInterval_;
-				assert(intervalValue != 0);
+				int64_t intervalValueBase = createTableOption.optInterval_;
+				assert(intervalValueBase != 0);
 				TupleList::TupleColumnType columnType
 					= (*createTableOption.columnInfoList_)[partitionColumnId]->type_;
 				if (TupleColumnTypeUtils::isTimestampFamily(columnType)) {
 					isTimestampFamily = true;
-					if (createTableOption.optIntervalUnit_ !=
-						util::DateTime::FIELD_DAY_OF_MONTH) {
+					switch (createTableOption.optIntervalUnit_) {
+					case util::DateTime::FIELD_DAY_OF_MONTH :
+						intervalValue = 24 * 3600 * 1000;
+						intervalUnit = static_cast<uint8_t>(util::DateTime::FIELD_DAY_OF_MONTH);
+						break;
+					case util::DateTime::FIELD_HOUR:
+						intervalValue = 1 * 3600 * 1000;
+						intervalUnit = static_cast<uint8_t>(util::DateTime::FIELD_HOUR);
+						break;
+					default:
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
-							"You can only specify 'day' for interval time unit");
+							"You can only specify 'day' or 'hour' for interval time unit");
+						break;
 					}
-					int32_t partitioningCount = 1;
-					if (24 * 3600 * 1000 > INT64_MAX / intervalValue / partitioningCount) {
+
+					if (intervalValue > INT64_MAX / intervalValueBase) {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_OVERFLOW, "Interval value overflow as long value");
 					}
-					intervalValue = 24 * 3600 * 1000 * intervalValue;
-					intervalUnit = static_cast<uint8_t>(util::DateTime::FIELD_DAY_OF_MONTH);
+					intervalValue = intervalValue * intervalValueBase;
 				}
 				else {
+					intervalValue = createTableOption.optInterval_;
 					if (createTableOption.optIntervalUnit_ != -1) {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
 							"Interval time unit can be specified only when partitioning key column type is timestamp");
 					}
-					bool numericLimit = false;
 					switch (columnType) {
 					case TupleList::TYPE_BYTE:
 						if (intervalValue >= static_cast<int64_t>(INT8_MAX) + 1) {
@@ -1638,13 +1692,14 @@ void NoSQLStore::createTable(
 			}
 			baseInfo->endSync();
 
-			int32_t baseSubContainerId = 0;
 			int32_t currentPartitioningCount = currentPartitioningInfo->getCurrentPartitioningCount();
 			baseInfo->updateAckCount(currentPartitioningCount);
 			NodeAffinityNumber subContainerId;
 			try {
-				for (subContainerId = 0; subContainerId <
-					currentPartitioningCount; subContainerId++) {
+				for (subContainerId = 0;
+						subContainerId < static_cast<NodeAffinityNumber>(
+								currentPartitioningCount);
+						subContainerId++) {
 					if (subContainerId != 0
 						&& currentPartitioningInfo->assignStatusList_[subContainerId] == INDEX_STATUS_DROP_START) {
 						continue;
@@ -1662,7 +1717,9 @@ void NoSQLStore::createTable(
 							*currentPartitioningInfo, tablePartitioningIndexInfo, tableName, partitionNum,
 							currentPartitioningInfo->assignNumberList_[subContainerId]);
 					}
-					schemaInfo->setContainerInfo(subContainerId, *currentContainer);
+					schemaInfo->setContainerInfo(
+							static_cast<int32_t>(subContainerId),
+							*currentContainer);
 					if (subContainerId == 0) {
 						schemaInfo->setOptionList(optionList);
 					}
@@ -1803,12 +1860,11 @@ void NoSQLStore::createView(
 	if (tableName.isCaseSensitive_) {
 		option.caseSensitivity_.setContainerNameCaseSensitive();
 	}
-	CreateViewInfo* createTableInfo = static_cast<CreateViewInfo*>(baseInfo);
 	bool appendCache = false;
 	const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 		checkExecutable(alloc, commandType, execution, false, condition);
@@ -1902,7 +1958,6 @@ void NoSQLStore::dropView(
 	const NameWithCaseSensitivity& tableName,
 	bool ifExists) {
 
-	util::StackAllocator& alloc = ec.getAllocator();
 	DDLCommandType commandType = DDL_DROP_VIEW;
 	NoSQLStoreOption option(execution);
 	if (dbName.isCaseSensitive_) {
@@ -1913,7 +1968,7 @@ void NoSQLStore::dropView(
 	}
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 
@@ -1976,7 +2031,7 @@ void NoSQLStore::dropTable(
 	const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 
@@ -2077,11 +2132,17 @@ void NoSQLStore::dropTable(
 }
 
 void NoSQLStore::dropTablePost(
-	EventContext& ec,
-	SQLExecution* execution,
-	const NameWithCaseSensitivity& dbName,
-	const NameWithCaseSensitivity& tableName,
-	DDLBaseInfo* baseInfo) {
+		EventContext& ec,
+		SQLExecution* execution,
+		const NameWithCaseSensitivity& dbName,
+		const NameWithCaseSensitivity& tableName,
+		DDLBaseInfo* baseInfo) {
+	UNUSED_VARIABLE(ec);
+	UNUSED_VARIABLE(execution);
+	UNUSED_VARIABLE(dbName);
+	UNUSED_VARIABLE(tableName);
+	UNUSED_VARIABLE(baseInfo);
+
 }
 
 void NoSQLStore::createIndex(
@@ -2108,12 +2169,10 @@ void NoSQLStore::createIndex(
 	option.ifNotExistsOrIfExists_ = indexOption.ifNotExists_;
 	CreateIndexInfo* createIndexInfo
 		= static_cast<CreateIndexInfo*>(baseInfo);
-	DDLProcessor* ddlProcessor
-		= static_cast<DDLProcessor*>(baseInfo->processor_);
 	const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(
 			tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(
@@ -2207,7 +2266,7 @@ void NoSQLStore::createIndex(
 			for (size_t pos = 0; pos < indexColumnNameList.size(); pos++) {
 				ColumnId indexColId = currentContainer->getColumnId(
 					alloc, indexColumnNameList[pos]);
-				if (indexColId == -1) {
+				if (indexColId == static_cast<ColumnId>(-1)) {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INDEX_NOT_EXISTS,
 						"Specified column '" << indexColumnNameList[pos].name_ << "' is not exists");
 				}
@@ -2288,7 +2347,8 @@ void NoSQLStore::createIndex(
 				GS_RETHROW_USER_ERROR(e, "");
 			}
 
-			baseInfo->updateAckCount(currentPartitioningCount);
+			baseInfo->updateAckCount(
+					static_cast<int32_t>(currentPartitioningCount));
 			subOption.ifNotExistsOrIfExists_ = true;
 			for (uint32_t subContainerId = 0;
 				subContainerId < currentPartitioningCount; subContainerId++) {
@@ -2307,7 +2367,7 @@ void NoSQLStore::createIndex(
 			for (size_t pos = 0; pos < indexColumnNameList.size(); pos++) {
 				ColumnId indexColId = targetContainer.getColumnId(
 					alloc, indexColumnNameList[pos]);
-				if (indexColId == -1) {
+				if (indexColId == static_cast<ColumnId>(-1)) {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INDEX_NOT_EXISTS,
 						"Specified column '" << indexColumnNameList[pos].name_ << "' is not exists");
 				}
@@ -2422,12 +2482,10 @@ void NoSQLStore::dropIndex(
 		option.caseSensitivity_.setContainerNameCaseSensitive();
 	}
 	option.ifNotExistsOrIfExists_ = ifExists;
-	DDLProcessor* ddlProcessor
-		= static_cast<DDLProcessor*>(baseInfo->processor_);
 	const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, &indexName);
 		checkExecutable(alloc, commandType, execution, false, condition);
@@ -2452,14 +2510,11 @@ void NoSQLStore::dropIndex(
 				"Target table '" << tableName.name_ << "' is VIEW");
 		}
 
-		bool isPartitioning = (targetContainer.getContainerAttribute() == CONTAINER_ATTR_LARGE);
-
 		TablePartitioningInfo<util::StackAllocator> partitioningInfo(alloc);
 
 		NoSQLStoreOption subOption(execution);
 		subOption.setAsyncOption(baseInfo, option.caseSensitivity_);
 		subOption.ifNotExistsOrIfExists_ = ifExists;
-		int32_t indexColId = -1;
 
 		if (targetContainer.isLargeContainer()) {
 			baseInfo->largeContainerId_ = targetContainer.getContainerId();
@@ -2484,7 +2539,8 @@ void NoSQLStore::dropIndex(
 			targetContainer.updateLargeContainerStatus(INDEX_STATUS_DROP_START,
 				UNDEF_NODE_AFFINITY_NUMBER, retryOption, execStatus, indexInfo);
 
-			baseInfo->updateAckCount(currentPartitioningCount);
+			baseInfo->updateAckCount(
+					static_cast<int32_t>(currentPartitioningCount));
 			subOption.ifNotExistsOrIfExists_ = true;
 
 			NoSQLContainer* currentContainer;
@@ -2544,9 +2600,8 @@ void NoSQLStore::dropIndexPost(
 	util::StackAllocator& alloc = ec.getAllocator();
 	DDLCommandType commandType = DDL_DROP_INDEX;
 	const char8_t* connectedDbName = dbName.name_;
-	bool isAdjust = adjustConnectedDb(connectedDbName);
+	adjustConnectedDb(connectedDbName);
 
-	DropIndexInfo* dropIndexInfo = static_cast<DropIndexInfo*>(baseInfo);
 	DDLProcessor* ddlProcessor = static_cast<DDLProcessor*>(baseInfo->processor_);
 	NoSQLStoreOption option(execution);
 	if (dbName.isCaseSensitive_) {
@@ -2627,7 +2682,6 @@ TableLatch::TableLatch(
 	bool differenceCheck) : cache_(NULL), entry_(NULL),
 	schemaInfo_(NULL), useCache_(false) {
 
-	bool isCreated = false;
 	int64_t emNow = conn->getSQLService()->getEE()->getMonotonicTime();
 	SQLVariableSizeGlobalAllocator& globalVarAlloc
 		= conn->getVarAllocator();
@@ -2647,14 +2701,12 @@ TableLatch::TableLatch(
 		bool searchOnly = (withCache && !differenceCheck);
 		bool cacheSearch = (withCache || differenceCheck);
 		bool findCache = false;
-		bool isDisable = false;
 		bool diffLoad = differenceCheck;
 
 		if (cacheSearch) {
 			entry_ = cache_->get(key);
 			if (entry_) {
 				schemaInfo_ = entry_->getValue();
-				bool releaseEntry = false;
 				if (!diffLoad) {
 					diffLoad = schemaInfo_->isDiffLoad();
 				}
@@ -2743,7 +2795,7 @@ public:
 	~LocalWatcher() {
 		uint32_t lap = watch_.elapsedMillis();
 		executionManager_->setCacheLoadStat(searchCount_, skipCount_, lap);
-		if (lap >= timeout_) {
+		if (static_cast<int64_t>(lap) >= timeout_) {
 			if (type_ == SyntaxTree::TABLE_PARTITION_TYPE_UNDEF) {
 				GS_TRACE_WARNING(
 					SQL_SERVICE, GS_TRACE_SQL_LONG_UPDATING_CACHE_TABLE,
@@ -2779,13 +2831,14 @@ private:
 };
 
 bool NoSQLStore::getTable(
-	EventContext& ec,
-	SQLExecution* execution,
-	const NameWithCaseSensitivity& dbName,
-	const NameWithCaseSensitivity& tableName,
-	int64_t emNow,
-	TableSchemaInfo*& schemaInfo,
-	TableSchemaInfo* prevSchemaInfo) {
+		EventContext& ec,
+		SQLExecution* execution,
+		const NameWithCaseSensitivity& dbName,
+		const NameWithCaseSensitivity& tableName,
+		int64_t emNow,
+		TableSchemaInfo*& schemaInfo,
+		TableSchemaInfo* prevSchemaInfo) {
+	UNUSED_VARIABLE(emNow);
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	DDLCommandType commandType = CMD_GET_TABLE;
@@ -2837,8 +2890,9 @@ bool NoSQLStore::getTable(
 			int32_t actualPos = 0;
 
 			for (uint32_t subContainerId = 0;
-				subContainerId < currentPartitioningInfo.getCurrentPartitioningCount();
-				subContainerId++) {
+					subContainerId < static_cast<uint32_t>(
+							currentPartitioningInfo.getCurrentPartitioningCount());
+					subContainerId++) {
 
 				LargeContainerStatusType status
 					= currentPartitioningInfo.getPartitionStatus(subContainerId);
@@ -3086,11 +3140,12 @@ void DBConnection::dropTable(EventContext& ec,
 }
 
 void DBConnection::dropView(
-	EventContext& ec,
-	SQLExecution* execution,
-	const NameWithCaseSensitivity& dbName,
-	const NameWithCaseSensitivity& tableName,
-	bool ifExists, DDLBaseInfo* baseInfo) {
+		EventContext& ec,
+		SQLExecution* execution,
+		const NameWithCaseSensitivity& dbName,
+		const NameWithCaseSensitivity& tableName,
+		bool ifExists, DDLBaseInfo* baseInfo) {
+	UNUSED_VARIABLE(baseInfo);
 
 	NoSQLStore* store = getNoSQLStore(
 		execution->getContext().getDBId(),
@@ -3312,7 +3367,7 @@ void NoSQLStore::dropTablePartition(
 		= static_cast<DropTablePartitionInfo*>(baseInfo);
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 		checkExecutable(alloc, commandType, execution, false, condition);
@@ -3442,16 +3497,16 @@ void NoSQLStore::dropTablePartition(
 		baseInfo->largeContainerId_ = targetContainer.getContainerId();
 		uint32_t partitionNum = dbConnection_->getPartitionTable()->getPartitionNum();
 		NodeAffinityNumber affinity;
-		TupleValue* subTupleValue = NULL;
 		NoSQLStoreOption subOption(execution);
 		subOption.setAsyncOption(baseInfo, option.caseSensitivity_);
 		int64_t baseValue;
 		NodeAffinityNumber baseAffinity;
 		TargetContainerInfo targetContainerInfo;
 
-		if (partitioningInfo.subPartitioningColumnId_ != -1) {
+		if (partitioningInfo.subPartitioningColumnId_ !=
+				static_cast<ColumnId>(-1)) {
 			partitioningInfo.getAffinityNumber(partitionNum, tupleValue, NULL, 0, baseValue, baseAffinity);
-			int32_t removedCount = 0;
+			size_t removedCount = 0;
 			NodeAffinityNumber currentAffinity;
 			util::Vector<NodeAffinityNumber> affinityList(alloc);
 			for (size_t hashPos = 0; hashPos < partitioningInfo.partitioningNum_; hashPos++) {
@@ -3479,10 +3534,10 @@ void NoSQLStore::dropTablePartition(
 			targetContainer.updateLargeContainerStatus(PARTITION_STATUS_DROP_START,
 				baseAffinity, retryOption, execStatus, indexInfo);
 			dropPartitionTableInfo->affinity_ = baseAffinity;
-			baseInfo->updateAckCount(affinityList.size());
+			baseInfo->updateAckCount(static_cast<int32_t>(affinityList.size()));
 			baseInfo->processor_->setAsyncStart();
 			for (size_t pos = 0; pos < affinityList.size(); pos++) {
-				subOption.subContainerId_ = pos;
+				subOption.subContainerId_ = static_cast<int32_t>(pos);
 				NoSQLContainer* currentContainer = createNoSQLContainer(ec,
 					tableName, partitioningInfo.largeContainerId_, affinityList[pos], execution);
 				getContainer(*currentContainer, false, option);
@@ -3528,10 +3583,15 @@ void NoSQLStore::dropTablePartition(
 }
 
 void NoSQLStore::dropTablePartitionPost(
-	EventContext& ec,
-	SQLExecution* execution,
-	const NameWithCaseSensitivity& dbName,
-	const NameWithCaseSensitivity& tableName) {
+		EventContext& ec,
+		SQLExecution* execution,
+		const NameWithCaseSensitivity& dbName,
+		const NameWithCaseSensitivity& tableName) {
+	UNUSED_VARIABLE(ec);
+	UNUSED_VARIABLE(execution);
+	UNUSED_VARIABLE(dbName);
+	UNUSED_VARIABLE(tableName);
+
 	return;
 }
 void NoSQLStoreOption::setAsyncOption(
@@ -3579,7 +3639,6 @@ void NoSQLStore::addColumn(
 	const NameWithCaseSensitivity& tableName,
 	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	DDLCommandType commandType = DDL_ADD_COLUMN;
-	TableSchemaInfo* schemaInfo = NULL;
 	NoSQLStoreOption option(execution);
 	util::StackAllocator& alloc = ec.getAllocator();
 	if (dbName.isCaseSensitive_) {
@@ -3589,12 +3648,11 @@ void NoSQLStore::addColumn(
 		option.caseSensitivity_.setContainerNameCaseSensitive();
 	}
 	AddColumnInfo* addColumnInfo = static_cast<AddColumnInfo*>(baseInfo);
-	bool appendCache = false;
 	const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 
 	try {
 		const char8_t* tmpDbName = dbName.name_;
-		bool isAdjust = adjustConnectedDb(tmpDbName);
+		adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 		checkExecutable(alloc, commandType, execution, false, condition);
@@ -3620,7 +3678,6 @@ void NoSQLStore::addColumn(
 		}
 		bool isPartitioning = (targetContainer.getContainerAttribute() == CONTAINER_ATTR_LARGE);
 		TablePartitioningInfo<util::StackAllocator> partitioningInfo(alloc);
-		TablePartitioningInfo<util::StackAllocator>* currentPartitioningInfo = &partitioningInfo;
 		TablePartitioningIndexInfo tablePartitioningIndexInfo(alloc);
 
 		util::XArray<uint8_t> orgContainerSchema(alloc);
@@ -3651,8 +3708,10 @@ void NoSQLStore::addColumn(
 			containerType = partitioningInfo.containerType_;
 			bool isSuccess = false;
 			bool isError = false;
-			for (NodeAffinityNumber subContainerId = 0; subContainerId <
-				partitioningInfo.getCurrentPartitioningCount(); subContainerId++) {
+			for (NodeAffinityNumber subContainerId = 0;
+					subContainerId < static_cast<NodeAffinityNumber>(
+							partitioningInfo.getCurrentPartitioningCount());
+					subContainerId++) {
 				if (partitioningInfo.assignStatusList_[subContainerId] == PARTITION_STATUS_DROP_START) {
 					continue;
 				}
@@ -3665,9 +3724,11 @@ void NoSQLStore::addColumn(
 				partitioningInfo.checkTableExpirationSchema(info, subContainerId);
 				RenameColumnSchemaInfo renameColInfo;
 				try {
-					putContainer(info, renameColInfo, orgContainerSchema, subContainerId,
-						containerType, CONTAINER_ATTR_SUB,
-						true, *currentContainer, NULL, NULL, option);
+					putContainer(
+							info, renameColInfo, orgContainerSchema,
+							static_cast<int32_t>(subContainerId),
+							containerType, CONTAINER_ATTR_SUB,
+							true, *currentContainer, NULL, NULL, option);
 					if (currentContainer != NULL) {
 						containerList.push_back(currentContainer);
 					}
@@ -3706,7 +3767,6 @@ void NoSQLStore::addColumn(
 		util::ArrayByteInStream in = util::ArrayByteInStream(
 			util::ArrayInStream(orgContainerSchema.data(), orgContainerSchema.size()));
 		int32_t columnNum = 0;
-		int32_t startPos = 0;
 
 		ContainerAttribute containerAttribute = CONTAINER_ATTR_SINGLE;
 		if (!isPartitioning) {
@@ -3718,17 +3778,16 @@ void NoSQLStore::addColumn(
 			in >> containerId;
 			util::XArray<uint8_t> containerName(alloc);
 			StatementHandler::decodeVarSizeBinaryData<EventByteInStream>(in, containerName);
-			startPos = in.base().position();
 			in >> columnNum;
 			containerAttribute = CONTAINER_ATTR_SINGLE;
 		}
 		else {
-			startPos = in.base().position();
 			in >> columnNum;
 			containerAttribute = CONTAINER_ATTR_SUB;
 
 		}
-		int32_t newColumnNum = columnNum + (*createTableOption.columnInfoList_).size();
+		int32_t newColumnNum = static_cast<int32_t>(
+				columnNum + (*createTableOption.columnInfoList_).size());
 		out << newColumnNum;
 		for (int32_t i = 0; i < columnNum; i++) {
 			int32_t columnNameLen;
@@ -3746,7 +3805,7 @@ void NoSQLStore::addColumn(
 			out << flags;
 			optionList.push_back(flags);
 		}
-		for (int32_t i = 0; i < (*createTableOption.columnInfoList_).size(); i++) {
+		for (size_t i = 0; i < (*createTableOption.columnInfoList_).size(); i++) {
 			char* columnName = const_cast<char*>(
 				(*createTableOption.columnInfoList_)[i]->columnName_->name_->c_str());
 			int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
@@ -3781,7 +3840,6 @@ void NoSQLStore::addColumn(
 			in >> std::make_pair(affinityStr.data(), affinityStrLen);
 			out << std::make_pair(affinityStr.data(), affinityStrLen);
 		}
-		TablePartitioningVersionId versionId = 0;
 
 		if (in.base().remaining() > 0 && containerType == TIME_SERIES_CONTAINER) {
 			int8_t tsOption = 0;
@@ -3820,8 +3878,10 @@ void NoSQLStore::addColumn(
 				containerType);
 
 			int32_t errorPos = -1;
-			for (NodeAffinityNumber subContainerId = 0; subContainerId <
-				partitioningInfo.getCurrentPartitioningCount(); subContainerId++) {
+			for (NodeAffinityNumber subContainerId = 0;
+					subContainerId < static_cast<NodeAffinityNumber>(
+							partitioningInfo.getCurrentPartitioningCount());
+					subContainerId++) {
 				if (partitioningInfo.assignStatusList_[subContainerId] == PARTITION_STATUS_DROP_START) {
 					continue;
 				}
@@ -3833,13 +3893,15 @@ void NoSQLStore::addColumn(
 				partitioningInfo.checkTableExpirationSchema(info, subContainerId);
 				RenameColumnSchemaInfo renameColInfo;
 				try {
-					putContainer(info, renameColInfo, newContainerSchema, subContainerId,
-						containerType, containerAttribute,
-						true, *currentContainer, NULL, NULL, option);
+					putContainer(
+							info, renameColInfo, newContainerSchema,
+							static_cast<int32_t>(subContainerId),
+							containerType, containerAttribute,
+							true, *currentContainer, NULL, NULL, option);
 				}
 				catch (std::exception& e) {
 					UTIL_TRACE_EXCEPTION_WARNING(SQL_SERVICE, e, "");
-					errorPos = subContainerId;
+					errorPos = static_cast<int32_t>(subContainerId);
 				}
 
 			}
@@ -3865,7 +3927,6 @@ void NoSQLStore::addColumn(
 					fixedPart, varPart, false);
 				NoSQLUtils::makeLargeContainerRowBinary(alloc,
 					NoSQLUtils::LARGE_CONTAINER_KEY_SUB_CONTAINER_SCHEMA, outputMrs, newContainerSchema);
-				uint64_t numRow = 1;
 				NoSQLStoreOption option(execution);
 				option.putRowOption_ = PUT_INSERT_OR_UPDATE;
 				targetContainer.putRow(fixedPart, varPart, UNDEF_ROWID, option);
@@ -3894,11 +3955,10 @@ void NoSQLStore::checkPre(DDLSource& ddlSource) {
 	util::StackAllocator& alloc = ddlSource.alloc_;
 	SQLExecution* execution = ddlSource.execution_;
 	DDLBaseInfo* baseInfo = ddlSource.baseInfo_;
-	NoSQLStoreOption& option = ddlSource.option_;
 	DDLCommandType commandType = ddlSource.commandType_;
 
 	const char8_t* tmpDbName = dbName.name_;
-	bool isAdjust = adjustConnectedDb(tmpDbName);
+	adjustConnectedDb(tmpDbName);
 	NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
 	ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 	checkExecutable(alloc, commandType, execution, false, condition);
@@ -3974,13 +4034,10 @@ void NoSQLStore::makeSchema(DDLSource& ddlSource, RenameColumnContext* rcCxt) {
 	bool isPartitioning = ddlSource.isPartitioning_;
 	TablePartitioningInfo<util::StackAllocator>& partitioningInfo = ddlSource.partitioningInfo_;
 	ContainerType containerType = ddlSource.containerType_;
-	SQLExecution* execution = ddlSource.execution_;
-	NoSQLStoreOption& option = ddlSource.option_;
 
 	util::ArrayByteInStream in = util::ArrayByteInStream(
 		util::ArrayInStream(orgContainerSchema.data(), orgContainerSchema.size()));
 	int32_t columnNum = 0;
-	int32_t startPos = 0;
 	ContainerAttribute containerAttribute = CONTAINER_ATTR_SINGLE;
 	if (!isPartitioning) {
 		bool existFlag;
@@ -3991,12 +4048,10 @@ void NoSQLStore::makeSchema(DDLSource& ddlSource, RenameColumnContext* rcCxt) {
 		in >> containerId;
 		util::XArray<uint8_t> containerName(alloc);
 		StatementHandler::decodeVarSizeBinaryData<EventByteInStream>(in, containerName);
-		startPos = in.base().position();
 		in >> columnNum;
 		containerAttribute = CONTAINER_ATTR_SINGLE;
 	}
 	else {
-		startPos = in.base().position();
 		in >> columnNum;
 		containerAttribute = CONTAINER_ATTR_SUB;
 
@@ -4060,7 +4115,6 @@ void NoSQLStore::makeSchema(DDLSource& ddlSource, RenameColumnContext* rcCxt) {
 		in >> std::make_pair(affinityStr.data(), affinityStrLen);
 		out << std::make_pair(affinityStr.data(), affinityStrLen);
 	}
-	TablePartitioningVersionId versionId = 0;
 
 	if (in.base().remaining() > 0 && containerType == TIME_SERIES_CONTAINER) {
 		int8_t tsOption = 0;
@@ -4114,8 +4168,10 @@ void NoSQLStore::execNoSQL(DDLSource& ddlSource, NoSQLContainer& targetContainer
 			containerType);
 
 		int32_t errorPos = -1;
-		for (NodeAffinityNumber subContainerId = 0; subContainerId <
-			partitioningInfo.getCurrentPartitioningCount(); subContainerId++) {
+		for (NodeAffinityNumber subContainerId = 0;
+				subContainerId < static_cast<NodeAffinityNumber>(
+						partitioningInfo.getCurrentPartitioningCount());
+				subContainerId++) {
 			if (partitioningInfo.assignStatusList_[subContainerId] == PARTITION_STATUS_DROP_START) {
 				continue;
 			}
@@ -4128,13 +4184,15 @@ void NoSQLStore::execNoSQL(DDLSource& ddlSource, NoSQLContainer& targetContainer
 			RenameColumnSchemaInfo renameColInfo;
 			renameColInfo.isRenameColumn_ = isRenameColumn;
 			try {
-				putContainer(info, renameColInfo, newContainerSchema, subContainerId,
-					containerType, containerAttribute,
-					true, *currentContainer, NULL, NULL, option);
+				putContainer(
+						info, renameColInfo, newContainerSchema,
+						static_cast<int32_t>(subContainerId),
+						containerType, containerAttribute,
+						true, *currentContainer, NULL, NULL, option);
 			}
 			catch (std::exception& e) {
 				UTIL_TRACE_EXCEPTION_WARNING(SQL_SERVICE, e, "");
-				errorPos = subContainerId;
+				errorPos = static_cast<int32_t>(subContainerId);
 			}
 		}
 		if (errorPos != -1) {
@@ -4186,11 +4244,11 @@ NoSQLStore::RenameColumnContext::RenameColumnContext(const CreateTableOption& cr
 	newColumnName_ = const_cast<char*>(
 		(*createTableOption.columnInfoList_)[1]
 		->columnName_->name_->c_str());
-	oldColumnNameLen_ = strlen(oldColumnName_);
+	oldColumnNameLen_ = static_cast<int32_t>(strlen(oldColumnName_));
 	if (oldColumnNameLen_ > MAX_COLUMN_NAME_LEN) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_COLUMN, "The length of old column name exceeds the upper limit.");
 	}
-	newColumnNameLen_ = strlen(newColumnName_);
+	newColumnNameLen_ = static_cast<int32_t>(strlen(newColumnName_));
 	if (newColumnNameLen_ > MAX_COLUMN_NAME_LEN) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_COLUMN, "The length of new column name exceeds the upper limit.");
 	}
@@ -4211,9 +4269,7 @@ void NoSQLStore::RenameColumnContext::checkColumnName(DDLSource& ddlSource) {
 		util::ArrayByteInStream in = util::ArrayByteInStream(
 			util::ArrayInStream(orgContainerSchema.data(), orgContainerSchema.size()));
 		int32_t columnNum = 0;
-		int32_t startPos = 0;
 
-		ContainerAttribute containerAttribute = CONTAINER_ATTR_SINGLE;
 		if (!isPartitioning) {
 			bool existFlag;
 			StatementHandler::decodeBooleanData<util::ArrayByteInStream>(in, existFlag);
@@ -4223,14 +4279,10 @@ void NoSQLStore::RenameColumnContext::checkColumnName(DDLSource& ddlSource) {
 			in >> containerId;
 			util::XArray<uint8_t> containerName(alloc);
 			StatementHandler::decodeVarSizeBinaryData<EventByteInStream>(in, containerName);
-			startPos = in.base().position();
 			in >> columnNum;
-			containerAttribute = CONTAINER_ATTR_SINGLE;
 		}
 		else {
-			startPos = in.base().position();
 			in >> columnNum;
-			containerAttribute = CONTAINER_ATTR_SUB;
 		}
 		ddlSource.columnNum_ = columnNum;
 
@@ -4279,11 +4331,13 @@ void NoSQLStore::RenameColumnContext::checkColumnName(DDLSource& ddlSource) {
 		}
 		
 		if (isPartitioning) {
-			if (partitioningInfo.partitioningColumnId_ == oldColumnNameId_) {
+			if (partitioningInfo.partitioningColumnId_ ==
+					static_cast<ColumnId>(oldColumnNameId_)) {
 				partitioningInfo.partitionColumnName_ = newColumnName_;
 				ddlSource.setRenamed();
 			}
-			else if (partitioningInfo.subPartitioningColumnId_ == oldColumnNameId_) {
+			else if (partitioningInfo.subPartitioningColumnId_ ==
+					static_cast<ColumnId>(oldColumnNameId_)) {
 				partitioningInfo.subPartitioningColumnName_ = newColumnName_;
 				ddlSource.setRenamed();
 			}

@@ -123,8 +123,6 @@ void DDLProcessor::cleanupNoSQL() {
 			if (execution) {
 				if (execution->getContext().getSyncContext().isRunning()
 					&& baseInfo_->isSync() && baseInfo_->currentContainerName_ != NULL) {
-					const char* dbName = baseInfo_->currentDbName_;
-					DBConnection* dbConnection = executionManager_->getDBConnection();
 					util::StackAllocator alloc(
 						util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "JOB_CLEANUP"),
 						&executionManager_->getFixedAllocator());
@@ -150,7 +148,6 @@ void DDLProcessor::cleanupNoSQL() {
 			SQLExecutionManager::Latch latch(clientId_, executionManager_);
 			SQLExecution* execution = latch.get();
 			if (execution) {
-				DBConnection* dbConnection = executionManager_->getDBConnection();
 				if (targetAckCount_ != currentAckCount_) {
 					util::StackAllocator alloc(
 						util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "JOB_CLEANUP"),
@@ -185,8 +182,9 @@ void DDLProcessor::cleanupNoSQL() {
 }
 
 bool DDLProcessor::applyInfo(
-	Context& cxt, const Option& option,
-	const TupleInfoList& inputInfo, TupleInfo& outputInfo) {
+		Context& cxt, const Option& option,
+		const TupleInfoList& inputInfo, TupleInfo& outputInfo) {
+	UNUSED_VARIABLE(inputInfo);
 
 	try {
 		if (option.plan_ != NULL) {
@@ -509,9 +507,10 @@ bool DDLProcessor::applyInfo(
 }
 
 bool DDLProcessor::pipe(Context& cxt, InputId inputId, const Block& block) {
+	UNUSED_VARIABLE(inputId);
+	UNUSED_VARIABLE(block);
 
 	try {
-		util::StackAllocator& alloc = cxt.getEventAllocator();
 		EventContext& ec = *cxt.getEventContext();
 		SQLExecutionManager::Latch latch(clientId_, cxt.getExecutionManager());
 		SQLExecution* execution = latch.get();
@@ -784,6 +783,9 @@ bool DDLProcessor::pipe(Context& cxt, InputId inputId, const Block& block) {
 }
 
 bool DDLProcessor::finish(Context& cxt, InputId inputId) {
+	UNUSED_VARIABLE(cxt);
+	UNUSED_VARIABLE(inputId);
+
 	try {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INTERNAL, "");
 	}
@@ -795,6 +797,8 @@ bool DDLProcessor::finish(Context& cxt, InputId inputId) {
 }
 
 void DDLProcessor::exportTo(Context& cxt, const OutOption& option) const {
+	UNUSED_VARIABLE(cxt);
+	UNUSED_VARIABLE(option);
 }
 
 void DDLProcessor::setOptionString(const SQLPreparedPlan::Node& node,
@@ -851,7 +855,7 @@ void DDLProcessor::setAckStatus(NoSQLContainer* containerInfo, int32_t pos, int3
 	else {
 		return;
 	}
-	ackList_[pos] = status;
+	ackList_[pos] = static_cast<uint8_t>(status);
 	if (containerInfo) {
 		AckContainerInfo ackInfo;
 		ackInfo.containerId_ = containerInfo->getContainerId();
@@ -862,7 +866,7 @@ void DDLProcessor::setAckStatus(NoSQLContainer* containerInfo, int32_t pos, int3
 			ackInfo.sessionId_ = execution_->getContext().getCurrentSessionId();
 		}
 		PartitionTable* pt = executionManager_->getJobManager()->getPartitionTable();
-		if (ackInfo.pId_ != -1) {
+		if (ackInfo.pId_ != static_cast<PartitionId>(-1)) {
 			ackInfo.ptRev_ = pt->getNewSQLPartitionRevision(ackInfo.pId_);
 			ackInfo.nodeId_ = pt->getNewSQLOwner(ackInfo.pId_);
 			ackInfo.masterNodeId_ = pt->getMaster();
@@ -877,9 +881,11 @@ void DDLProcessor::checkPartitionStatus() {
 	PartitionTable* pt = executionManager_->getJobManager()->getPartitionTable();
 	for (size_t pos = 0; pos < ackContainerInfoList_.size(); pos++) {
 		int32_t realPos = ackContainerInfoList_[pos].pos_;
-		if (realPos != -1 && realPos < ackList_.size() && ackList_[realPos] == 0) continue;
+		if (realPos != -1 &&
+				realPos < static_cast<ptrdiff_t>(ackList_.size()) &&
+				ackList_[realPos] == 0) continue;
 		PartitionId pId = ackContainerInfoList_[pos].pId_;
-		if (pId == -1) continue;
+		if (pId == static_cast<PartitionId>(-1)) continue;
 		if (ackContainerInfoList_[pos].ptRev_ != pt->getNewSQLPartitionRevision(pId)
 			|| ackContainerInfoList_[pos].masterNodeId_ != pt->getMaster()) {
 			GS_THROW_CUSTOM_ERROR(DenyException,

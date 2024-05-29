@@ -53,7 +53,9 @@ enum RedoMode {
 	REDO_MODE_SHORT_TERM_SYNC,  
 	REDO_MODE_LONG_TERM_SYNC,   
 	REDO_MODE_RECOVERY,		   
-	REDO_MODE_RECOVERY_CHUNK	
+	REDO_MODE_RECOVERY_CHUNK	,
+	REDO_MODE_ARCHIVE,
+	REDO_MODE_ARCHIVE_REPLICATION,
 };
 class DataStoreStats;
 class ObjectManagerStats;
@@ -104,10 +106,13 @@ public:
 		}
 	};
 
-	DataStoreBase(util::StackAllocator* stAlloc,
-		util::FixedSizeAllocator<util::Mutex>* resultSetPool,
-		ConfigTable* configTable, TransactionManager* txnMgr, ChunkManager* chunkManager,
-		LogManager<MutexLocker>* logManager, KeyDataStore* keyStore) {
+	DataStoreBase(
+			util::StackAllocator* stAlloc,
+			util::FixedSizeAllocator<util::Mutex>* resultSetPool,
+			ConfigTable* configTable, TransactionManager* txnMgr, ChunkManager* chunkManager,
+			LogManager<MutexLocker>* logManager, KeyDataStore* keyStore) {
+		UNUSED_VARIABLE(configTable);
+		UNUSED_VARIABLE(keyStore);
 		stAlloc_ = stAlloc;
 		resultSetPool_ = resultSetPool;
 		txnMgr_ = txnMgr;
@@ -115,7 +120,9 @@ public:
 		logManager_ = logManager;
 	}
 	virtual ~DataStoreBase() {};
-	virtual void initialize(ManagerSet &resourceSet) {};
+	virtual void initialize(ManagerSet &resourceSet) {
+		UNUSED_VARIABLE(resourceSet);
+	};
 	virtual Serializable* exec(TransactionContext* txn, KeyDataStoreValue* storeValue, Serializable* message) = 0;
 	virtual void finalize() = 0;
 	virtual void redo(
@@ -187,6 +194,12 @@ public:
 		ChunkManagerStats &chunkMgrStats_;
 		DataStoreBase::StatsSet dsStats_;
 	};
+	ConfigTable& getConfig() {
+		return configTable_;
+	}
+	std::string& getUuid() {
+		return uuid_;
+	}
 
 private:
 	enum Status {
@@ -233,6 +246,7 @@ private:
 
 
 	StatsSet statsSet_;
+	std::string uuid_;
 
 public:
 	Partition(
@@ -306,7 +320,8 @@ public:
 		util::StackAllocator* alloc, RedoMode mode,
 		const util::DateTime &redoStartTime, 
 		Timestamp redoStartEmTime,
-		const uint8_t* data, size_t dataLen);
+		const uint8_t* data, size_t dataLen, size_t& pos,
+		util::Stopwatch* watch, uint32_t limitInterval);
 
 	void genTempLogManager();
 
@@ -328,6 +343,8 @@ public:
 
 
 private:
+	void initializeLogFormatVersion(uint16_t xlogFormatVersion);
+
 	util::XArray<uint8_t>* appendDataStoreLog(
 			TransactionContext& txn,
 			const TransactionManager::ContextSource& cxtSrc, StatementId stmtId,

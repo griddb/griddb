@@ -349,6 +349,7 @@ struct ClusterStats {
 };
 
 static const uint32_t CS_HANDLER_PARTITION_ID = 0;
+static const uint32_t CS_HANDLER_HEARTBEAT_CHECK_PARTITION_ID = 1;
 
 /*!
 	@brief Handles generic event about cluster
@@ -656,8 +657,6 @@ class ClusterService {
 	friend class TimerNotifyClusterHandler;
 	friend class ClusterManager::StatUpdator;
 public:
-	static const int32_t CLUSTER_EVENT_TRACE_LIMIT_INTERVAL = 3 * 1000;
-	static const int32_t CLUSTER_TIMER_EVENT_DIFF_TRACE_LIMIT_INTERVAL = 3 * 1000;
 
 	ClusterService(
 		const ConfigTable& config,
@@ -774,6 +773,8 @@ public:
 
 	void checkVersion(ClusterVersionId decodedVersion);
 
+	bool changeStandbyStatus(const Event::Source& eventSource, util::StackAllocator& alloc, bool isStandby, RestContext& restCxt);
+
 private:
 
 	EventEngine::Config createEEConfig(
@@ -887,7 +888,6 @@ private:
 			return fixedNodeNum_;
 		}
 
-
 		/*!
 			@brief Requests the resolver the next update.
 		*/
@@ -942,14 +942,16 @@ struct ClusterOptionalInfo {
 	static const int32_t DROP_PARTITION_INFO = 3;
 	static const int32_t PUBLIC_ADDRESS_INFO_SET = 4;
 	static const int32_t SSL_ADDRESS_LIST = 5;
-	static const int32_t PARAM_MAX = 6;
+	static const int32_t STABLE_GOAL = 6;
+	static const int32_t STANDBY_MODE = 7;
+	static const int32_t PARAM_MAX = 8;
 
 	static const int8_t INACTIVE = 0;
 	static const int8_t ACTIVE = 1;
 
 	ClusterOptionalInfo(util::StackAllocator& alloc, PartitionTable* pt) :
 		alloc_(alloc), setList_(PARAM_MAX, INACTIVE, alloc), pt_(pt),
-		dropPartitionNodeInfo_(alloc), ssl_port_(UNDEF_SSL_PORT) {
+		dropPartitionNodeInfo_(alloc), ssl_port_(UNDEF_SSL_PORT), stableGoalValue_(-1), standbyMode_(false) {
 	}
 
 	bool isActive(int32_t type) {
@@ -998,6 +1000,30 @@ struct ClusterOptionalInfo {
 		return sslAddressList_.getList();
 	}
 
+	void setStableGoal(std::string& stableGoal) {
+		stableGoalData_ = stableGoal;
+	}
+
+	void setStableGoalValue(int64_t value) {
+		stableGoalValue_ = value;
+	}
+
+	std::string& getStableGoal() {
+		return stableGoalData_;
+	}
+
+	void setStandbyMode(bool standbyMode) {
+		standbyMode_ = standbyMode;
+	}
+
+	bool getStandyMode() {
+		return standbyMode_;
+	}
+
+	int64_t getStableGoalValue() {
+		return stableGoalValue_;
+	}
+
 	util::StackAllocator& alloc_;
 	util::Vector<uint8_t> setList_;
 	PartitionTable* pt_;
@@ -1006,6 +1032,9 @@ struct ClusterOptionalInfo {
 	DropPartitionNodeInfo dropPartitionNodeInfo_;
 	int32_t ssl_port_;
 	SSLAddressList sslAddressList_;
+	std::string stableGoalData_;
+	int64_t stableGoalValue_;
+	bool standbyMode_;
 };
 
 class EventTracer {

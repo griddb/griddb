@@ -1146,8 +1146,9 @@ inline ChunkId ChunkManager::getHeadChunkId(DSGroupId groupId) {
 	int64_t chunkId = -1;
 	int16_t pos = -1;
 	ChunkExtent* extent = cursor.next(chunkId, pos);
+	UNUSED_VARIABLE(extent);
 	assert(chunkId == 0);
-	return chunkId;
+	return static_cast<ChunkId>(chunkId);
 }
 
 
@@ -1305,10 +1306,11 @@ inline bool ChunkExtent::isDifferentialDirty(int16_t pos) const {
 }
 
 inline void ChunkExtent::setDifferentialDirty(int16_t pos, bool flag) {
+	uint8_t &dest = flags_[pos];
 	if (flag) {
-		flags_[pos] |= CUMULATIVE_DIRTY_FLAG_BIT;
+		dest = static_cast<uint8_t>(dest | CUMULATIVE_DIRTY_FLAG_BIT);
 	} else {
-		flags_[pos] &= ~CUMULATIVE_DIRTY_FLAG_BIT;
+		dest = static_cast<uint8_t>(dest & (~CUMULATIVE_DIRTY_FLAG_BIT));
 	}
 }
 
@@ -1317,10 +1319,11 @@ inline bool ChunkExtent::isCumulativeDirty(int16_t pos) const {
 }
 
 inline void ChunkExtent::setCumulativeDirty(int16_t pos, bool flag) {
+	uint8_t &dest = flags_[pos];
 	if (flag) {
-		flags_[pos] |= DIFFERENTIAL_DIRTY_FLAG_BIT;
+		dest = static_cast<uint8_t>(dest | DIFFERENTIAL_DIRTY_FLAG_BIT);
 	} else {
-		flags_[pos] &= ~DIFFERENTIAL_DIRTY_FLAG_BIT;
+		dest = static_cast<uint8_t>(dest & (~DIFFERENTIAL_DIRTY_FLAG_BIT));
 	}
 }
 
@@ -1394,7 +1397,7 @@ inline MeshedChunkTable::StableChunkCursor::StableChunkCursor(MeshedChunkTable& 
 
 inline bool MeshedChunkTable::StableChunkCursor::next(RawChunkInfo& rawInfo) {
 	while (true) {
-		if (index_ >= mct_.extents_.size()) {
+		if (index_ >= static_cast<ptrdiff_t>(mct_.extents_.size())) {
 			return false;
 		}
 		ChunkExtent& extent = *mct_.extents_[index_];
@@ -1423,7 +1426,7 @@ inline bool MeshedChunkTable::StableChunkCursor::next(RawChunkInfo& rawInfo) {
 
 inline ChunkExtent* MeshedChunkTable::StableChunkCursor::next(int64_t &chunkId, int16_t &pos) {
 	while (true) {
-		if (index_ >= mct_.extents_.size()) {
+		if (index_ >= static_cast<ptrdiff_t>(mct_.extents_.size())) {
 			return nullptr;
 		}
 		ChunkExtent& extent = *mct_.extents_[index_];
@@ -1444,7 +1447,7 @@ inline ChunkExtent* MeshedChunkTable::StableChunkCursor::next(int64_t &chunkId, 
 
 inline MeshedChunkTable::CsectionChunkCursor::CsectionChunkCursor(MeshedChunkTable& mct)
 : mct_(mct), index_(0), pos_(0), maxindex_(0) {
-	maxindex_ = mct.extents_.size();
+	maxindex_ = static_cast<int32_t>(mct.extents_.size());
 }
 
 inline bool MeshedChunkTable::CsectionChunkCursor::next(RawChunkInfo& rawInfo) {

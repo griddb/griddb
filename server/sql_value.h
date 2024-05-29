@@ -4246,6 +4246,10 @@ struct SQLValues::ValueUtils {
 
 	static int32_t compareNull(bool nullValue1, bool nullValue2);
 
+
+	static int32_t getTypeBoundaryDirectionAsLong(
+			const TupleValue &value, TupleColumnType boundaryType, bool lower);
+
 	static bool isUpperBoundaryAsLong(const TupleValue &value, int64_t unit);
 	static bool isLowerBoundaryAsLong(const TupleValue &value, int64_t unit);
 
@@ -4429,6 +4433,9 @@ struct SQLValues::ValueUtils {
 
 	template<typename T>
 	static size_t toWriterCapacity(uint64_t base);
+
+	static const void* getData(const TupleValue &value);
+	static size_t getDataSize(const TupleValue &value);
 
 
 	static bool isNull(const TupleValue &value);
@@ -8245,6 +8252,31 @@ template<>
 inline size_t SQLValues::ValueUtils::toWriterCapacity<
 		SQLValues::Types::Blob>(uint64_t base) {
 	return toLobCapacity(base);
+}
+
+inline const void* SQLValues::ValueUtils::getData(const TupleValue &value) {
+	const TupleColumnType type = value.getType();
+	if (TypeUtils::isSomeFixed(type)) {
+		if (TypeUtils::isLargeFixed(type)) {
+			return value.getRawData();
+		}
+		return value.fixedData();
+	}
+	else {
+		assert(TypeUtils::isSingleVar(type));
+		return value.varData();
+	}
+}
+
+inline size_t SQLValues::ValueUtils::getDataSize(const TupleValue &value) {
+	const TupleColumnType type = value.getType();
+	if (TypeUtils::isSomeFixed(type)) {
+		return TypeUtils::getFixedSize(type);
+	}
+	else {
+		assert(TypeUtils::isSingleVar(type));
+		return value.varSize();
+	}
 }
 
 

@@ -70,7 +70,7 @@ InterchangeableStoreMemory::~InterchangeableStoreMemory() {
 */
 void InterchangeableStoreMemory::regist(int32_t pgId, ChunkBuffer* chunkBuffer, int64_t initialBufferSize) {
 	assert(chunkBuffer);
-	assert(0 <= pgId && pgId < partitionGroupNum_);
+	assert(0 <= pgId && static_cast<uint32_t>(pgId) < partitionGroupNum_);
 	assert(!chunkBuffers_[pgId]);
 	chunkBuffer->use();
 	chunkBuffers_[pgId] = chunkBuffer;
@@ -80,7 +80,8 @@ void InterchangeableStoreMemory::regist(int32_t pgId, ChunkBuffer* chunkBuffer, 
 }
 
 ChunkBuffer* InterchangeableStoreMemory::getChunkBuffer(PartitionGroupId pgId) {
-	assert(0 <= pgId && pgId < partitionGroupNum_);
+	UTIL_STATIC_ASSERT(!std::numeric_limits<PartitionGroupId>::is_signed);
+	assert(pgId < partitionGroupNum_);
 	return chunkBuffers_[pgId];
 }
 /*!
@@ -88,11 +89,11 @@ ChunkBuffer* InterchangeableStoreMemory::getChunkBuffer(PartitionGroupId pgId) {
 */
 void InterchangeableStoreMemory::regist(int32_t pId, WALBuffer* walBuffer) {
 	assert(walBuffer);
-	assert(0 <= pId && pId < partitionNum_);
+	assert(0 <= pId && static_cast<uint32_t>(pId) < partitionNum_);
 	if (walBuffers_[pId]) {
 		delete walBuffers_[pId];
 	}
-	walBuffer->resize(walMemoryLimit_);
+	walBuffer->resize(static_cast<int32_t>(walMemoryLimit_));
 	walBuffers_[pId] = walBuffer;
 }
 
@@ -101,12 +102,12 @@ void InterchangeableStoreMemory::regist(int32_t pId, WALBuffer* walBuffer) {
 */
 void InterchangeableStoreMemory::regist(int32_t pId, AffinityManager* affinityManager) {
 	assert(affinityManager);
-	assert(0 <= pId && pId < partitionNum_);
+	assert(0 <= pId && static_cast<uint32_t>(pId) < partitionNum_);
 	if (affinityManagers_[pId]) {
 		delete affinityManagers_[pId];
 	}
 	affinityManager->use();
-	affinityManager->resize(affinityMemoryLimit_);
+	affinityManager->resize(static_cast<int32_t>(affinityMemoryLimit_));
 	affinityManagers_[pId] = affinityManager;
 }
 
@@ -114,7 +115,7 @@ void InterchangeableStoreMemory::regist(int32_t pId, AffinityManager* affinityMa
 	@brief チャンクバッファ登録解除
 */
 void InterchangeableStoreMemory::unregistChunkBuffer(int32_t pgId) {
-	assert(0 <= pgId && pgId < partitionGroupNum_);
+	assert(0 <= pgId && static_cast<uint32_t>(pgId) < partitionGroupNum_);
 	ChunkBuffer* chunkBuffer = chunkBuffers_[pgId];
 	assert(chunkBuffer);
 	chunkBuffer->unuse();
@@ -126,7 +127,7 @@ void InterchangeableStoreMemory::unregistChunkBuffer(int32_t pgId) {
 	@brief WALバッファ、アフィニティマネージャ登録解除
 */
 void InterchangeableStoreMemory::unregist(int32_t pId) {
-	assert(0 <= pId && pId < partitionNum_);
+	assert(0 <= pId && static_cast<uint32_t>(pId) < partitionNum_);
 
 	WALBuffer* walBuffer = walBuffers_[pId];
 	assert(walBuffer);
@@ -154,7 +155,8 @@ void InterchangeableStoreMemory::updateBufferSize(int64_t newStoreMemLimit) {
 		bufferSize = partitionGroupNum_;
 		chunkBufferLimit = partitionGroupNum_;
 	}
-	for (int32_t pgId = 0; pgId < partitionGroupNum_; ++pgId) {
+	for (int32_t pgId = 0;
+			static_cast<uint32_t>(pgId) < partitionGroupNum_; ++pgId) {
 		Load& load = loadTable_[pgId];
 		load.limitNum_ = bufferSize / partitionGroupNum_;
 		load.lastBaseLimit_ = bufferSize / partitionGroupNum_;
@@ -177,7 +179,8 @@ void InterchangeableStoreMemory::updateEMAHalfLifePeriod(int32_t emaHalfLifePeri
 			   * CALC_EMA_HALF_LIFE_CONSTANT + 1.0);
 }
 
-void InterchangeableStoreMemory::collectLoad(int32_t &activePartitionCount, uint64_t &totalLimitNum) {
+void InterchangeableStoreMemory::collectLoad(int32_t &activePartitionCount) {
+
 	assert(chunkBuffers_.size() == partitionGroupNum_);
 	for (auto& itr : chunkBuffers_) {
 		++activePartitionCount;
@@ -197,7 +200,7 @@ void InterchangeableStoreMemory::collectLoad(int32_t &activePartitionCount, uint
 				(1.0 - smoothingConstant_) * load.lastEstimatedLoad_;
 
 	}
-	avgLoad_ = totalLoad_ / partitionGroupNum_;
+	avgLoad_ = static_cast<double>(totalLoad_ / partitionGroupNum_);
 }
 
 void InterchangeableStoreMemory::calculateEMA(uint64_t minNum, uint64_t totalLimitNum) {
@@ -274,17 +277,20 @@ void InterchangeableStoreMemory::calculateEMA(uint64_t minNum, uint64_t totalLim
 void InterchangeableStoreMemory::calculateChunkBufferSize() {
 	uint64_t limitTotal = 0;
 	double estimatedTotal = 0.0;
-	uint64_t lastBaseLimitTotal = 0;
 	uint64_t totalLimitNum = storeMemoryLimit_;
-	uint64_t minNum = totalLimitNum * 0.2 / partitionGroupNum_;
+	uint64_t minNum = static_cast<uint64_t>(
+			static_cast<double>(totalLimitNum) * 0.2 / partitionGroupNum_);
 
 	int32_t activePartitionCount = 0;
 
-	collectLoad(activePartitionCount, totalLimitNum);
+	collectLoad(activePartitionCount);
 
 	calculateEMA(minNum, totalLimitNum);
 
 	uint64_t targetLimit = totalLimitNum;
+	UNUSED_VARIABLE(limitTotal);
+	UNUSED_VARIABLE(estimatedTotal);
+	UNUSED_VARIABLE(targetLimit);
 }
 
 void InterchangeableStoreMemory::calculateWALBufferSize() {
@@ -309,17 +315,20 @@ void InterchangeableStoreMemory::calculate() {
 void InterchangeableStoreMemory::resize() {
 	for (auto& chunkBuffer : chunkBuffers_) {
 		if (chunkBuffer) {
-			chunkBuffer->resize(loadTable_[chunkBuffer->getPgId()].limitNum_);
+			chunkBuffer->resize(static_cast<int32_t>(
+					loadTable_[chunkBuffer->getPgId()].limitNum_));
 		}
 	}
 	for (auto& walBuffer : walBuffers_) {
 		if (walBuffer) {
-			walBuffer->resize(walBufferSizeList_[walBuffer->getPId()]);
+			walBuffer->resize(static_cast<int32_t>(
+					walBufferSizeList_[walBuffer->getPId()]));
 		}
 	}
 	for (auto& affinityManager : affinityManagers_) {
 		if (affinityManager) {
-			affinityManager->resize(affinityManagerSizeList_[affinityManager->getPId()]);
+			affinityManager->resize(static_cast<int32_t>(
+					affinityManagerSizeList_[affinityManager->getPId()]));
 		}
 	}
 }

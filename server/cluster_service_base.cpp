@@ -47,6 +47,7 @@ UTIL_TRACER_DECLARE(CLUSTER_INFO_TRACE);
 #include <unistd.h>
 #endif
 
+
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
 
@@ -185,8 +186,10 @@ ClusterService::ClusterService(
 			systemCommandHandler_);
 
 		ee_.setHandler(CS_TIMER_CHECK_CLUSTER, timerCheckClusterHandler_);
+
+		int32_t targetPId = (pt_->getPartitionNum() == 1) ? CS_HANDLER_PARTITION_ID : CS_HANDLER_HEARTBEAT_CHECK_PARTITION_ID;
 		Event checkClusterEvent(
-			source, CS_TIMER_CHECK_CLUSTER, CS_HANDLER_PARTITION_ID);
+			source, CS_TIMER_CHECK_CLUSTER, targetPId);
 		ee_.addPeriodicTimer(
 			checkClusterEvent, clsMgr_->getConfig().getHeartbeatInterval());
 
@@ -264,8 +267,11 @@ EventEngine::Config ClusterService::createEEConfig(
 	EventEngine::Config eeConfig = src;
 
 	eeConfig.setServerNDAutoNumbering(true);
-	eeConfig.setPartitionCount(
-		config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM));
+	uint32_t partitionNum = config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM);
+	eeConfig.setPartitionCount(partitionNum);
+	int32_t concurrency = (partitionNum == 1) ? 1 : 2;
+	eeConfig.setConcurrency(concurrency);
+
 	eeConfig.setServerAddress(
 		config.get<const char8_t*>(
 			CONFIG_TABLE_CS_SERVICE_ADDRESS),
@@ -301,7 +307,7 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 		sysSvc_ = mgrSet.sysSvc_;
 		sqlSvc_ = mgrSet.sqlSvc_;
 		execSvc_ = mgrSet.execSvc_;
-		clsMgr_->initialize(this, &ee_);
+		clsMgr_->initialize(mgrSet);
 
 		pt_ = mgrSet.pt_;
 		ConfigTable* config = mgrSet.config_;
@@ -445,7 +451,7 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 		std::string rackZoneId = config->get<const char8_t*>(CONFIG_TABLE_CS_RACK_ZONE_ID);
 		if (pt_->isEnableRackZoneAwareness()) {
 			if (rackZoneId.empty()) {
-				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "RackZone ID is not speified");
+				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "RackZone ID is not specified");
 			}
 			NoEmptyKey::validate(KeyConstraint::getUserKeyConstraint(PartitionTable::RACKZONE_ID_STRING_MAX),
 				rackZoneId.c_str(), static_cast<uint32_t>(rackZoneId.size()), "rackZoneId");
@@ -456,6 +462,8 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "RackZoneAwaerness is not specified");
 			}
 		}
+		pt_->getStableGoal().initialCheck();
+
 		pt_->getPartitionRevision().set(
 			clusterAddress.address_, clusterAddress.port_);
 		initialized_ = true;
@@ -498,7 +506,9 @@ void ClusterService::start(const Event::Source& eventSource) {
 */
 void ClusterService::shutdown() {
 	ee_.shutdown();
-	execSvc_->shutdown();
+	if (execSvc_) {
+		execSvc_->shutdown();
+	}
 }
 
 /*!
@@ -506,7 +516,9 @@ void ClusterService::shutdown() {
 */
 void ClusterService::waitForShutdown() {
 	ee_.waitForShutdown();
-	execSvc_->waitForShutdown();
+	if (execSvc_) {
+		execSvc_->waitForShutdown();
+	}
 }
 
 /*!
@@ -632,42 +644,58 @@ void ClusterOptionalInfo::encode(EventByteOutStream& out, ClusterService* clsSvc
 		case SSL_ADDRESS_LIST:
 			if (sslAddressList_.check()) setList_[type] = ACTIVE;
 			break;
+		case STABLE_GOAL:
+			if (!stableGoalData_.empty() || stableGoalValue_ != -1) {
+				setList_[type] = ACTIVE;
+			}
+			break;
+		case STANDBY_MODE:
+			setList_[type] = ACTIVE;
+			break;
 		default:
 			break;
 		}
-		for (int32_t type = 0; type < setList_.size(); type++) {
-			if (setList_[type] == ACTIVE) {
-				out << type;
-				const size_t bodyTopPos = out.base().position();
-				bodySize = 0;
-				out << bodySize;
-				switch (type) {
-				case PUBLIC_ADDRESS_INFO:
-					clsSvc->encode(publicAddressInfo_, out);
-					break;
-				case SSL_PORT:
-					out << ssl_port_;
-					break;
-				case RACKZONE_ID:
-					clsSvc->encode(rackZoneInfoList_, out);
-					break;
-				case DROP_PARTITION_INFO:
-					clsSvc->encode(dropPartitionNodeInfo_, out);
-					break;
-				case SSL_ADDRESS_LIST:
-					clsSvc->encode(sslAddressList_, out);
-					break;
-				default:
-					break;
-				}
-				const size_t bodyEndPos = out.base().position();
-				bodySize = static_cast<uint32_t>(bodyEndPos - bodyTopPos);
-				out.base().position(bodyTopPos);
-				out << bodySize;
-				out.base().position(bodyEndPos);
-			}
-		}
 	}
+	for (int32_t type = 0;
+			type < static_cast<ptrdiff_t>(setList_.size()); type++) {
+		if (setList_[type] == ACTIVE) {
+			out << type;
+			const size_t bodyTopPos = out.base().position();
+			bodySize = 0;
+			out << bodySize;
+			switch (type) {
+			case PUBLIC_ADDRESS_INFO:
+				clsSvc->encode(publicAddressInfo_, out);
+				break;
+			case SSL_PORT:
+				out << ssl_port_;
+				break;
+			case RACKZONE_ID:
+				clsSvc->encode(rackZoneInfoList_, out);
+				break;
+			case DROP_PARTITION_INFO:
+				clsSvc->encode(dropPartitionNodeInfo_, out);
+				break;
+			case SSL_ADDRESS_LIST:
+				clsSvc->encode(sslAddressList_, out);
+				break;
+			case STABLE_GOAL:
+				StatementHandler::encodeStringData(out, stableGoalData_);
+				out << stableGoalValue_;
+				break;
+			case STANDBY_MODE:
+				StatementHandler::encodeBooleanData(out, standbyMode_);
+				break;
+			default:
+				break;
+			}
+			const size_t bodyEndPos = out.base().position();
+			bodySize = static_cast<uint32_t>(bodyEndPos - bodyTopPos);
+			out.base().position(bodyTopPos);
+			out << bodySize;
+			out.base().position(bodyEndPos);
+		}
+		}
 }
 
 /** **
@@ -702,6 +730,15 @@ void ClusterOptionalInfo::decode(Event& ev, EventByteInStream& in, ClusterServic
 			break;
 		case SSL_ADDRESS_LIST:
 			clsSvc->decode(ev, sslAddressList_, in);
+			setList_[type] = ACTIVE;
+			break;
+		case STABLE_GOAL:
+			StatementHandler::decodeStringData(in, stableGoalData_);
+			in >> stableGoalValue_;
+			setList_[type] = ACTIVE;
+			break;
+		case STANDBY_MODE:
+			StatementHandler::decodeBooleanData(in, standbyMode_);
 			setList_[type] = ACTIVE;
 			break;
 		default:
@@ -841,8 +878,8 @@ template void ClusterService::decode(Event& ev, PublicAddressInfoMessage& t, Eve
 	@brief Handles system error
 */
 void ClusterService::setError(
-	const Event::Source& eventSource,
-	std::exception* e) {
+		const Event::Source& eventSource, std::exception* e) {
+	UNUSED_VARIABLE(eventSource);
 
 	try {
 		if (e != NULL) {
@@ -929,11 +966,12 @@ void ClusterService::requestChangePartitionStatus(
 	@brief Executes ChangePartitionStatus directly in the same thread
 */
 void ClusterService::requestChangePartitionStatus(
-	EventContext& ec,
-	util::StackAllocator& alloc,
-	PartitionId pId,
-	PartitionStatus status,
-	ChangePartitionType changePartitionType) {
+		EventContext& ec,
+		util::StackAllocator& alloc,
+		PartitionId pId,
+		PartitionStatus status,
+		ChangePartitionType changePartitionType) {
+	UNUSED_VARIABLE(ec);
 
 	try {
 		ClusterManager::ChangePartitionStatusInfo
@@ -1213,7 +1251,7 @@ void TimerCheckClusterHandler::sendUpdatePartitionInfo(
 		clsSvc_->encode(updatePartitionInfo, out);
 		option.setPublicAddressInfo();
 		option.setSSLPort(pt_->getSSLPortNo(SELF_NODEID));
-		if (pt_->getSSLPortNo(SELF_NODEID) != UNDEF_SSL_PORT) {
+		if (pt_->isUseSSL()) {
 			for (NodeIdList::iterator it = activeNodeList.begin();
 				it != activeNodeList.end(); it++) {
 				NodeId nodeId = (*it);
@@ -1221,6 +1259,10 @@ void TimerCheckClusterHandler::sendUpdatePartitionInfo(
 					option.setSSLAddress(pt_->getNodeAddress(nodeId), pt_->getSSLPortNo(nodeId));
 				}
 			}
+		}
+		if (pt_->getStableGoal().isAssigned()) {
+			option.setStableGoal(pt_->getStableGoal().getGoalData());
+			option.setStableGoalValue(pt_->getStableGoal().getGoalHashValue());
 		}
 		clsSvc_->encodeOptionalPart(out, option);
 
@@ -1279,6 +1321,7 @@ void TimerCheckClusterHandler::doAfterUpdatePartitionInfo(
 		}
 		if (nextTransition != KEEP || heartbeatInfo.isAddNewNode()) {
 			updatePartitionInfo.setToMaster();
+			updatePartitionInfo.setAddOrDownNode();
 		}
 		clsMgr_->getUpdatePartitionInfo(updatePartitionInfo);
 		sendUpdatePartitionInfo(ec, updatePartitionInfo,
@@ -1320,7 +1363,7 @@ void TimerCheckClusterHandler::operator()(
 				ec, heartbeatInfo, heartbeatCheckInfo);
 		}
 		int32_t lap = watch.elapsedMillis();
-		if (lap >= ClusterService::CLUSTER_EVENT_TRACE_LIMIT_INTERVAL) {
+		if (lap >= clsMgr_->getConfig().getHeartbeatInterval()) {
 			GS_TRACE_WARNING(
 				CLUSTER_DUMP, GS_TRACE_CM_LONG_EVENT, "Long cluster event (check cluster), elapsedMillis=" << lap);
 		}
@@ -1554,12 +1597,22 @@ void UpdatePartitionHandler::decode(EventContext& ec, Event& ev,
 				address.port_);
 			const NodeDescriptor& nd = clsEE_->resolveServerND(socketAddress);
 			if (!nd.isEmpty()) {
-				NodeId nodeId = nd.getId();
+				NodeId nodeId = static_cast<NodeId>(nd.getId());
 				if (nodeId != 0) {
 					pt_->setSSLPortNo(nodeId, sslPort);
 				}
 			}
 		}
+	}
+
+	try {
+		if (option.isActive(ClusterOptionalInfo::STABLE_GOAL) && !pt_->isMaster() && !option.getStableGoal().empty()) {
+			pt_->getStableGoal().writeStableGoal(option.getStableGoal());
+			pt_->getStableGoal().setGoalData(option.getStableGoal());
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
@@ -1715,6 +1768,8 @@ NodeId ClusterHandler::checkAddress(
 	EventEngine* ee) {
 
 	try {
+
+
 		if (clusterNodeId != UNDEF_NODEID &&
 			pt->checkSetService(clusterNodeId, serviceType)) {
 			return clusterNodeId;
@@ -1754,7 +1809,6 @@ NodeId ClusterHandler::checkAddress(
 template <class T1, class T2>
 void ClusterService::updateNodeList(
 	T1& addressInfoList, T2& publicAddressInfoList) {
-
 	try {
 		bool usePublic = (publicAddressInfoList.size() > 0);
 		int32_t counter = 0;
@@ -2288,13 +2342,14 @@ void ClusterService::NotificationManager::getNotificationMember(
 }
 
 void TimerRequestSQLCheckTimeoutHandler::operator()(
-	EventContext& ec, Event& ev) {
+		EventContext& ec, Event& ev) {
+	UNUSED_VARIABLE(ev);
 
 	try {
 		Event checkResourceEvent(ec,
 			CHECK_TIMEOUT_JOB, CS_HANDLER_PARTITION_ID);
 		const NodeDescriptor& nd = sqlEE_->getServerND(0);
-		EventByteOutStream out = checkResourceEvent.getOutStream();
+		checkResourceEvent.getOutStream();
 		sqlEE_->send(checkResourceEvent, nd);
 	}
 	catch (std::exception& e) {
@@ -2315,7 +2370,7 @@ void NewSQLPartitionRefreshHandler::operator()(
 			PartitionTable::SubPartitionTable subTable;
 			subTable.set(pt_);
 			if (nd.isEmpty()) {
-				pt_->updateNewSQLPartition(subTable);
+				pt_->updateNewSQLPartition(subTable, false);
 			}
 			else {
 				Event requestEvent(
@@ -2330,7 +2385,7 @@ void NewSQLPartitionRefreshHandler::operator()(
 			PartitionTable::SubPartitionTable subTable;
 			clsSvc_->decode(ev, subTable);
 			subTable.init(pt_, clsSvc_->getEE());
-			pt_->updateNewSQLPartition(subTable);
+			pt_->updateNewSQLPartition(subTable, false);
 		}
 		}
 	}
@@ -2375,7 +2430,8 @@ void ClusterService::requestRefreshPartition(
 }
 
 void PartitionTable::SubPartitionTable::init(
-	PartitionTable* pt, EventEngine* ee) {
+		PartitionTable* pt, EventEngine* ee) {
+	UNUSED_VARIABLE(pt);
 
 	for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
 		PartitionRole& role = subPartitionList_[pos].role_;
@@ -2534,10 +2590,11 @@ void SystemCommandHandler::doShutdownNodeForce(
 }
 
 void SystemCommandHandler::doShutdownNormal(
-	ClusterManager* clsMgr,
-	CheckpointService* cpSvc,
-	ClusterManager::ShutdownNodeInfo& shutdownNodeInfo,
-	EventContext& ec) {
+		ClusterManager* clsMgr,
+		CheckpointService* cpSvc,
+		ClusterManager::ShutdownNodeInfo& shutdownNodeInfo,
+		EventContext& ec) {
+	UNUSED_VARIABLE(shutdownNodeInfo);
 
 	clsMgr->checkClusterStatus(CS_SHUTDOWN_NODE_NORMAL);
 	clsMgr->checkCommandStatus(CS_SHUTDOWN_NODE_NORMAL);
@@ -2732,3 +2789,44 @@ uint16_t ClusterAdditionalServiceConfig::getPort(ServiceType serviceType) {
 		GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
 	}
 }
+
+bool ClusterService::changeStandbyStatus(
+		const Event::Source& eventSource, util::StackAllocator& alloc,
+		bool isStandby, RestContext& restCxt) {
+	UNUSED_VARIABLE(eventSource);
+	UNUSED_VARIABLE(alloc);
+
+	ClusterManager::StandbyInfo& standbyInfo = clsMgr_->getStandbyInfo();
+	bool prevStatus = standbyInfo.isStandby();
+	bool retFlag = false;
+	int32_t errorCount = 0;
+	util::NormalOStringStream errorReason;;
+	if (standbyInfo.changeStatus(isStandby, restCxt)) {
+		bool afterStatus = standbyInfo.isStandby();
+		util::NormalOStringStream errorSubReason;
+		if (prevStatus && !afterStatus) {
+			RedoManager& redoMgr = syncSvc_->getRedoManager();
+			for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
+				int64_t contextCount = redoMgr.getContextNum(pId);
+				if (contextCount > 0) {
+					if (errorCount > 0) {
+						errorSubReason << ",";
+					}
+					errorSubReason << "(pId=" << pId << ", count=" << contextCount << ")";
+					errorCount++;
+				}
+			}
+			if (errorCount > 0) {
+				errorReason << "Failed to chage standby status, reason=uncompleted redo context remained (" << errorSubReason.str() << ")";
+				picojson::object errorInfo;
+				errorInfo["errorStatus"] = picojson::value(static_cast<double>(WEBAPI_CS_STANDBY_REMAIN_REDO_OPERATION));
+				errorInfo["reason"] = picojson::value(errorReason.str());
+				restCxt.result_ = picojson::value(errorInfo);
+				return false;
+			}
+		}
+		retFlag = true;
+	}
+	return retFlag;
+}
+

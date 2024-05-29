@@ -27,9 +27,13 @@
 #include "cluster_service.h"
 #include "container_key.h"
 #include "uuid_utils.h"
+#include "checkpoint_service.h"
 
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
+UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
+
+struct ManagerSet;
 
 #define TEST_PRINT(s)
 #define TEST_PRINT1(s, d)
@@ -37,7 +41,8 @@ UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 ClusterManager::ClusterManager(
 	const ConfigTable& configTable,
 	PartitionTable* partitionTable,
-	ClusterVersionId versionId) :
+	ClusterVersionId versionId,
+	const char* confDir) :
 	clusterConfig_(configTable),
 	clusterInfo_(partitionTable),
 	pt_(partitionTable),
@@ -45,9 +50,10 @@ ClusterManager::ClusterManager(
 	isSignalBeforeRecovery_(false),
 	autoShutdown_(false),
 	ee_(NULL)
-	,
-	clsSvc_(NULL),
-	expectedCheckTime_(0)
+	, clsSvc_(NULL),
+	expectedCheckTime_(0),
+	standbyInfo_(configTable, confDir),
+	cpSvc_(NULL)
 {
 	statUpdator_.manager_ = this;
 	try {
@@ -539,6 +545,7 @@ bool ClusterManager::setHeartbeatInfo(
 				setInitialCluster(false);
 			}
 			setParentMaster(isParentMaster);
+			pt_->setAckHeartbeat(0, true);
 		}
 		return true;
 	}
@@ -555,7 +562,8 @@ void ClusterManager::getHeartbeatResInfo(
 
 	try {
 		PartitionId pId;
-		uint16_t sslPort = pt_->getSSLPortNo(SELF_NODEID);
+		uint16_t sslPort =
+				static_cast<uint16_t>(pt_->getSSLPortNo(SELF_NODEID));
 		for (pId = 0; pId < pt_->getPartitionNum(); pId++) {
 			int32_t errorStatus = pt_->getErrorStatus(pId, SELF_NODEID);
 			heartbeatResInfo.add(pId,
@@ -594,7 +602,6 @@ void ClusterManager::setHeartbeatResInfo(
 		PartitionStatus status;
 		PartitionRoleStatus roleStatus;
 		PartitionRevisionNo partitionRevision;
-		int64_t chunkNum;
 		int32_t sslPort;
 		int32_t errorStatus;
 		int64_t baseTime = getMonotonicTime();
@@ -611,7 +618,6 @@ void ClusterManager::setHeartbeatResInfo(
 			roleStatus = static_cast<PartitionRoleStatus>(
 				resValue.roleStatus_);
 			partitionRevision = resValue.partitionRevision_;
-			chunkNum = resValue.chunkCount_;
 			sslPort = resValue.sslPort_;
 			errorStatus = resValue.errorStatus_;
 			pt_->handleErrorStatus(
@@ -666,7 +672,7 @@ void ClusterManager::getHeartbeatCheckInfo(
 		int64_t currentTime = getMonotonicTime();
 		if (expectedCheckTime_ != 0) {
 			int64_t diff = currentTime - expectedCheckTime_;
-//			if (diff >= ClusterService::CLUSTER_TIMER_EVENT_DIFF_TRACE_LIMIT_INTERVAL) {
+//			if (diff >= getConfig().getHeartbeatInterval()) {
 //				GS_TRACE_WARNING(
 //					CLUSTER_DUMP, GS_TRACE_CM_LONG_EVENT, "Heartbeat timer is delayed (" << diff << ")");
 //			}
@@ -687,8 +693,12 @@ void ClusterManager::getHeartbeatCheckInfo(
 //			CLUSTER_DUMP, GS_TRACE_CS_CLUSTER_STATUS,
 //			"CURRENT " << CommonUtility::getTimeStr(currentTime));
 		if (!pt_->isFollower()) {
+			int32_t liveCount = 1;
 			for (NodeId nodeId = 0; nodeId < pt_->getNodeNum(); nodeId++) {
 				int64_t timeout = pt_->getHeartbeatTimeout(nodeId);
+				if (nodeId > 0 && pt_->getAckHeartbeat(nodeId)) {
+					liveCount++;
+				}
 //				GS_TRACE_INFO(
 //					CLUSTER_DUMP, GS_TRACE_CS_CLUSTER_STATUS,
 //					pt_->dumpNodeAddress(nodeId) << " " << CommonUtility::getTimeStr(timeout).c_str());
@@ -696,9 +706,19 @@ void ClusterManager::getHeartbeatCheckInfo(
 			pt_->setHeartbeatTimeout(
 				SELF_NODEID, nextHeartbeatTime(currentTime));
 
+			int32_t checkActiveNum = getActiveNum();
 			util::Set<NodeId> downNodeSet(alloc);
-			pt_->getActiveNodeList(
-				activeNodeList, downNodeSet, currentTime);
+			if (liveCount == checkActiveNum) {
+				for (NodeId nodeId = 0; nodeId < pt_->getNodeNum(); nodeId++) {
+					if (pt_->getAckHeartbeat(nodeId)) {
+						activeNodeList.push_back(nodeId);
+					}
+				}
+			}
+			else {
+				pt_->getActiveNodeList(
+					activeNodeList, downNodeSet, currentTime);
+			}
 			if (downNodeSet.size() > 0) {
 				setAddOrDownNode();
 			}
@@ -783,7 +803,10 @@ void ClusterManager::getHeartbeatCheckInfo(
 //				CLUSTER_DUMP, GS_TRACE_CS_CLUSTER_STATUS,
 //				pt_->dumpNodeAddress(0) << " " << CommonUtility::getTimeStr(timeout).c_str());
 
-			if (pt_->getHeartbeatTimeout(0) < currentTime) {
+			if (pt_->getAckHeartbeat(0)) {
+				pt_->setAckHeartbeat(0, false);
+			}
+			else if (pt_->getHeartbeatTimeout(0) < currentTime) {
 				TRACE_CLUSTER_EXCEPTION_FORCE(
 					GS_ERROR_CLM_DETECT_HEARTBEAT_TO_MASTER,
 					"Master heartbeat timeout, master="
@@ -917,9 +940,8 @@ void ClusterManager::setUpdatePartitionInfo(
 				changePartitionPIdList.push_back(pos);
 			}
 		}
-		pt_->updateNewSQLPartition(subPartitionTable);
+		pt_->updateNewSQLPartition(subPartitionTable, true);
 
-		PartitionRevisionNo revisionNo = subPartitionTable.getRevision().getRevisionNo();
 		PartitionRevision& currentRevision = subPartitionTable.getRevision();
 		if (currentOwnerList.size() > 0) {
 			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
@@ -1078,11 +1100,10 @@ bool ClusterManager::setNotifyClusterInfo(
 			TRACE_CLUSTER_EXCEPTION_FORCE(
 				GS_ERROR_CLM_STATUS_TO_FOLLOWER,
 				"Cluster status change to FOLLOWER");
-/*
-			GS_TRACE_CLUSTER_INFO(
-				"Cluster status change to FOLLOWER, MASTER="
-				<< pt_->dumpNodeAddress(senderNodeId));
-*/
+//			GS_TRACE_CLUSTER_INFO(
+//				"Cluster status change to FOLLOWER, MASTER="
+//				<< pt_->dumpNodeAddress(senderNodeId));
+
 			setInitialClusterNum(notifyClusterInfo.getReserveNum());
 			int64_t baseTime = getMonotonicTime();
 			pt_->changeClusterStatus(PartitionTable::FOLLOWER,
@@ -1182,14 +1203,35 @@ void ClusterManager::setNotifyClusterResInfo(
 		util::XArray<NodeId> liveNodeIdList(alloc);
 		if (checkActiveNodeMax()) {
 			pt_->setHeartbeatTimeout(senderNodeId, UNDEF_TTL);
-			GS_TRACE_CLUSTER_INFO(
-				"Cluster live node num is already reached to reserved num="
-				<< getReserveNum() << ", sender node can not join, node="
-				<< pt_->dumpNodeAddress(senderNodeId));
-			GS_THROW_USER_ERROR(GS_ERROR_CLM_ALREADY_STABLE,
-				"Cluster live node num is already reached to reserved num="
-				<< getReserveNum());
+			try {
+				GS_THROW_USER_ERROR(GS_ERROR_CLM_ALREADY_STABLE,
+					"Cluster live node num is already reached to reserved num="
+					<< getReserveNum());
+			}
+			catch (std::exception& e) {
+				UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, e, "");
+				GS_RETHROW_USER_OR_SYSTEM(e, "");
+			}
 		}
+
+		if (standbyInfo_.isEnable()) {
+			try {
+				if (!standbyInfo_.isStandby() && pt_->getStandbyMode(senderNodeId)) {
+					GS_THROW_USER_ERROR(GS_ERROR_CLM_STANDBY_MODE_MISMATCH,
+						"Standby mode is not match (self=false," << pt_->dumpNodeAddress(senderNodeId) << "=true");
+				}
+				if (standbyInfo_.isStandby() && !pt_->getStandbyMode(senderNodeId)) {
+					GS_THROW_USER_ERROR(GS_ERROR_CLM_STANDBY_MODE_MISMATCH,
+						"Standby mode is not match (self=true," << pt_->dumpNodeAddress(senderNodeId) << "=false");
+				}
+			}
+			catch (std::exception& e) {
+				UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, e, "");
+				GS_RETHROW_USER_OR_SYSTEM(e, "");
+			}
+		}
+
+
 		PartitionId pId;
 		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(
@@ -1313,6 +1355,7 @@ void ClusterManager::setLeaveClusterInfo(
 		if (!leaveClusterInfo.isPreCheck()) {
 			clusterInfo_.initLeave();
 		}
+		expectedCheckTime_ = 0;
 		return;
 	}
 	catch (std::exception& e) {
@@ -1507,6 +1550,7 @@ void ClusterManager::setChangePartitionStatusInfo(
 			GS_THROW_USER_ERROR(
 				GS_ERROR_TXN_PARTITION_STATE_INVALID, "");
 		}
+		cpSvc_->writeAutoArchiveRoleInfo(pId, status);
 		pt_->setPartitionStatus(pId, status);
 		if (changePartitionStatusInfo.isToSubMaster()) {
 			pt_->clearRole(pId);
@@ -1541,6 +1585,7 @@ bool ClusterManager::setChangePartitionTableInfo(
 		PartitionRole& candRole
 			= changePartitionTableInfo.getPartitionRole();
 		PartitionId pId = candRole.getPartitionId();
+		bool isPrevRole = pt_->isOwnerOrBackup(pId, SELF_NODEID);
 		if (pt_->isBackup(pId, SELF_NODEID)
 			&& candRole.isOwner(SELF_NODEID)) {
 			currentBackupChange = true;
@@ -1548,6 +1593,9 @@ bool ClusterManager::setChangePartitionTableInfo(
 		pt_->setPartitionRole(pId, candRole);
 		if (!pt_->isOwnerOrBackup(pId, SELF_NODEID)) {
 			pt_->setPartitionStatus(pId, PartitionTable::PT_OFF);
+			if (isPrevRole) {
+				cpSvc_->writeAutoArchiveRoleInfo(pId, PartitionTable::PT_STOP);
+			}
 		}
 		return currentBackupChange;
 	}
@@ -1819,6 +1867,14 @@ std::string ClusterManager::dump() {
 
 ClusterManager::ConfigSetUpHandler ClusterManager::configSetUpHandler_;
 
+struct PartitionAssignmentRule {
+	enum Rule {
+		DEFAULT, 
+		ROUNDROBIN,
+		RULE_END
+	};
+};
+
 /*!
 	@brief Handler Operator
 */
@@ -1935,6 +1991,45 @@ void ClusterManager::ConfigSetUpHandler::operator()(
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_CS_RACK_ZONE_ID, STRING)
 		.setDefault("");
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_GOAL_ASSIGNMENT_RULE, INT32)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
+		.addEnum(PartitionAssignmentRule::DEFAULT, "DEFAULT")
+		.addEnum(PartitionAssignmentRule::ROUNDROBIN, "ROUNDROBIN")
+		.setDefault(PartitionAssignmentRule::DEFAULT);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_ENABLE_STABLE_GOAL, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_STABLE_GOAL_POLICY, INT32)
+		.setDefault(0);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_STABLE_GOAL_FILE_NAME, STRING)
+		.setDefault("gs_stable_goal.json");
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_GENERATE_INITIAL_STABLE_GOAL, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(true);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_ENABLE_STANDBY_MODE, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_STANDBY_MODE, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_STANDBY_MODE_FILE_NAME, STRING)
+		.setDefault("gs_standby.json");
 }
 
 ClusterManager::StatSetUpHandler ClusterManager::statSetUpHandler_;
@@ -1975,6 +2070,12 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable& stat) {
 	STAT_ADD(STAT_TABLE_CS_RACKZONE_ID);
 	STAT_ADD(STAT_TABLE_CS_PARTITION_REPLICATION_PROGRESS);
 	STAT_ADD(STAT_TABLE_CS_PARTITION_GOAL_PROGRESS);
+	STAT_ADD(STAT_TABLE_CS_GOAL_DEFAULT_RULE);
+	STAT_ADD(STAT_TABLE_CS_GOAL_CURRENT_RULE);
+	STAT_ADD(STAT_TABLE_CS_ENABLE_STABLE_GOAL);
+	STAT_ADD(STAT_TABLE_CS_STABLE_GOAL_POLICY);
+	STAT_ADD(STAT_TABLE_CS_GENERATE_INITIAL_STABLE_GOAL);
+	STAT_ADD(STAT_TABLE_CS_STANDBY_MODE);
 
 	stat.resolveGroup(parentId, STAT_TABLE_CS_ERROR, "errorInfo");
 
@@ -2101,6 +2202,19 @@ bool ClusterManager::StatUpdator::operator()(StatTable& stat) {
 			}
 		}
 
+		StandbyInfo &standbyInfo = manager_->getStandbyInfo();
+		if (standbyInfo.isEnable() && standbyInfo.isStandby()) {
+			stat.set(STAT_TABLE_CS_STANDBY_MODE, standbyInfo.isStandby());
+		}
+
+		stat.set(STAT_TABLE_CS_GOAL_DEFAULT_RULE, pt.dumpGoalAssignmentRule());
+		stat.set(STAT_TABLE_CS_GOAL_CURRENT_RULE, pt.dumpGoalAssignmentRule());
+		if (pt.getStableGoal().isEnable()) {
+			stat.set(STAT_TABLE_CS_ENABLE_STABLE_GOAL, pt.getStableGoal().isEnable());
+			stat.set(STAT_TABLE_CS_STABLE_GOAL_POLICY, pt.getStableGoal().getPolicyName());
+			stat.set(STAT_TABLE_CS_GENERATE_INITIAL_STABLE_GOAL, pt.getStableGoal().isEnableInitialGenerate());
+		}
+
 		char tmpBuffer[37];
 		UUIDUtils::unparse(mgr.uuid_, (char*)tmpBuffer);
 		stat.set(
@@ -2221,8 +2335,7 @@ bool ClusterManager::StatUpdator::operator()(StatTable& stat) {
 				if (!pt.checkLiveNode(nodeId)) {
 					continue;
 				}
-				if (!pt.isOwnerOrBackup(
-					pId, nodeId, PartitionTable::PT_CURRENT_OB)) {
+				if (!pt.isOwnerOrBackup(pId, nodeId)) {
 					clusterTotalOtherLsn += pt.getLSN(pId, nodeId);
 				}
 			}
@@ -2251,14 +2364,15 @@ bool ClusterManager::StatUpdator::operator()(StatTable& stat) {
 	return true;
 }
 
-void ClusterManager::initialize(
-	ClusterService* clsSvc, EventEngine* ee) {
+void ClusterManager::initialize(ManagerSet& mgrSet) {
 
-	clsSvc_ = clsSvc;
-	ee_ = ee;
+	clsSvc_ = mgrSet.clsSvc_;
+	cpSvc_ = mgrSet.cpSvc_;
+	ee_ = mgrSet.clsSvc_->getEE();
 	int64_t baseTime = ee_->getMonotonicTime();
 	pt_->setHeartbeatTimeout(
 		SELF_NODEID, nextHeartbeatTime(baseTime));
+	standbyInfo_.initialize(mgrSet);
 }
 
 ClusterService* ClusterManager::getService() {
@@ -2307,4 +2421,133 @@ void ClusterManager::Config::operator()(
 EventMonotonicTime ClusterManager::getMonotonicTime() {
 	return ee_->getMonotonicTime() + clusterInfo_.startupTime_ +
 		EVENT_MONOTONIC_ADJUST_TIME;
+}
+
+struct StandbyData {
+	StandbyData(bool standby) : standby_(standby) {}
+	bool standby_;
+	UTIL_OBJECT_CODER_MEMBERS(standby_);
+};
+#include "json.h"
+
+ClusterManager::StandbyInfo::StandbyInfo(const ConfigTable &config, const char* confDir) :
+	enableMode_(config.get<bool>(CONFIG_TABLE_CS_ENABLE_STANDBY_MODE)),
+	isStandby_(config.get<bool>(CONFIG_TABLE_CS_STANDBY_MODE)),  pt_(NULL) {
+	try {
+		if (!enableMode_) {
+			return;
+		}
+		std::string standbyFileName(config.get<const char8_t*>(CONFIG_TABLE_CS_STANDBY_MODE_FILE_NAME));
+		if (standbyFileName.empty()) {
+			GS_THROW_USER_ERROR(GS_ERROR_CS_PARAMETER_INVALID, "Standby file name is empty");
+		}
+		if (confDir != NULL) {
+			util::FileSystem::createPath(confDir, standbyFileName.c_str(), standbyFileName_);
+		}
+		else {
+			standbyFileName_ = standbyFileName;
+		}
+		if (util::FileSystem::exists(standbyFileName_.c_str())) {
+			std::allocator<char> alloc;
+			util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > buf(alloc);
+			ParamTable::fileToBuffer(standbyFileName_.c_str(), buf);
+			std::string allStr(buf.begin(), buf.end());
+			picojson::value value;
+			const std::string err = JsonUtils::parseAll(value, allStr.c_str(), allStr.c_str() + allStr.size());
+			if (!err.empty()) {
+				GS_THROW_USER_ERROR(GS_ERROR_CP_AUTO_ARCHIVE_FAILED,
+					"Failed to parse standby file (fileName='" << standbyFileName_ << "' , reason=(" << err.c_str() << "))");
+			}
+			isStandby_ = JsonUtils::as<bool>(value, "standby");
+		}
+		else {
+			try {
+				int32_t retryCount = 10;
+				int32_t retryWaitTime = 100;
+				StandbyData command(isStandby_);
+				picojson::value jsonOutValue;
+				JsonUtils::OutStream out(jsonOutValue);
+				util::ObjectCoder().encode(out, command);
+				const std::string jsonString(jsonOutValue.serialize());
+				UtilFile::writeFile(
+						standbyFileName_, jsonString.data(), jsonString.size(),
+						false, retryCount, retryWaitTime);
+			}
+			catch (std::exception& e) {
+			}
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(e, "");
+	}
+}
+
+ClusterManager::StandbyInfo::~StandbyInfo() {}
+
+void ClusterManager::StandbyInfo::initialize(ManagerSet& mgrSet) {
+	pt_ = mgrSet.pt_;
+}
+
+bool ClusterManager::StandbyInfo::changeStatus(bool standbyFlag, RestContext& restCxt) {
+	util::NormalOStringStream errorReason;
+	picojson::value& result = restCxt.result_;
+	util::LockGuard<util::Mutex> mutex(lock_);
+	WebAPIErrorType errorStatus;
+	do {
+		if (!enableMode_) {
+			errorReason << "not setting config enable standby";
+			errorStatus = WEBAPI_CS_STANDBY_INVALID_SETTING;
+			break;
+		}
+		if (!pt_->isSubMaster()) {
+			errorReason <<  "accept only subMaster";
+			errorStatus = WEBAPI_CS_STANDBY_NOT_SUBMASTER;
+			break;
+		}
+		if ((isStandby_ && standbyFlag) || (!isStandby_ && !standbyFlag)) {
+			return true; 
+		}
+		bool prev = isStandby_;
+		isStandby_ = standbyFlag;
+		try {
+			int32_t retryCount = 10;
+			int32_t retryWaitTime = 100;
+
+			StandbyData command(isStandby_);
+			picojson::value jsonOutValue;
+			JsonUtils::OutStream out(jsonOutValue);
+			util::ObjectCoder().encode(out, command);
+			const std::string jsonString(jsonOutValue.serialize());
+
+			UtilFile::writeFile(
+					standbyFileName_, jsonString.data(), jsonString.size(),
+					false, retryCount, retryWaitTime);
+			GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+				"Standby mode updated, prev=" << getStandbyModeName(prev) <<
+				", after=" << getStandbyModeName(isStandby_));
+			return true; 
+		}
+		catch (...) {
+			std::exception e;
+			UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, e, "Failed to write standby file");
+			errorReason <<  "server internal error";
+			errorStatus = WEBAPI_CS_STANDBY_INTERNAL;
+			break;
+		}
+	}
+	while (false);
+
+	util::NormalOStringStream oss;
+	oss << "Failed to change standby mode (reason=" << errorReason.str() << ")";
+	picojson::object errorInfo;
+	errorInfo["errorStatus"] = picojson::value(static_cast<double>(errorStatus));
+	errorInfo["reason"] = picojson::value(oss.str());
+	result = picojson::value(errorInfo);
+	return false; 
+}
+
+void ClusterManager::StandbyInfo::getMode(picojson::value& result) {
+	picojson::object standbyInfo;
+	standbyInfo["standby"] = picojson::value(isStandby_);
+	result = picojson::value(standbyInfo);
 }

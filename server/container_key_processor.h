@@ -60,8 +60,9 @@ public:
 		uint32_t headerSize = ValueProcessor::getEncodedVarSize(bodySize_);  
 
 		OId oId;
-		allocate<uint8_t>(headerSize + bodySize_,
-			oId, OBJECT_TYPE_VARIANT);
+		allocate<uint8_t>(
+				static_cast<DSObjectSize>(headerSize + bodySize_), oId,
+				OBJECT_TYPE_VARIANT);
 
 		uint64_t encodedLength = ValueProcessor::encodeVarSize(bodySize_);
 		memcpy(getBaseAddr(), &encodedLength, headerSize);
@@ -85,10 +86,7 @@ public:
 	const uint8_t* getKeyBody() const {
 		return body_;
 	}
-	friend std::ostream& operator<<(std::ostream& output, const FullContainerKeyCursor& val) {
-		output << "";
-		return output;
-	}
+
 
 private:
 	uint8_t* body_;

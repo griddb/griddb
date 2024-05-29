@@ -190,7 +190,7 @@ struct TaskProfilerInfo {
 	bool enableTimer_;
 	bool completed_;
 
-	void init(util::StackAllocator& alloc, int32_t size, bool enableTimer = false);
+	void init(util::StackAllocator& alloc, size_t size, bool enableTimer = false);
 
 	void incInputCount(int32_t inputId, int32_t size);
 	void start();
@@ -613,7 +613,12 @@ public:
 				return static_cast<ServiceType>(type_);
 			}
 
-			void setStoreProfiler(uint32_t unit, int64_t bufferHitCount, int64_t bufferMissHitCount, int64_t bufferSwapReadSize, int64_t bufferSwapWriteSize) {
+			void setStoreProfiler(
+					uint32_t unit, int64_t bufferHitCount,
+					int64_t bufferMissHitCount, int64_t bufferSwapReadSize,
+					int64_t bufferSwapWriteSize) {
+				UNUSED_VARIABLE(unit);
+
 				scanBufferHitCount_ += bufferHitCount;
 				scanBufferMissHitCount_ += bufferMissHitCount;
 				scanBufferSwapReadSize_ += bufferSwapReadSize;
@@ -1665,30 +1670,6 @@ struct StatJobProfiler {
 	UTIL_OBJECT_CODER_MEMBERS(currentTime_, jobProfs_);
 };
 
-static int64_t convertToTime(util::String& timeStr) {
-	const size_t size = timeStr.size();
-	if (size == 10) {
-		if (timeStr.find('-') != util::String::npos) {
-			timeStr.append("T00:00:00Z");
-		}
-	}
-	else if (size == 12 || size == 8) {
-		if (timeStr.find(':') != util::String::npos) {
-			timeStr.insert(0, "1970-01-01T");
-			timeStr.append("Z");
-		}
-	}
-	const bool trimMilliseconds = false;
-	int64_t targetValue;
-	try {
-		targetValue = util::DateTime(timeStr.c_str(), trimMilliseconds).getUnixTime();
-	}
-	catch (std::exception& e) {
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR,
-			GS_EXCEPTION_MERGE_MESSAGE(e, "Invalid date format"));
-	}
-	return targetValue;
-}
 struct JobExecutionLatch {
 
 	JobExecutionLatch(Job* job, Task* task) : job_(job), remote_(false) {

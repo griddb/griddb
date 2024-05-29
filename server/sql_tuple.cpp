@@ -1399,6 +1399,7 @@ TupleList::Reader::Reader(TupleList &tupleList, const TupleList::Reader::Image &
 		if (keepTopBlockNth_ != UNDEF_BLOCKID) {
 			uint64_t maxPos = std::max(keepTopBlockNth_, keepMaxBlockNth_);
 			assert(maxPos != UNDEF_BLOCKID);
+			UNUSED_VARIABLE(maxPos);
 
 			size_t initSize = (keepTopBlockNth_ < keepMaxBlockNth_) ?
 					(keepMaxBlockNth_ - keepTopBlockNth_ + 1) : 1;
@@ -2264,9 +2265,10 @@ void TupleList::Writer::allocateNewBlock() {
 	varTopAddr_ = static_cast<uint8_t*>(block.data()) + blockSize_;
 	varTailAddr_ = NULL;
 	tupleCount_ = 0;
-	TupleBlockHeader::setTupleCount(block.data(), 0);
-	TupleBlockHeader::setNextFixDataOffset(block.data(), TupleList::BLOCK_HEADER_SIZE);
-	TupleBlockHeader::setNextVarDataOffset(block.data(), blockSize_);
+	uint8_t *blockTop = static_cast<uint8_t*>(block.data());
+	TupleBlockHeader::setTupleCount(blockTop, 0);
+	TupleBlockHeader::setNextFixDataOffset(blockTop, TupleList::BLOCK_HEADER_SIZE);
+	TupleBlockHeader::setNextVarDataOffset(blockTop, blockSize_);
 	contiguousBlockCount_ = 0;
 	block_ = block;
 	varBlock_ = block;
@@ -2563,6 +2565,7 @@ void TupleList::Writer::setLobVarData(const Column &column, const TupleValue &va
 	uint8_t* tempTop = static_cast<uint8_t*>(tempBlock_.data());
 	assert(tempTop);
 	uint8_t* tempTail = tempTop + blockSize_;
+	UNUSED_VARIABLE(tempTail);
 	tempTop += LocalTempStore::Block::Header::BLOCK_HEADER_SIZE;
 	const size_t tempLimit = blockSize_ - LocalTempStore::Block::Header::BLOCK_HEADER_SIZE;
 	const size_t tempSaveLimit = tempLimit / 2;

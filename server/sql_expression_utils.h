@@ -569,6 +569,9 @@ struct SQLExprs::IndexCondition {
 
 	IndexSpecId specId_;
 	IndexSpec spec_;
+
+	bool firstHitOnly_;
+	bool descending_;
 };
 
 class SQLExprs::IndexSelector {
@@ -604,6 +607,8 @@ public:
 			IndexSpecId specId, const uint32_t *&list) const;
 
 	void select(const Expression &expr);
+	void selectDetail(const Expression *proj, const Expression *pred);
+
 	bool isSelected() const;
 	bool isComplex() const;
 
@@ -643,6 +648,8 @@ private:
 	struct BulkPosition;
 	struct BulkRewriter;
 	struct BulkConditionLess;
+
+	struct AggregationMatcher;
 
 	typedef util::AllocVector<IndexSpec> SpecList;
 
@@ -717,18 +724,22 @@ private:
 	size_t getOrConditionCount(size_t beginOffset, size_t endOffset) const;
 
 	Condition makeValueCondition(
-			const Expression &expr, bool negative,
-			SQLValues::ValueSetHolder &valuesHolder);
+			const Expression &expr, bool negative, bool &placeholderAffected,
+			SQLValues::ValueSetHolder &valuesHolder,
+			bool topColumnOnly = false, bool treeIndexExtended = false) const;
 	bool applyValue(
 			Condition &cond, const TupleValue *value, uint32_t inColumn,
-			SQLValues::ValueSetHolder &valuesHolder) const;
+			SQLValues::ValueSetHolder &valuesHolder, bool rangePreferred) const;
 
-	static void applyBoolBounds(Condition &cond);
+	static bool isRangeConditionType(ExprType type);
+
+	static void applyBoolBounds(Condition &cond, bool rangePreferred);
 
 	template<TupleColumnType T>
-	static void applyIntegralBounds(Condition &cond);
+	static void applyIntegralBounds(Condition &cond, bool rangePreferred);
 	static bool applyIntegralBounds(
-			Condition &cond, int64_t min, int64_t max, int64_t &value);
+			Condition &cond, int64_t min, int64_t max, bool rangePreferred,
+			int64_t &value);
 
 	template<TupleColumnType T>
 	static void applyFloatingBounds(Condition &cond);
@@ -758,11 +769,15 @@ private:
 
 	bool getAvailableIndex(
 			const Condition &cond, bool withSpec, SQLType::IndexType *indexType,
-			IndexSpecId *specId, IndexMatchList *matchList) const;
+			IndexSpecId *specId, IndexMatchList *matchList,
+			bool topColumnOnly = false, bool treeIndexExtended = false) const;
 
 	bool findColumn(
 			const Expression &expr, uint32_t &column, bool forScan) const;
 	static const TupleValue* findConst(const Expression &expr);
+
+	static bool isTrueValue(
+			const TupleValue &value, bool negative, bool &nullFound);
 
 	IndexSpec createIndexSpec(const util::Vector<uint32_t> &columnList);
 	void clearIndexColumns();
@@ -913,6 +928,45 @@ private:
 	const ConditionList &condList_;
 };
 
+struct SQLExprs::IndexSelector::AggregationMatcher {
+public:
+	AggregationMatcher(
+			const util::StdAllocator<void, void> &alloc,
+			const IndexSelector &base,
+			SQLValues::ValueSetHolder &valuesHolder);
+
+	bool match(
+			const Expression &proj, const Expression *pred,
+			IndexConditionList &condList);
+
+private:
+	typedef util::AllocVector<IndexCondition> AllocIndexConditionList;
+
+	typedef std::pair<uint32_t, bool> AggregationKey;
+	typedef util::AllocSet<AggregationKey> AggregationKeySet;
+
+	bool matchProjection(
+			const Expression &expr, AllocIndexConditionList &condList,
+			AggregationKeySet &keySet, bool top);
+	bool matchPredicate(
+			const Expression &expr, AllocIndexConditionList &condList,
+			bool negative);
+
+	bool matchAggregationExpr(
+			const Expression &expr, AllocIndexConditionList &condList,
+			AggregationKeySet &keySet);
+	bool matchAggregationType(
+			const Expression &expr, bool &descending);
+
+	bool matchValueCondition(
+			const Expression &expr, AllocIndexConditionList &condList,
+			bool negative);
+
+	util::StdAllocator<void, void> matcherAlloc_;
+	const IndexSelector &base_;
+	SQLValues::ValueSetHolder &valuesHolder_;
+};
+
 struct SQLExprs::ExprTypeUtils {
 	static bool isAggregation(ExprType type);
 	static bool isFunction(ExprType type);
@@ -974,6 +1028,8 @@ struct SQLExprs::DataPartitionUtils {
 	static std::pair<int64_t, uint32_t> intervalHashFromAffinity(
 			const PlanPartitioningInfo &partitioning,
 			const util::Vector<uint32_t> &affinityRevList, int64_t affinity);
+	static bool isFixedIntervalPartitionAffinity(
+			const PlanPartitioningInfo &partitioning, int64_t affinity);
 	static void makeAffinityRevList(
 			const PlanPartitioningInfo &partitioning,
 			util::Vector<uint32_t> &affinityRevList);
@@ -986,6 +1042,11 @@ struct SQLExprs::DataPartitionUtils {
 			util::Vector<int64_t> *affinityList, util::Set<int64_t> &affinitySet,
 			const util::Vector<TupleValue> *parameterList,
 			bool &placeholderAffected);
+
+	static bool isReduceableTablePartitionCondition(
+			const PlanPartitioningInfo &partitioning, TupleColumnType columnType,
+			const util::Vector<uint32_t> &affinityRevList, int64_t nodeAffinity,
+			ExprType condType, uint32_t condColumn, const TupleValue &condValue);
 
 	static void getTablePartitionKey(
 			const PlanPartitioningInfo &partitioning,
@@ -1012,6 +1073,10 @@ struct SQLExprs::DataPartitionUtils {
 			SyntaxTree::TablePartitionType partitioningType,
 			uint32_t partitioningCount, uint32_t clusterPartitionCount,
 			const util::Vector<uint32_t> &affinityRevList, int64_t affinity);
+
+	static bool isFixedIntervalPartitionAffinity(
+			SyntaxTree::TablePartitionType partitioningType,
+			uint32_t clusterPartitionCount, int64_t affinity);
 
 	static void makeAffinityRevList(
 			SyntaxTree::TablePartitionType partitioningType,

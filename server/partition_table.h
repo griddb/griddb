@@ -46,6 +46,13 @@ const int64_t UNDEF_TTL = 0;
 const int64_t NOT_UNDEF_TTL = 1;
 const NodeId SELF_NODEID = 0;
 
+const int32_t PARTITION_ASSIGNMENT_RULE_DEFAULT = 0;
+const int32_t PARTITION_ASSIGNMENT_RULE_ROUNDROBIN = 1;
+
+const int32_t PARTITION_ASSIGNMENT_RULE_STABLE_GOAL = 2;
+const int32_t PARTITION_ASSIGNMENT_RULE_PARTIAL_STABLE_GOAL = 3;
+const int32_t PARTITION_ASSIGNMENT_RULE_COMMAND_SET_GOAL = 4;
+
 struct AddressInfo;
 typedef std::vector<AddressInfo> AddressInfoList;
 
@@ -96,18 +103,18 @@ struct NodeAddress {
 		return *this;
 	}
 
-	std::string dump(bool flag = true) {
+	std::string dump(bool flag = true) const {
 		return toString(flag);
 	}
 
 	std::string toString(bool isPort = true) const {
 		util::NormalOStringStream ss;
-		util::SocketAddress::Inet* tmp
-			= (util::SocketAddress::Inet*)&address_;
-		ss << (int32_t)tmp->value_[0]
-			<< "." << (int32_t)tmp->value_[1] << "."
-			<< (int32_t)tmp->value_[2] << "."
-			<< (int32_t)tmp->value_[3];
+		const util::SocketAddress::Inet *tmp =
+				reinterpret_cast<const util::SocketAddress::Inet*>(&address_);
+		ss << static_cast<int32_t>(tmp->value_[0]) << "." <<
+				static_cast<int32_t>(tmp->value_[1]) << "." <<
+				static_cast<int32_t>(tmp->value_[2]) << "." <<
+				static_cast<int32_t>(tmp->value_[3]);
 		if (isPort) {
 			ss << ":" << port_;
 		}
@@ -447,8 +454,10 @@ public:
 	enum TableType {
 		PT_CURRENT_OB,
 		PT_CURRENT_GOAL,
-		PT_TABLE_MAX = 2
+		PT_STABLE_GOAL,
+		PT_TABLE_MAX = 3
 	};
+	static const int32_t PT_ROLE_TYPE_NUM = 1;
 
 	/*!
 		@brief Partition status
@@ -567,10 +576,10 @@ public:
 			pId_(pId), revision_(revision), type_(type), ownerNodeId_(UNDEF_NODEID),
 			isSelfBackup_(false), isSelfCatchup_(false) {}
 
-		void init(PartitionId pId, TableType type = PT_CURRENT_OB) {
+		void init(PartitionId pId) {
 			pId_ = pId;
 			ownerNodeId_ = UNDEF_NODEID;
-			type_ = type;
+			type_ = PT_CURRENT_OB;
 			isSelfBackup_ = false;
 			isSelfCatchup_ = false;
 		}
@@ -657,10 +666,6 @@ public:
 			ownerNodeId_ = owner;
 		}
 
-		void set(TableType type) {
-			type_ = type;
-		}
-
 		void set(PartitionRevision& revision) {
 			revision_ = revision;
 		}
@@ -703,10 +708,6 @@ public:
 
 		PartitionId getPartitionId() {
 			return pId_;
-		}
-
-		TableType getTableType() {
-			return type_;
 		}
 
 		bool operator==(PartitionRole& role) const;
@@ -796,6 +797,9 @@ public:
 			if (targetNodeId == 0) {
 				return isSelf;
 			}
+			if (roles.size() == 1) {
+				return (roles[0] == targetNodeId);
+			}
 			NodeIdList::iterator it;
 			it = std::find(roles.begin(), roles.end(), targetNodeId);
 			if (it != roles.end()) {
@@ -809,7 +813,13 @@ public:
 		void checkRole(bool isBackup) {
 			NodeIdList& roles = isBackup ? backups_ : catchups_;
 			bool& isSelf = isBackup ? isSelfBackup_ : isSelfCatchup_;
-			if (roles.size() > 0) {
+			if (roles.size() == 1) {
+				if (roles[0] == 0) {
+					isSelf = true;
+				}
+			}
+			else if (roles.size() >= 2) {
+				assert(isBackup);
 				std::sort(roles.begin(), roles.end());
 				if (roles[0] == 0) {
 					isSelf = true;
@@ -1073,8 +1083,10 @@ public:
 		@note ロール集合の管理。排他必要
 	** **/
 	class GoalPartition {
+		friend class PartitionTable;
 	public:
-		GoalPartition() : partitionNum_(1) {}
+
+		GoalPartition(const char* goalFileDir, const char* goalFileName);
 
 		void init(PartitionTable* pt) {
 			util::LockGuard<util::Mutex> guard(lock_);
@@ -1126,6 +1138,20 @@ public:
 
 		void update(PartitionRole& role) {
 			util::LockGuard<util::Mutex> guard(lock_);
+			updateMain(role);
+		}
+
+		void clear() {
+			util::LockGuard<util::Mutex> guard(lock_);
+			for (PartitionId pId = 0; pId < goalPartitions_.size(); pId++) {
+				goalPartitions_[pId].clear();
+			}
+			goalData_.clear();
+			isValidateFormat_ = false;
+			hashValue_ = -1;
+		}
+
+		void updateMain(PartitionRole& role) {
 			PartitionId rolePId = role.getPartitionId();
 			if (goalPartitions_.size() <= rolePId) {
 				return;
@@ -1133,7 +1159,7 @@ public:
 			role.checkBackup();
 			role.checkCatchup();
 			goalPartitions_[rolePId] = role;
-		};
+		}
 
 		void copy(util::Vector<PartitionRole>& roleList) {
 			util::LockGuard<util::Mutex> guard(lock_);
@@ -1142,48 +1168,184 @@ public:
 			}
 		}
 
-	private:
+		void updateAll(util::Vector<PartitionRole>& roleList) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			for (size_t pos = 0; pos < roleList.size(); pos++) {
+				updateMain(roleList[pos]);
+			}
+		}
+
+		std::string& getGoalData() {
+			return goalData_;
+		}
+
+		int64_t getGoalHashValue() {
+			return hashValue_;
+		}
+
+		void setGoalData(std::string& goalData) {
+			goalData_ = goalData;
+			isValidateFormat_ = true;
+		}
+
+		std::string& getGoalFilaName() {
+			return goalFileName_;
+		}
+
+		bool isEmpty() {
+			return goalData_.empty();
+		}
+
+		bool isValidateFormat() {
+			return isValidateFormat_;
+		}
+
+		bool isEnableInitialGenerate() {
+			return enableInitialGenerate_;
+		}
+
+		virtual bool load();
+		virtual bool vaildateFormat() { return true; };
+
+	protected:
+
 		std::vector<PartitionRole> goalPartitions_;
 		uint32_t partitionNum_;
 		util::Mutex lock_;
+		std::string goalFileName_;
+		std::string goalData_;
+		bool isValidateFormat_;
+		bool enableInitialGenerate_;
+		int64_t hashValue_;
+	};
+
+	class StableGoalPartition : public GoalPartition {
+		friend class PartitionTable;
+	public:
+		static const size_t MAX_OPEN_TRIAL_MAX = 10;
+		static const size_t MAX_CALC_HASH_SIZE = 1024*1024;
+		StableGoalPartition(const ConfigTable& config, const char* configDir);
+		bool isEnable() {
+			return enable_; 
+		}
+
+		bool isSucceedOnError();
+
+		void setAssigned() {
+			isAssigned_ = true;
+		}
+		
+		bool isAssigned() {
+			bool ret = isAssigned_;
+			isAssigned_ = false;
+			return ret;
+		}
+
+		bool validateFormat(picojson::value& value, bool calcCheckSum = false);
+		bool writeFile();
+		bool load();
+		void writeStableGoal(std::string& goal);
+		void setCheckSum();
+
+		uint32_t calcCheckSum();
+
+		std::string getPolicyName() {
+			switch (policy_) {
+			case 0: return ("SET_ASSIGNMENT_RULE");
+			case 1: return ("PARTIAL_STABLE_GOAL");
+			default: return ("UNDEF");
+			}
+		};
+
+		void initialCheck();
+
+	private:
+
+		bool enable_;
+		int32_t policy_;
+		const char* configDir_;
+		bool isAssigned_;
 	};
 
 
-	PartitionTable(const ConfigTable& configTable);
+	PartitionTable(const ConfigTable& configTable, const char* confPath);
 
 	~PartitionTable();
 
-	void copyGoal(util::Vector<PartitionRole>& roleList) {
-		goal_.copy(roleList);
+	void copyGoal(util::Vector<PartitionRole>& roleList, TableType target = PT_CURRENT_GOAL) {
+		switch (target) {
+		case PT_CURRENT_GOAL:
+			goal_.copy(roleList);
+			break;
+		case PT_STABLE_GOAL:
+			stableGoal_.copy(roleList);
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
+		}
 	}
 
-	void setGoal(PartitionTable* pt, util::Vector<PartitionRole>& goalList) {
-		goal_.set(pt, goalList);
+	void setGoal(PartitionTable* pt, util::Vector<PartitionRole>& goalList, TableType target = PT_CURRENT_GOAL) {
+		switch (target) {
+		case PT_CURRENT_GOAL:
+			goal_.set(pt, goalList);
+			break;
+		case PT_STABLE_GOAL:
+			stableGoal_.set(pt, goalList);
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
+		}
 	}
 
-	void updateGoal(PartitionRole& role) {
-		goal_.update(role);
+	void updateGoal(PartitionRole& role, TableType target = PT_CURRENT_GOAL) {
+		switch (target) {
+		case PT_CURRENT_GOAL:
+			goal_.update(role);
+			break;
+		case PT_STABLE_GOAL:
+			stableGoal_.update(role);
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
+		}
 	}
 
-	NodeId getOwner(PartitionId pId, TableType type = PT_CURRENT_OB);
+	void updateStableGoal(util::StackAllocator& alloc) {
+		util::Vector<PartitionRole> goalList(alloc);
+		copyGoal(goalList, PT_CURRENT_GOAL);
+		stableGoal_.updateAll(goalList);
+	}
 
-	bool isOwner(PartitionId pId, NodeId targetNodeDescriptor = 0, TableType type = PT_CURRENT_OB);
+	void writeStableGoal(util::StackAllocator& alloc);
+	
+	void getGoalPartitions(util::StackAllocator& alloc, const  ServiceTypeInfo& addressType,
+		picojson::value& result, TableType target);
+	
+	bool setGoalPartitions(util::StackAllocator& alloc, const picojson::value* paramValue, TableType tableType = PT_CURRENT_GOAL,  bool checkNode = true);
+	StableGoalPartition& getStableGoal() {
+		return stableGoal_;
+	}
 
-	bool isOwnerOrBackup(PartitionId pId, NodeId targetNodeDescriptor = 0, TableType type = PT_CURRENT_OB);
+	NodeId getOwner(PartitionId pId);
 
-	void getBackup(PartitionId pId, util::XArray<NodeId>& backups, TableType type = PT_CURRENT_OB);
+	bool isOwner(PartitionId pId, NodeId targetNodeDescriptor = 0);
 
-	void getCatchup(PartitionId pId, util::XArray<NodeId>& catchups, TableType type = PT_CURRENT_OB);
+	bool isOwnerOrBackup(PartitionId pId, NodeId targetNodeDescriptor = 0);
+
+	void getBackup(PartitionId pId, util::XArray<NodeId>& backups);
+
+	void getCatchup(PartitionId pId, util::XArray<NodeId>& catchups);
 
 	NodeId getCatchup(PartitionId pId);
 
-	bool isBackup(PartitionId pId, NodeId targetNodeId = 0, TableType type = PT_CURRENT_OB);
+	bool isBackup(PartitionId pId, NodeId targetNodeId = 0);
 
-	bool isCatchup(PartitionId pId, NodeId targetNodeId = 0, TableType type = PT_CURRENT_OB);
+	bool isCatchup(PartitionId pId, NodeId targetNodeId = 0);
 
-	size_t getBackupSize(util::StackAllocator& alloc, PartitionId pId, TableType type = PT_CURRENT_OB) {
+	size_t getBackupSize(util::StackAllocator& alloc, PartitionId pId) {
 		util::XArray<NodeId> backups(alloc);
-		getBackup(pId, backups, type);
+		getBackup(pId, backups);
 		return backups.size();
 	}
 
@@ -1203,6 +1365,10 @@ public:
 		getNodeInfo(nodeId).sslPort_ = sslPort;
 	}
 
+	bool isUseSSL() {
+		return (getSSLPortNo(0) != UNDEF_SSL_PORT);
+	}
+
 	void getPublicNodeAddress(AddressInfoList& addressInfoList) {
 		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
 		for (NodeId nodeId = 0; nodeId < getNodeNum(); nodeId++) {
@@ -1215,6 +1381,8 @@ public:
 	void setRackZoneInfoList(util::StackAllocator& alloc, RackZoneInfoList& rackZoneInfoList);
 
 	void setRackZoneId(const char* rackZoneIdName, NodeId nodeId = 0);
+	void setStandbyMode(bool standby, NodeId nodeId);
+	bool getStandbyMode(NodeId nodeId);
 
 	void getRackZoneIdList(util::Vector<int32_t>& rackZoneIdList);
 
@@ -1291,7 +1459,9 @@ public:
 	void planNext(PartitionContext& context);
 	bool checkPeriodicDrop(util::StackAllocator& alloc, DropPartitionNodeInfo& dropInfo);
 	void planGoal(PartitionContext& context);
-	void assignOptimalGoal(util::StackAllocator& allo);
+	void assignDefaultGoal(util::StackAllocator& alloc);
+	void assignRoundRobinGoal(util::StackAllocator& alloc);
+	bool assignSucceedStableGoal(util::StackAllocator& alloc);
 
 	std::string dumpPartitionRule(int32_t ruleNo) {
 		switch (ruleNo) {
@@ -1358,6 +1528,15 @@ public:
 		return currentPartitions_[pId].getPartitionRoleStatus(targetNode);
 	}
 
+	void getPartitionRoleStatus(PartitionId pId, PartitionRoleStatus& prevStatus, PartitionRoleStatus& curretStatus, NodeId targetNode = 0) {
+		if (pId >= config_.partitionNum_) {
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
+		}
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
+		prevStatus  = currentPartitions_[pId].getPartitionPrevRoleStatus(targetNode);
+		curretStatus = currentPartitions_[pId].getPartitionRoleStatus(targetNode);
+	}
+
 	void setPartitionStatus(PartitionId pId, PartitionStatus status, NodeId targetNode = 0) {
 		if (pId >= config_.partitionNum_) {
 			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
@@ -1402,7 +1581,14 @@ public:
 		}
 		case PT_CURRENT_GOAL: {
 			role = goal_.getPartitionRole(pId);
+			break;
 		}
+		case PT_STABLE_GOAL: {
+			role = stableGoal_.getPartitionRole(pId);
+			break;
+		}
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");		
 		}
 	}
 
@@ -1414,7 +1600,6 @@ public:
 		case PT_CURRENT_OB: {
 			util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 			partitions_[pId].roles_[type] = role;
-			partitions_[pId].roles_[type].set(type);
 			PartitionRoleStatus nextStatus = partitions_[pId].roles_[type].getPartitionRoleStatus();
 			currentPartitions_[pId].setPartitionRoleStatus(SELF_NODEID, nextStatus);
 			currentPartitions_[pId].setPartitionRevision(SELF_NODEID, role.getRevisionNo());
@@ -1424,6 +1609,12 @@ public:
 			goal_.update(role);
 			break;
 		}
+		case PT_STABLE_GOAL: {
+			goal_.update(role);
+			break;
+		}
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");		
 		}
 	}
 
@@ -1485,12 +1676,62 @@ public:
 		return isDownNode;
 	}
 
+	template <class T>
+	bool getAllNodeIdList(T& nodeIdList) {
+		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
+			nodeIdList.push_back(nodeId);
+		}
+		return true;
+	}
+
+	template <class T>
+	void getOrderingLiveNodeIdList(T& liveNodeIdList) {
+		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
+		for (const auto& elem: nodeOrderingSet_) {
+			NodeId nodeId = elem.second;
+			if (nodeId < nodeNum_ && nodes_[nodeId].heartbeatTimeout_ != UNDEF_TTL) {
+				liveNodeIdList.push_back(nodeId);
+			}
+		}
+	}
+	
+	template <class T>
+	void getLiveNodeAddressSet(T& liveNodeAddressSet) {
+		bool forSSL = isUseSSL();
+		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
+			if (nodeId < nodeNum_ && nodes_[nodeId].heartbeatTimeout_ != UNDEF_TTL) {
+				if (!forSSL) {
+					liveNodeAddressSet.insert(getNodeAddress(nodeId, SYSTEM_SERVICE));
+				}
+				else {
+					NodeAddress address = getNodeAddress(nodeId, SYSTEM_SERVICE);
+					address.port_ = static_cast<uint16_t>(getSSLPortNo(nodeId));
+					liveNodeAddressSet.insert(address);
+				}
+			}
+		}
+	}
+
+	void setReserveNum(int32_t reserveNum) {
+		reserveNum_ = reserveNum;
+	}
+
+	int32_t getReserveNum() {
+		return reserveNum_;
+	}
+
 	bool checkLiveNode(NodeId nodeId, int64_t limitTime = UNDEF_TTL) {
 		return nodes_[nodeId].isAlive(limitTime);
 	}
 
 	void setHeartbeatTimeout(NodeId nodeId, int64_t heartbeatTimeout = UNDEF_TTL) {
 		nodes_[nodeId].heartbeatTimeout_ = heartbeatTimeout;
+		if (heartbeatTimeout != UNDEF_TTL) {
+			nodes_[nodeId].isAcked_ = true;
+		}
+		else {
+			nodes_[nodeId].isAcked_ = false;
+		}
 	}
 
 	void setAckHeartbeat(NodeId nodeId, bool isAcked = true) {
@@ -1505,9 +1746,9 @@ public:
 		return nodes_[nodeId].heartbeatTimeout_;
 	}
 
-	void clear(PartitionId pId, TableType type) {
+	void clear(PartitionId pId) {
 		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
-		partitions_[pId].clear(type);
+		partitions_[pId].clear();
 	}
 
 	void clearCurrentStatus();
@@ -1557,6 +1798,22 @@ public:
 	void getProgress(double& goalProgress, double& replicaProgress) {
 		goalProgress = goalProgress_;
 		replicaProgress = replicaProgress_;
+	}
+
+	void setAssignementRule(int32_t rule) {
+		goalAssignmentRule_ = rule;
+	}
+
+	void setEnableStableGoal(bool flag) {
+		stableGoal_.enable_ = flag;
+	}
+
+	void setPolicy(int32_t policy) {
+		stableGoal_.policy_ = policy;
+	}
+
+	void setInitialGenerate(bool flag) {
+		stableGoal_.enableInitialGenerate_ = flag;
 	}
 
 	/*!
@@ -1756,6 +2013,8 @@ public:
 			return "";
 		}
 	}
+	std::string dumpGoalAssignmentRule();
+	std::string dumpGoalAssignmentRule(int32_t rule);
 
 	std::string dumpDatas(bool isDetail = false, bool lsnOnly = false);
 
@@ -1764,8 +2023,9 @@ public:
 	void getServiceAddress(NodeId nodeId, picojson::value& result,
 		ServiceType addressType, bool forSsl);
 
-	void updateNewSQLPartition(std::vector<PartitionRole>& newsqlPartitionList);
-	void updateNewSQLPartition(SubPartitionTable& newsqlPartition);
+	void getServiceAddress(NodeId nodeId, picojson::object& result,
+		const ServiceTypeInfo& addressType);
+	void updateNewSQLPartition(SubPartitionTable& newsqlPartition, bool force);
 	NodeId getNewSQLOwner(PartitionId pId);
 	PartitionRevisionNo getNewSQLPartitionRevision(PartitionId pId);
 
@@ -1824,7 +2084,8 @@ private:
 			globalStackAlloc_(NULL),
 			sslPort_(UNDEF_SSL_PORT),
 			rackZoneIdName_(""),
-			rackZoneId_(UNDEF_RACKZONEID) {}
+			rackZoneId_(UNDEF_RACKZONEID),
+			standbyMode_(false) {}
 
 		~NodeInfo() {
 			if (nodeBaseInfo_) {
@@ -1883,6 +2144,7 @@ private:
 		int32_t sslPort_;
 		std::string rackZoneIdName_;
 		RackZoneId rackZoneId_;
+		bool standbyMode_;
 	};
 
 	class BlockQueue {
@@ -1932,7 +2194,7 @@ private:
 			roleStatus_(PT_NONE),
 			partitionRevision_(1),
 			chunkCount_(0),
-			errorStatus_(PT_OTHER_NORMAL) {}
+			errorStatus_(PT_OTHER_NORMAL), prevRoleStatus_(PT_NONE) {}
 
 		LogSequentialNumber lsn_;
 		LogSequentialNumber startLsn_;
@@ -1941,6 +2203,7 @@ private:
 		PartitionRevisionNo partitionRevision_;
 		int64_t chunkCount_;
 		int32_t errorStatus_;
+		PartitionRoleStatus prevRoleStatus_;
 
 		void clear() {
 			startLsn_ = 0;
@@ -1949,6 +2212,7 @@ private:
 			partitionRevision_ = PartitionRevision::INITIAL_CLUSTER_REVISION;
 			chunkCount_ = 0;
 			errorStatus_ = PT_OTHER_NORMAL;
+			prevRoleStatus_ = PT_NONE;
 		}
 	};
 
@@ -1974,7 +2238,11 @@ private:
 			return currentPartitionInfos_[nodeId].lsn_;
 		}
 
-		void setLsn(NodeId nodeId, LogSequentialNumber lsn, bool updateCheck = false) {
+		void setLsn(
+				NodeId nodeId, LogSequentialNumber lsn,
+				bool updateCheck = false) {
+			UNUSED_VARIABLE(updateCheck);
+
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].lsn_ = lsn;
 		}
@@ -2018,28 +2286,33 @@ private:
 			return currentPartitionInfos_[nodeId].roleStatus_;
 		}
 
+		PartitionRoleStatus getPartitionPrevRoleStatus(NodeId nodeId) {
+			checkSize(nodeId);
+			return currentPartitionInfos_[nodeId].prevRoleStatus_;
+		}
+		
 		void setPartitionRoleStatus(
 			NodeId nodeId, PartitionRoleStatus roleStatus) {
-
 			checkSize(nodeId);
+			PartitionRoleStatus prevStatus = currentPartitionInfos_[nodeId].roleStatus_;
+			if (prevStatus != roleStatus) {
+				currentPartitionInfos_[nodeId].prevRoleStatus_ = prevStatus;
+			}
 			currentPartitionInfos_[nodeId].roleStatus_ = roleStatus;
 		}
 
 		PartitionRevisionNo getPartitionRevision(NodeId nodeId) {
-
 			checkSize(nodeId);
 			return currentPartitionInfos_[nodeId].partitionRevision_;
 		}
 
 		void setPartitionRevision(
 			NodeId nodeId, PartitionRevisionNo partitionRevision) {
-
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].partitionRevision_ = partitionRevision;
 		}
 
 		void resetPartitionInfo(NodeId nodeId) {
-
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].roleStatus_ = PT_NONE;
 			currentPartitionInfos_[nodeId].status_ = PT_OFF;
@@ -2047,7 +2320,6 @@ private:
 
 	private:
 		void checkSize(NodeId nodeId) {
-
 			if (static_cast<size_t>(nodeId) >= currentPartitionInfos_.size()) {
 				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL,
 					"Specified nodeId is invalid, nodeId=" << nodeId
@@ -2063,31 +2335,27 @@ private:
 		Partition() : roles_(NULL), globalStackAlloc_(NULL) {}
 		~Partition() {
 			if (roles_) {
-				for (int32_t pos = 0; pos < PT_TABLE_MAX; pos++) {
+				for (int32_t pos = 0; pos < PT_ROLE_TYPE_NUM; pos++) {
 					ALLOC_DELETE(*globalStackAlloc_, &roles_[pos]);
 				}
 			}
 		}
 
-		void init(util::StackAllocator& alloc, PartitionId pId,
-			PartitionGroupId pgId, int32_t nodeLimit) {
+		void init(
+				util::StackAllocator& alloc, PartitionId pId,
+				PartitionGroupId pgId, int32_t nodeLimit) {
+			UNUSED_VARIABLE(nodeLimit);
+
 			globalStackAlloc_ = &alloc;
-			roles_ = ALLOC_NEW(alloc) PartitionRole[PT_TABLE_MAX];
-			for (int32_t pos = 0; pos < PT_TABLE_MAX; pos++) {
-				roles_[pos].init(pId, static_cast<TableType>(pos));
+			roles_ = ALLOC_NEW(alloc) PartitionRole[PT_ROLE_TYPE_NUM];
+			for (int32_t pos = 0; pos < PT_ROLE_TYPE_NUM; pos++) {
+				roles_[pos].init(pId);
 			}
 			partitionInfo_.pgId_ = pgId;
 		}
 
-		void clear(TableType type = PT_TABLE_MAX) {
-			if (type == PT_TABLE_MAX) {
-				for (size_t i = 0; i < PT_TABLE_MAX; i++) {
-					roles_[i].clear();
-				}
-			}
-			else {
-				roles_[type].clear();
-			}
+		void clear() {
+			roles_[PT_CURRENT_OB].clear();
 		}
 
 		void check(NodeId nodeId);
@@ -2225,8 +2493,9 @@ private:
 		}
 
 		int32_t calcPriority(NodeId targetNodePos) {
-			return (priorityPartitionLists_[targetNodePos].size()
-				+ priorityPartitionBackupLists_[targetNodePos].size());
+			return static_cast<int32_t>(
+					priorityPartitionLists_[targetNodePos].size() +
+					priorityPartitionBackupLists_[targetNodePos].size());
 		}
 
 		void setOrigianlRackZoneAwareness(bool flag) {
@@ -2484,6 +2753,7 @@ private:
 	void modifyGoalTable(util::StackAllocator& alloc, util::XArray<NodeId>& nodeIdList,
 		util::Vector<PartitionRole>& roleList);
 
+	void preparePlanGoal();
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
 	util::StackAllocator globalStackAlloc_;
@@ -2537,6 +2807,11 @@ private:
 	PartitionRevisionNo prevDropRevisionNo_;
 	bool isGoalPartition_;
 	bool hasPublicAddress_;
+	std::set<std::pair<std::string, NodeId>> nodeOrderingSet_;
+	int32_t goalAssignmentRule_;
+	StableGoalPartition stableGoal_;
+	int32_t reserveNum_;
+	int32_t currentGoalAssignmentRule_;
 };
 
 typedef PartitionTable::PartitionStatus PartitionStatus;

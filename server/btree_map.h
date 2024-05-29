@@ -408,6 +408,7 @@ public:
 	bool compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		const S *e, BaseIndex::Setting &setting);
 
+
 	int32_t initialize(TransactionContext &txn, ColumnType columnType,
 		bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize = DEFAULT_ELEM_SIZE);
 	template <typename K, typename V>
@@ -660,28 +661,38 @@ private:
 	template <typename K, typename V>
 	class BNode : public BaseObject {
 	public:
-		BNode(const BtreeMap *map, AllocateStrategy &allocateStrategy)
-			: BaseObject(*(map->getObjectManager()), allocateStrategy),
-			  allocateStrategy_(allocateStrategy) {
+		BNode(const BtreeMap *map, AllocateStrategy &allocateStrategy) :
+				BaseObject(*(map->getObjectManager()), allocateStrategy),
+				allocateStrategy_(allocateStrategy) {
 			BaseObject::copyReference(UNDEF_OID, map->getBaseAddr());
 		}
 
-		BNode(TransactionContext &txn, ObjectManagerV4 &objectManager,
-			AllocateStrategy &allocateStrategy)
-			: BaseObject(objectManager, allocateStrategy),
-			  allocateStrategy_(allocateStrategy) {}
-		BNode(TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
-			AllocateStrategy &allocateStrategy)
-			: BaseObject(objectManager, allocateStrategy, oId),
-			  allocateStrategy_(allocateStrategy) {}
+		BNode(
+				TransactionContext &txn, ObjectManagerV4 &objectManager,
+				AllocateStrategy &allocateStrategy) :
+				BaseObject(objectManager, allocateStrategy),
+				allocateStrategy_(allocateStrategy) {
+			UNUSED_VARIABLE(txn);
+		}
+
+		BNode(
+				TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
+				AllocateStrategy &allocateStrategy) :
+				BaseObject(objectManager, allocateStrategy, oId),
+				allocateStrategy_(allocateStrategy) {
+			UNUSED_VARIABLE(txn);
+		}
 
 		void directLoad(const BtreeMap *map) {
 			BaseObject::copyReference(UNDEF_OID, map->getBaseAddr());
 		}
 
 
-		inline void initialize(TransactionContext &txn, OId self, bool leaf,
-			int32_t nodeMaxSize, uint8_t elemSize) {
+		inline void initialize(
+				TransactionContext &txn, OId self, bool leaf,
+				int32_t nodeMaxSize, uint8_t elemSize) {
+			UNUSED_VARIABLE(txn);
+
 			BNodeHeader &header = getImage()->getHeader();
 			header.size_ = 0;
 			header.parent_ = UNDEF_OID;
@@ -698,14 +709,16 @@ private:
 				BaseObject childrenDirtyObject(
 					*getObjectManager(), allocateStrategy_);
 				OId *childrenList = childrenDirtyObject.allocate<OId>(
-					sizeof(OId) * (nodeMaxSize + 1),
-					header.children_, OBJECT_TYPE_BTREE_MAP);
+						static_cast<DSObjectSize>(sizeof(OId) * (nodeMaxSize + 1)),
+						header.children_, OBJECT_TYPE_BTREE_MAP);
 				for (int32_t i = 0; i < nodeMaxSize + 1; ++i) {
 					childrenList[i] = UNDEF_OID;
 				}
 			}
 		}
 		inline OId getChild(TransactionContext &txn, int32_t nth) const {
+			UNUSED_VARIABLE(txn);
+
 			assert(getImage()->getHeader().children_ != UNDEF_OID);
 
 			BaseObject baseObject(*getObjectManager(),
@@ -714,6 +727,8 @@ private:
 			return oIdList[nth];
 		}
 		inline void setChild(TransactionContext &txn, int32_t nth, OId oId) {
+			UNUSED_VARIABLE(txn);
+
 			assert(getImage()->getHeader().children_ != UNDEF_OID);
 
 			UpdateBaseObject baseObject(
@@ -758,7 +773,9 @@ private:
 		}
 
 		inline void insertChild(
-			TransactionContext &txn, int32_t m, BNode<K, V> &dirtyNode) {
+				TransactionContext &txn, int32_t m, BNode<K, V> &dirtyNode) {
+			UNUSED_VARIABLE(txn);
+
 			BNodeImage<K, V> *image = getImage();
 			assert(image->getHeader().children_ != UNDEF_OID);
 
@@ -772,6 +789,8 @@ private:
 			dirtyNode.setParentOId(image->getHeader().self_);
 		}
 		inline void removeChild(TransactionContext &txn, int32_t m) {
+			UNUSED_VARIABLE(txn);
+
 			BNodeImage<K, V> *image = getImage();
 			assert(image->getHeader().children_ != UNDEF_OID);
 			UpdateBaseObject baseObject(
@@ -807,8 +826,11 @@ private:
 		}
 
 		inline void allocateVal(
-			TransactionContext &txn, int32_t m, KeyValue<StringObject, OId> &e, Setting &setting) {
+				TransactionContext &txn, int32_t m,
+				KeyValue<StringObject, OId> &e, Setting &setting) {
+			UNUSED_VARIABLE(txn);
 			UNUSED_VARIABLE(setting);
+
 			BNodeImage<K, V> *image = getImage();
 			StringCursor *stringCursor =
 				reinterpret_cast<StringCursor *>(e.key_.ptr_);
@@ -824,9 +846,11 @@ private:
 		}
 
 		inline void allocateVal(
-			TransactionContext &txn, int32_t m, KeyValue<FullContainerKeyObject, OId> &e, Setting &setting) {
+				TransactionContext &txn, int32_t m,
+				KeyValue<FullContainerKeyObject, OId> &e, Setting &setting) {
 			UNUSED_VARIABLE(txn);
 			UNUSED_VARIABLE(setting);
+
 			BNodeImage<K, V> *image = getImage();
 			const FullContainerKeyCursor *keyCursor =
 				reinterpret_cast<const FullContainerKeyCursor *>(e.key_.ptr_);
@@ -835,9 +859,11 @@ private:
 			image->getHeader().size_++;
 		}
 		inline void allocateVal(
-			TransactionContext& txn, int32_t m, KeyValue<FullContainerKeyObject, KeyDataStoreValue>& e, Setting& setting) {
+				TransactionContext& txn, int32_t m,
+				KeyValue<FullContainerKeyObject, KeyDataStoreValue>& e, Setting& setting) {
 			UNUSED_VARIABLE(txn);
 			UNUSED_VARIABLE(setting);
+
 			BNodeImage<K, V>* image = getImage();
 			const FullContainerKeyCursor* keyCursor =
 				reinterpret_cast<const FullContainerKeyCursor*>(e.key_.ptr_);
@@ -930,6 +956,8 @@ private:
 		}
 
 		inline void remove(TransactionContext &txn) {
+			UNUSED_VARIABLE(txn);
+
 			ChunkAccessor ca;
 			BNodeImage<K, V> *image = getImage();
 			if (image->getHeader().children_ != UNDEF_OID) {
@@ -1282,7 +1310,9 @@ private:
 			} else if (elemSize >= 40) {
 				baseNodeSize = 2 * 1024;
 			}
-			int32_t elemAreaSize = baseNodeSize - sizeof(BNodeHeader) - ObjectManagerV4::OBJECT_HEADER_SIZE;
+			int32_t elemAreaSize = static_cast<int32_t>(
+					baseNodeSize - sizeof(BNodeHeader) -
+					ObjectManagerV4::OBJECT_HEADER_SIZE);
 			int32_t maxElemNum = elemAreaSize / elemSize;
 			if (maxElemNum % 2 == 0) {
 				nodeSize = (maxElemNum - 2) + 1;
@@ -1303,7 +1333,9 @@ private:
 			} else if (elemSize >= 40) {
 				baseNodeSize = 2 * 1024;
 			}
-			int32_t elemAreaSize = baseNodeSize - sizeof(BNodeHeader) - ObjectManagerV4::OBJECT_HEADER_SIZE;
+			int32_t elemAreaSize = static_cast<int32_t>(
+					baseNodeSize - sizeof(BNodeHeader) -
+					ObjectManagerV4::OBJECT_HEADER_SIZE);
 			int32_t maxElemNum = elemAreaSize / elemSize;
 			if (maxElemNum % 2 == 0) {
 				nodeSize = (maxElemNum - 2) / 2;
@@ -1839,6 +1871,8 @@ private:
 
 	template <typename K, typename V>
 	void replaceRoot(TransactionContext &txn, BNode<K, V> &replaceNode) {
+		UNUSED_VARIABLE(txn);
+
 		BNode<K, V> baseRootNode(this, allocateStrategy_);
 
 		replaceNode.setDirty();
@@ -3064,7 +3098,8 @@ bool BtreeMap::findRangeByDescending(
 
 template <>
 inline std::string BtreeMap::BNode<StringKey, OId>::dump(
-	TransactionContext &txn) {
+		TransactionContext &txn) {
+	UNUSED_VARIABLE(txn);
 	util::NormalOStringStream out;
 	out << "(@@Node@@)";
 	for (int32_t i = 0; i < numkeyValues(); ++i) {
@@ -3078,7 +3113,8 @@ inline std::string BtreeMap::BNode<StringKey, OId>::dump(
 
 template <>
 inline std::string BtreeMap::BNode<FullContainerKeyAddr, OId>::dump(
-	TransactionContext &txn) {
+		TransactionContext &txn) {
+	UNUSED_VARIABLE(txn);
 	util::NormalOStringStream out;
 	out << "(@@Node@@)";
 	for (int32_t i = 0; i < numkeyValues(); ++i) {
@@ -3361,8 +3397,11 @@ inline int32_t BtreeMap::keyCmp(TransactionContext &txn,
 }
 
 template <typename K>
-inline int32_t BtreeMap::keyCmp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
-	const K &e1, const K &e2, Setting &) {
+inline int32_t BtreeMap::keyCmp(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, const K &e1, const K &e2, Setting &) {
+	UNUSED_VARIABLE(strategy);
+
 	UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
 	UTIL_STATIC_ASSERT((!util::IsSame<K, StringObject>::VALUE));
 	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));

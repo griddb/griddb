@@ -53,6 +53,7 @@ public:
 	virtual bool scanIndex(OpContext &cxt, const IndexScanInfo &info) = 0;
 	virtual bool scanMeta(
 			OpContext &cxt, const Projection &proj, const Expression *pred) = 0;
+	virtual bool scanVisited(OpContext &cxt, const Projection &proj) = 0;
 
 	virtual uint32_t getOutputIndex() = 0;
 	virtual void setOutputIndex(uint32_t index) = 0;
@@ -129,6 +130,7 @@ struct SQLContainerUtils::ScanCursorAccessor::Source {
 	int64_t indexLimit_;
 	int64_t memLimit_;
 	std::pair<uint64_t, uint64_t> partialExecSizeRange_;
+	bool partialExecCountBased_;
 	OpContext::Source cxtSrc_;
 };
 

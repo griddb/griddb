@@ -145,7 +145,7 @@ void SQLResultSet::exportSchema(util::StackAllocator& alloc,
 			const bool nullable = (type != COLUMN_TYPE_ANY &&
 				((type & NULLABLE_MASK) != 0));
 			if (nullable) {
-				type &= ~NULLABLE_MASK;
+				type &= static_cast<ColumnType>(~NULLABLE_MASK);
 			}
 			const bool withAny = true;
 			const int8_t typeOrdinal =
@@ -158,7 +158,8 @@ void SQLResultSet::exportSchema(util::StackAllocator& alloc,
 					MessageSchema::makeColumnFlags(forArray, false, noNull);
 			out << flags;
 		}
-		const int16_t keyCount = (keyColumnId >= 0 ? 0 : 1);
+
+		const int16_t keyCount = 0; 
 		StatementHandler::encodeIntData<EventByteOutStream>(out, keyCount);
 
 		if (keyCount > 0) {
@@ -251,8 +252,8 @@ void SQLResultSet::clear() {
 
 void SQLResultSet::setNull(size_t index, bool nullValue) {
 	if (nullValue) {
-		(*cursor_.fixedPart_)[
-			lastNullsPos_ + index / CHAR_BIT] |= 1U << (index % CHAR_BIT);
+		(*cursor_.fixedPart_)[lastNullsPos_ + index / CHAR_BIT] |=
+				static_cast<uint8_t>(1U << (index % CHAR_BIT));
 	}
 }
 

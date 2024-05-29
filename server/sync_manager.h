@@ -629,6 +629,14 @@ public:
 		return isExecuteRecoveryChecpoint_;
 	}
 
+	size_t getLogOffset() {
+		return logOffset_;
+	}
+
+	void setLogOffset(size_t logOffset) {
+		logOffset_ = logOffset;
+	}
+
 private:
 	struct SendBackup {
 		SendBackup()
@@ -704,6 +712,7 @@ private:
 	int32_t invalidCount_;
 	int64_t prevProcessedChunkNum_;
 	int64_t prevProcessedLogNum_;
+	size_t logOffset_;
 };
 
 /*!
@@ -783,7 +792,7 @@ public:
 		SyncResponseInfo& syncResponseInfo,
 		NodeId targetNodeId);
 
-	void setShorttermSyncLog(
+	bool setShorttermSyncLog(
 		SyncContext* context,
 		SyncRequestInfo& syncRequestInfo,
 		EventType eventType, const util::DateTime& now,
@@ -864,7 +873,7 @@ public:
 		const EventMonotonicTime emNow,
 		NodeId targetNodeId);
 
-	void setLongtermSyncLog(
+	bool setLongtermSyncLog(
 		SyncContext* context,
 		SyncRequestInfo& syncRequestInfo,
 		SyncResponseInfo& syncResponseInfo,
@@ -1087,6 +1096,31 @@ private:
 			longtermCheckIntervalCount_
 				= config.get<int32_t>(
 					CONFIG_TABLE_SYNC_LONGTERM_CHECK_INTERVAL_COUNT);
+
+			logInterruptionInterval_ = config.get<int32_t>(
+				CONFIG_TABLE_SYNC_LOG_INTERRUPTION_INTERVAL);
+
+			setLogReplicationTimeoutInterval(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_REDO_LOG_REPLICATION_TIMEOUT_INTERVAL));
+
+			setLogErrorKeepInterval(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_REDO_LOG_ERROR_KEEP_INTERVAL));
+
+			setReplicationCheckInterval(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_REDO_LOG_CHECK_REPLICATION_INTERVAL));
+
+			setRetryTimeoutInterval(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_REDO_LOG_RETRY_TIMEOUT_INTERVAL));
+			
+			setRetryCheckInterval(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_REDO_LOG_RETRY_CHECK_INTERVAL));
+
+			if (getLogErrorKeepInterval() <= getReplicationCheckInterval()) {
+				setReplicationCheckInterval(config.get<int32_t>(
+					CONFIG_TABLE_SYNC_REDO_LOG_ERROR_KEEP_INTERVAL));
+			}
+			maxRedoMessageSize_ = static_cast<int32_t>(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_REDO_LOG_MAX_MESSAGE_SIZE));
 		}
 
 		int32_t getSyncTimeoutInterval() const {
@@ -1102,6 +1136,15 @@ private:
 			return true;
 		}
 
+		int32_t getMaxRedoMessageSize() const {
+			return maxRedoMessageSize_;
+		}
+
+		bool setMaxRedoMessageSize(int32_t maxMessageSize) {
+			maxRedoMessageSize_ = maxMessageSize;
+			return true;
+		}
+
 		bool setMaxChunkMessageSize(
 			int32_t maxMessageSize) {
 			sendChunkSizeLimit_ = maxMessageSize;
@@ -1114,13 +1157,60 @@ private:
 			return sendChunkNum_;
 		}
 
-		void setLongtermCheckIntervalCount(
-			int32_t count) {
+		void setLongtermCheckIntervalCount(int32_t count) {
 			longtermCheckIntervalCount_ = count;
 		}
 
 		int32_t getLongtermCheckIntervalCount() {
 			return longtermCheckIntervalCount_;
+		}
+
+		void setLogInterruptionInterval(int32_t interval) {
+			logInterruptionInterval_ = interval;
+		}
+
+		int32_t getLogInterruptionInterval() {
+			return logInterruptionInterval_;
+		}
+
+		void setLogReplicationTimeoutInterval(int32_t interval) {
+			replicationTimeoutInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		int32_t getLogReplicationTimeoutInterval() {
+			return replicationTimeoutInterval_;
+		}
+
+		void setLogErrorKeepInterval(int32_t interval) {
+			errorKeepInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		int32_t getLogErrorKeepInterval() {
+			return errorKeepInterval_;
+		}
+
+		void setReplicationCheckInterval(int32_t interval) {
+			replicationCheckInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		int32_t getReplicationCheckInterval() {
+			return replicationCheckInterval_;
+		}
+		
+		void setRetryTimeoutInterval(int32_t interval) {
+			retryTimeoutInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		int32_t getRetryTimeoutInterval() {
+			return retryTimeoutInterval_;
+		}
+
+		void setRetryCheckInterval(int32_t interval) {
+			retryCheckInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		int32_t getRetryCheckInterval() {
+			return retryCheckInterval_;
 		}
 
 	private:
@@ -1130,6 +1220,13 @@ private:
 		int32_t sendChunkSizeLimit_;
 		int32_t blockSize_;
 		int32_t longtermCheckIntervalCount_;
+		int32_t logInterruptionInterval_;
+		int32_t replicationTimeoutInterval_;
+		int32_t errorKeepInterval_;
+		int32_t replicationCheckInterval_;
+		int32_t maxRedoMessageSize_;
+		int32_t retryTimeoutInterval_;
+		int32_t retryCheckInterval_;
 	};
 
 	/*!

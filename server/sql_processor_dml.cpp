@@ -159,7 +159,6 @@ bool DMLProcessor::applyInfo(Context& cxt, const Option& option,
 
 		ColumnType columnType;
 		int32_t colId;
-		uint16_t varTypeColumnCount = 0;
 		bool hasVarData = false;
 		util::XArray<uint8_t> isVariableList(eventStackAlloc);
 		uint8_t variable = 0;
@@ -177,10 +176,9 @@ bool DMLProcessor::applyInfo(Context& cxt, const Option& option,
 				globalVarAlloc_.allocate(sizeof(ColumnInfo) * nosqlColumnCount_));
 		}
 
-		uint16_t fixDataOffset = 0;
+		size_t fixDataOffset = 0;
 		uint16_t varDataPos = 0;
-		fixDataOffset = static_cast<uint16_t>(
-			ValueProcessor::calcNullsByteSize(nosqlColumnCount_));
+		fixDataOffset = ValueProcessor::calcNullsByteSize(nosqlColumnCount_);
 		if (hasVarData) {
 			fixDataOffset += sizeof(OId);
 		}
@@ -188,7 +186,7 @@ bool DMLProcessor::applyInfo(Context& cxt, const Option& option,
 		for (colId = 0; colId < nosqlColumnCount_; colId++) {
 			ColumnInfo& columnInfo = nosqlColumnList_[colId];
 			columnInfo.initialize();
-			columnInfo.setColumnId(colId);
+			columnInfo.setColumnId(static_cast<uint16_t>(colId));
 			columnInfo.setType(nosqlColumnTypeList[colId]);
 			uint8_t option = (*node.nosqlColumnOptionList_)[colId];
 			if (ColumnInfo::isNotNull(option)) {
@@ -199,8 +197,9 @@ bool DMLProcessor::applyInfo(Context& cxt, const Option& option,
 				varDataPos++;
 			}
 			else {
-				columnInfo.setOffset(fixDataOffset);
-				fixDataOffset += NoSQLUtils::getFixedSize(nosqlColumnTypeList[colId]);
+				columnInfo.setOffset(static_cast<uint16_t>(fixDataOffset));
+				fixDataOffset +=
+						NoSQLUtils::getFixedSize(nosqlColumnTypeList[colId]);
 			}
 		}
 
@@ -284,6 +283,7 @@ bool DMLProcessor::pipe(
 	@brief finish処理を実行する
 */
 bool DMLProcessor::finish(Context& cxt, InputId inputId) {
+	UNUSED_VARIABLE(inputId);
 
 	try {
 		if (!checkCompleted()) {
@@ -467,11 +467,13 @@ DMLProcessor::BulkManager::~BulkManager() {
 	@note マネージャ - エントリ(コンテナごと) - オペレーション(コマンドごと)の関係
 */
 void DMLProcessor::BulkManager::setup(
-	Context& cxt, const TableIdInfo& tableIdInfo,
-	PartitioningInfo* partitioningInfo,
-	TupleList::Column* inputColumnList, int32_t inputColumnSize,
-	ColumnInfo* nosqlColumnInfoList, int32_t nosqlColumnSize,
-	const InsertColumnMap* insertColumnMap, bool isInsertReplace) {
+		Context& cxt, const TableIdInfo& tableIdInfo,
+		PartitioningInfo* partitioningInfo,
+		TupleList::Column* inputColumnList, int32_t inputColumnSize,
+		ColumnInfo* nosqlColumnInfoList, int32_t nosqlColumnSize,
+		const InsertColumnMap* insertColumnMap, bool isInsertReplace) {
+	UNUSED_VARIABLE(cxt);
+	UNUSED_VARIABLE(tableIdInfo);
 
 	if (insertColumnMap && insertColumnMap->size() > 0) {
 		insertColumnMap_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
@@ -481,7 +483,6 @@ void DMLProcessor::BulkManager::setup(
 
 	}
 
-	BulkEntry* bulkEntry = NULL;
 	try {
 		if (partitioningInfo != NULL) {
 			switch (partitioningInfo->partitioningType_) {
@@ -534,15 +535,19 @@ DMLProcessor::BulkManager::BulkEntry::~BulkEntry() {
 	@brief バルクエントリ初期化
 */
 void DMLProcessor::BulkManager::BulkEntry::setup(
-	Context& cxt, DmlType type,
-	TupleList::Column* inputColumnList,
-	int32_t inputColumnSize,
-	ColumnInfo* nosqlColumnInfoList,
-	uint32_t nosqlColumnCount,
-	TableContainerInfo* containerInfo,
-	bool isInsertReplace,
-	bool isPartitioning,
-	TargetContainerInfo& targetInfo) {
+		Context& cxt, DmlType type,
+		TupleList::Column* inputColumnList,
+		int32_t inputColumnSize,
+		ColumnInfo* nosqlColumnInfoList,
+		uint32_t nosqlColumnCount,
+		TableContainerInfo* containerInfo,
+		bool isInsertReplace,
+		bool isPartitioning,
+		TargetContainerInfo& targetInfo) {
+	UNUSED_VARIABLE(inputColumnList);
+	UNUSED_VARIABLE(inputColumnSize);
+	UNUSED_VARIABLE(containerInfo);
+
 	Operation* entry = NULL;
 	try {
 		EventContext& ec = *cxt.getEventContext();
@@ -630,9 +635,7 @@ void DMLProcessor::BulkManager::import(Context& cxt, InputId inputId,
 	EventContext& ec = *cxt.getEventContext();
 	InputId targetId = UNDEF_INPUTID;
 	TableSchemaInfo* tableSchema = cxt.getTableSchema();
-	NodeAffinityNumber affinity = UNDEF_NODE_AFFINITY_NUMBER;
 	SQLExecution* execution = cxt.getExecution();
-	util::StackAllocator& alloc = cxt.getEventAllocator();
 	switch (type_) {
 	case DML_INSERT: {
 		BulkManager::BulkEntry* store = NULL;
@@ -655,12 +658,11 @@ void DMLProcessor::BulkManager::import(Context& cxt, InputId inputId,
 		value2 = setTupleValue(
 			reader, partitioningInfo_->subPartitioningColumnId_, tmpValue2);
 
-		TableSchemaInfo* afterSchema = NULL;
 		TargetContainerInfo targetInfo;
 		resolveTargetContainer(ec, value1, value2, conn, tableSchema,
 			execution, dbName, tableName, targetInfo, needRefresh);
-		NodeAffinityNumber pos;
-		if (partitioningInfo_->partitioningColumnId_ != UNDEF_COLUMNID) {
+		if (static_cast<ColumnId>(partitioningInfo_->partitioningColumnId_) !=
+				UNDEF_COLUMNID) {
 			if (partitioningInfo_->partitioningType_ == SyntaxTree::TABLE_PARTITION_TYPE_HASH
 				|| partitioningInfo_->partitioningType_ == SyntaxTree::TABLE_PARTITION_TYPE_UNDEF) {
 				if (targetInfo.pos_ == 0) {
@@ -673,7 +675,6 @@ void DMLProcessor::BulkManager::import(Context& cxt, InputId inputId,
 			}
 		}
 		else {
-			pos = 0;
 			containerInfo = &tableSchema->containerInfoList_[0];
 			targetInfo.containerId_ = containerInfo->containerId_;
 			targetInfo.pId_ = containerInfo->pId_;
@@ -721,7 +722,8 @@ void DMLProcessor::BulkManager::import(Context& cxt, InputId inputId,
 			reader.get().getAs<int64_t>(columnList_[SUBCONTAINER_COLUMN_ID]));
 		BulkManager::BulkEntry* store = NULL;
 		TargetContainerInfo targetInfo;
-		if (subContainerId > partitioningInfo_->subInfoList_.size()) {
+		if (subContainerId >
+				static_cast<ptrdiff_t>(partitioningInfo_->subInfoList_.size())) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_SQL_TABLE_PARTITION_INTERNAL,
 				"Target pos=" << subContainerId << " is out of range, max="
@@ -763,7 +765,8 @@ void DMLProcessor::BulkManager::import(Context& cxt, InputId inputId,
 		BulkManager::BulkEntry* store = NULL;
 		TargetContainerInfo targetInfo;
 
-		if (subContainerId > partitioningInfo_->subInfoList_.size()) {
+		if (subContainerId >
+				static_cast<ptrdiff_t>(partitioningInfo_->subInfoList_.size())) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_SQL_TABLE_PARTITION_INTERNAL,
 				"Target pos=" << subContainerId << " is out of range, max="
@@ -797,7 +800,6 @@ bool DMLProcessor::recovery(Context& cxt,
 	NoSQLContainer* newContainer = NULL;
 	EventContext& ec = *cxt.getEventContext();
 	util::StackAllocator& alloc = ec.getAllocator();
-	TableSchemaInfo* tableSchema = cxt.getTableSchema();
 
 	try {
 
@@ -854,7 +856,7 @@ void DMLProcessor::BulkManager::checkInsertColumnMap() {
 				if (nosqlColumnList_ == NULL) {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
 				}
-				if (columnId >= nosqlColumnSize_) {
+				if (static_cast<int64_t>(columnId) >= nosqlColumnSize_) {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
 				}
 				if (nosqlColumnList_[columnId].isNotNull()) {
@@ -874,11 +876,15 @@ void DMLProcessor::BulkManager::checkInsertColumnMap() {
 	@note バルクにエントリするだけで、実行確認、実施等は上位で実施する
 */
 void DMLProcessor::BulkManager::appendValue(
-	int32_t dmlType, InputId& targetId, TupleList::Reader& reader,
-	InputId input, ColumnId inputColumnId,
-	ColumnId inputNoSQLColumnId,
-	ColumnId outputColumnId, OutputMessageRowStore& rowStore) {
-	if (inputColumnId == -1) {
+		int32_t dmlType, InputId& targetId, TupleList::Reader& reader,
+		InputId input, ColumnId inputColumnId,
+		ColumnId inputNoSQLColumnId,
+		ColumnId outputColumnId, OutputMessageRowStore& rowStore) {
+	UNUSED_VARIABLE(dmlType);
+	UNUSED_VARIABLE(targetId);
+	UNUSED_VARIABLE(input);
+
+	if (inputColumnId == static_cast<ColumnId>(-1)) {
 		const TupleValue value(NULL, TupleList::TYPE_NULL);
 		DMLProcessor::setField(value.getType(), outputColumnId, value, rowStore,
 			nosqlColumnList_[inputNoSQLColumnId].getColumnType());
@@ -928,9 +934,11 @@ DMLProcessor::BulkManager::Operation::~Operation() {
 	@note カラム[0]がロウID, カラム[1]がサブコンテナID
 	@note UPDATEとDELETEの場合のみ
 */
-int32_t DMLProcessor::BulkManager::appendDbPosition(int32_t dmlType,
-	InputId targetId, TupleList::Reader& reader,
-	ColumnId rowColumn, ColumnId subContainerColumn) {
+int32_t DMLProcessor::BulkManager::appendDbPosition(
+		int32_t dmlType,
+		InputId targetId, TupleList::Reader& reader,
+		ColumnId rowColumn, ColumnId subContainerColumn) {
+	UNUSED_VARIABLE(targetId);
 
 	RowId rowId = reader.get().getAs<int64_t>(columnList_[rowColumn]);
 	int32_t subContainerId = static_cast<int32_t>(
@@ -940,10 +948,14 @@ int32_t DMLProcessor::BulkManager::appendDbPosition(int32_t dmlType,
 }
 
 void DMLProcessor::BulkManager::Operation::commit(Context& cxt) {
+	UNUSED_VARIABLE(cxt);
+
 	container_->commit(*option_);
 }
 
 void DMLProcessor::BulkManager::Operation::abort(Context& cxt) {
+	UNUSED_VARIABLE(cxt);
+
 	container_->abort(*option_);
 }
 
@@ -1045,6 +1057,8 @@ void DMLProcessor::BulkManager::Delete::execute(Context& cxt) {
 }
 
 void DMLProcessor::BulkManager::Delete::append(Context& cxt, RowId rowId) {
+	UNUSED_VARIABLE(cxt);
+
 	try {
 		rowIdList_->push_back(rowId);
 	}
@@ -1054,6 +1068,8 @@ void DMLProcessor::BulkManager::Delete::append(Context& cxt, RowId rowId) {
 }
 
 void DMLProcessor::BulkManager::Update::append(Context& cxt, RowId rowId) {
+	UNUSED_VARIABLE(cxt);
+
 	try {
 		rowIdList_->push_back(rowId);
 	}
@@ -1177,6 +1193,8 @@ void DMLProcessor::BulkManager::Delete::initialize() {
 }
 
 void DMLProcessor::exportTo(Context& cxt, const OutOption& option) const {
+	UNUSED_VARIABLE(cxt);
+	UNUSED_VARIABLE(option);
 }
 
 DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::addValue(
@@ -1193,16 +1211,18 @@ DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::addValue(
 				return bulkEntryList_[pos];
 			}
 		}
-		if (pos == -1 || bulkEntryList_.size() <= pos) {
+		if (pos == static_cast<NodeAffinityNumber>(-1) ||
+				bulkEntryList_.size() <= pos) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_TXN_CONTAINER_SCHEMA_UNMATCH, "");
 		}
 
-		bulkEntryList_[pos] = ALLOC_NEW(jobStackAlloc_)
-			BulkEntry(this, eventStackAlloc, globalVarAlloc_, pos, type_, targetInfo.affinity_);
+		bulkEntryList_[pos] = ALLOC_NEW(jobStackAlloc_) BulkEntry(
+				this, eventStackAlloc, globalVarAlloc_,
+				static_cast<int32_t>(pos), type_, targetInfo.affinity_);
 		bulkEntryList_[pos]->setup(cxt, type_, columnList_, columnCount_,
-			nosqlColumnList_, nosqlColumnSize_,
-			NULL, isInsertReplace_, isPartitioning, targetInfo);
+				nosqlColumnList_, nosqlColumnSize_,
+				NULL, isInsertReplace_, isPartitioning, targetInfo);
 		return 	bulkEntryList_[pos];
 	}
 											  break;
@@ -1211,11 +1231,12 @@ DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::addValue(
 		util::Map<NodeAffinityNumber, BulkEntry*>::iterator
 			it = bulkEntryListMap_.find(value);
 		if (it == bulkEntryListMap_.end()) {
-			BulkEntry* bulkEntry = ALLOC_NEW(jobStackAlloc_)
-				BulkEntry(this, eventStackAlloc, globalVarAlloc_, value, type_, targetInfo.affinity_);
+			BulkEntry* bulkEntry = ALLOC_NEW(jobStackAlloc_) BulkEntry(
+					this, eventStackAlloc, globalVarAlloc_,
+					static_cast<int32_t>(value), type_, targetInfo.affinity_);
 			bulkEntry->setup(cxt, type_, columnList_, columnCount_,
-				nosqlColumnList_, nosqlColumnSize_,
-				NULL, isInsertReplace_, isPartitioning, targetInfo);
+					nosqlColumnList_, nosqlColumnSize_,
+					NULL, isInsertReplace_, isPartitioning, targetInfo);
 			bulkEntryList_.push_back(bulkEntry);
 			bulkEntryListMap_.insert(std::make_pair(value, bulkEntry));
 			return bulkEntry;
@@ -1231,9 +1252,11 @@ DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::addValue(
 
 
 DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::add(
-	Context& cxt, NodeAffinityNumber pos,
-	TableSchemaInfo* schemaInfo, TableContainerInfo* containerInfo,
-	TargetContainerInfo& targetInfo) {
+		Context& cxt, NodeAffinityNumber pos,
+		TableSchemaInfo* schemaInfo, TableContainerInfo* containerInfo,
+		TargetContainerInfo& targetInfo) {
+	UNUSED_VARIABLE(schemaInfo);
+
 	bool isPartitioning = true;
 	util::StackAllocator& eventStackAlloc = cxt.getEventContext()->getAllocator();
 	switch (partitioningType_) {
@@ -1245,13 +1268,15 @@ DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::add(
 				return bulkEntryList_[pos];
 			}
 		}
-		if (pos == -1 || bulkEntryList_.size() <= pos) {
+		if (pos == static_cast<NodeAffinityNumber>(-1) ||
+				bulkEntryList_.size() <= pos) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_TXN_CONTAINER_SCHEMA_UNMATCH, "");
 		}
 
-		bulkEntryList_[pos] = ALLOC_NEW(jobStackAlloc_)
-			BulkEntry(this, eventStackAlloc, globalVarAlloc_, pos, type_, targetInfo.affinity_);
+		bulkEntryList_[pos] = ALLOC_NEW(jobStackAlloc_) BulkEntry(
+				this, eventStackAlloc, globalVarAlloc_,
+				static_cast<int32_t>(pos), type_, targetInfo.affinity_);
 		bulkEntryList_[pos]->setup(cxt, type_, columnList_, columnCount_,
 			nosqlColumnList_, nosqlColumnSize_,
 			containerInfo, isInsertReplace_, isPartitioning, targetInfo);
@@ -1263,11 +1288,12 @@ DMLProcessor::BulkManager::BulkEntry* DMLProcessor::BulkManager::add(
 		util::Map<NodeAffinityNumber, BulkEntry*>::iterator
 			it = bulkEntryListMap_.find(pos);
 		if (it == bulkEntryListMap_.end()) {
-			BulkEntry* bulkEntry = ALLOC_NEW(jobStackAlloc_)
-				BulkEntry(this, eventStackAlloc, globalVarAlloc_, pos, type_, targetInfo.affinity_);
+			BulkEntry* bulkEntry = ALLOC_NEW(jobStackAlloc_) BulkEntry(
+					this, eventStackAlloc, globalVarAlloc_,
+					static_cast<int32_t>(pos), type_, targetInfo.affinity_);
 			bulkEntry->setup(cxt, type_, columnList_, columnCount_,
-				nosqlColumnList_, nosqlColumnSize_,
-				containerInfo, isInsertReplace_, isPartitioning, targetInfo);
+					nosqlColumnList_, nosqlColumnSize_,
+					containerInfo, isInsertReplace_, isPartitioning, targetInfo);
 			bulkEntryList_.push_back(bulkEntry);
 			bulkEntryListMap_.insert(std::make_pair(pos, bulkEntry));
 			return bulkEntry;
@@ -1285,7 +1311,8 @@ DMLProcessor::BulkManager::BulkEntry*
 DMLProcessor::BulkManager::addPosition(
 	Context& cxt, int32_t pos, TargetContainerInfo& targetInfo) {
 	util::StackAllocator& eventStackAlloc = cxt.getEventContext()->getAllocator();
-	if (pos < bulkEntryList_.size() && bulkEntryList_[pos] != NULL) {
+	if (pos < static_cast<ptrdiff_t>(bulkEntryList_.size()) &&
+			bulkEntryList_[pos] != NULL) {
 		return bulkEntryList_[pos];
 	}
 	if (bulkEntryList_.size() == 0) {

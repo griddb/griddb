@@ -52,6 +52,7 @@ using util::ValueFormatter;
 #include <signal.h>  
 #endif
 
+
 #define AUDIT_TRACE_USER_TYPE() 
 
 #define AUDIT_TRACE_INFO_INTERNAL_COMMAND(tracer) { \
@@ -72,6 +73,7 @@ using util::ValueFormatter;
 #define AUDIT_TRACE_ERROR_COMMAND() { \
 }
 
+
 typedef ObjectManagerV4 OCManager;
 
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
@@ -85,32 +87,18 @@ AUDIT_TRACER_DECLARE(AUDIT_SYSTEM);
 AUDIT_TRACER_DECLARE(AUDIT_STAT);
 
 
-
 static void getServiceAddress(
 		PartitionTable *pt, NodeId nodeId, picojson::object &result,
-		const SystemService::ServiceTypeInfo &addressType) {
+		const ServiceTypeInfo &addressType) {
 	try {
-		picojson::value resultValue;
-		pt->getServiceAddress(
-				nodeId, resultValue, static_cast<ServiceType>(addressType.first),
-				addressType.second);
-		const picojson::object &resultObj = resultValue.get<picojson::object>();
-		result.insert(resultObj.begin(), resultObj.end());
+		pt->getServiceAddress(nodeId, result, addressType);
 	}
 	catch (std::exception &e) {
 		UTIL_TRACE_EXCEPTION_WARNING(SYSTEM_SERVICE, e, "");
 	}
 }
 
-static picojson::object &setJsonObject(picojson::value &value) {
-	value = picojson::value(picojson::object_type, false);
-	return value.get<picojson::object>();
-}
 
-static picojson::array &setJsonArray(picojson::value &value) {
-	value = picojson::value(picojson::array_type, false);
-	return value.get<picojson::array>();
-}
 
 
 
@@ -643,14 +631,17 @@ bool SystemService::backupNode(const Event::Source &eventSource,
 /*!
 	@brief Handles archiveLog command
 */
-bool SystemService::archiveLog(const Event::Source &eventSource,
-	const char8_t *backupName, int32_t mode, picojson::value &result) {
+bool SystemService::archiveLog(
+		const Event::Source &eventSource,
+		const char8_t *backupName, int32_t mode, picojson::value &result) {
 	GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 		"Archive log called (backupName="
 			<< backupName << ", mode="
 			<< CheckpointService::checkpointModeToString(mode) << ")");
+	UNUSED_VARIABLE(eventSource);
+	UNUSED_VARIABLE(result);
 	assert(false);
-	return false; 
+	return false;
 }
 
 /*!
@@ -759,7 +750,7 @@ void SystemService::getPartitions(
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get partitions called");
 
-		picojson::array &partitionList = setJsonArray(result);
+		picojson::array &partitionList = picojsonUtil::setJsonArray(result);
 		util::NormalOStringStream oss;
 		LogSequentialNumber lsn;
 
@@ -832,10 +823,9 @@ void SystemService::getPartitions(
 				}
 				{
 					picojson::array &nodeList =
-						setJsonArray(partition["backup"]);
+						picojsonUtil::setJsonArray(partition["backup"]);
 					util::XArray<NodeId> backupList(alloc);
-					pt_->getBackup(
-						pId, backupList, PartitionTable::PT_CURRENT_OB);
+					pt_->getBackup(pId, backupList);
 					if (!backupList.empty()) {
 						for (size_t pos = 0; pos < backupList.size(); pos++) {
 							picojson::object backup;
@@ -865,10 +855,9 @@ void SystemService::getPartitions(
 				}
 				{
 					picojson::array &nodeList =
-						setJsonArray(partition["catchup"]);
+						picojsonUtil::setJsonArray(partition["catchup"]);
 					util::XArray<NodeId> catchupList(alloc);
-					pt_->getCatchup(
-						pId, catchupList, PartitionTable::PT_CURRENT_OB);
+					pt_->getCatchup(pId, catchupList);
 					if (!catchupList.empty()) {
 						for (size_t pos = 0; pos < catchupList.size(); pos++) {
 							picojson::object catchup;
@@ -895,7 +884,7 @@ void SystemService::getPartitions(
 				{
 					if ((pt_->isMaster() && (lossOnly || force))) {
 						picojson::array &nodeList =
-							setJsonArray(partition["all"]);
+							picojsonUtil::setJsonArray(partition["all"]);
 						for (NodeId nodeId = 0; nodeId < pt_->getNodeNum();
 							 nodeId++) {
 							picojson::object noneNode;
@@ -924,8 +913,7 @@ void SystemService::getPartitions(
 				else if (pt_->isBackup(pId)) {
 					retStr = "BACKUP";
 				}
-				else if (pt_->isCatchup(
-							 pId, 0, PartitionTable::PT_CURRENT_OB)) {
+				else if (pt_->isCatchup(pId)) {
 					retStr = "CATCHUP";
 				}
 				else {
@@ -970,43 +958,17 @@ void SystemService::getGoalPartitions(
 	try {
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get goal partitions called");
-		util::Vector<PartitionRole> goalList(alloc);
-		pt_->copyGoal(goalList);
-		picojson::array &partitionList = setJsonArray(result);
-		for (uint32_t pId = 0; pId < goalList.size(); pId++) {
-			picojson::object partition;
-			util::NormalOStringStream oss;
-			partition["pId"] = picojson::value(CommonUtility::makeString(oss, pId));
-
-			PartitionRole &currentRole = goalList[pId];
-			NodeId ownerNodeId = currentRole.getOwner();
-			picojson::object master;
-			getServiceAddress(pt_, ownerNodeId, master, addressType);
-			if (ownerNodeId != UNDEF_NODEID) {
-				partition["owner"] = picojson::value(master);
-			}
-			else {
-				partition["owner"] = picojson::value();
-			}
-			picojson::array &nodeList = setJsonArray(partition["backup"]);
-			NodeIdList &backups = currentRole.getBackups();
-			for (size_t pos = 0; pos < backups.size(); pos++) {
-				picojson::object backup;
-				NodeId backupNodeId = backups[pos];
-				getServiceAddress(
-					pt_, backupNodeId, backup, addressType);
-				nodeList.push_back(picojson::value(backup));
-			}
-			partitionList.push_back(picojson::value(partition));
-		}	
+		pt_->getGoalPartitions(alloc, addressType, result, PartitionTable::PT_CURRENT_GOAL);
 	}
 	catch (std::exception &e) {
 	}
 }
 
 void SystemService::getDatabaseContraint(
-	util::StackAllocator& alloc, const ServiceTypeInfo& addressType,
-	DatabaseId dbId, picojson::value& result) {
+		util::StackAllocator& alloc, const ServiceTypeInfo& addressType,
+		DatabaseId dbId, picojson::value& result) {
+	UNUSED_VARIABLE(alloc);
+	UNUSED_VARIABLE(addressType);
 	try {
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get Database constraint called");
@@ -1063,7 +1025,7 @@ void SystemService::traceStats() {
 */
 void SystemService::getSyncStats(
 		picojson::value &result, const ServiceTypeInfo &addressType) {
-	picojson::object &syncStats = setJsonObject(result);
+	picojson::object &syncStats = picojsonUtil::setJsonObject(result);
 
 	syncStats["contextCount"] = picojson::value(
 		static_cast<double>(syncMgr_->getContextCount()));
@@ -1076,8 +1038,7 @@ void SystemService::getSyncStats(
 
 		util::XArray<NodeId> catchups(alloc);
 		NodeId owner = pt_->getOwner(currentCatchupPId);
-		pt_->getCatchup(
-			currentCatchupPId, catchups, PartitionTable::PT_CURRENT_OB);
+		pt_->getCatchup(currentCatchupPId, catchups);
 		if (owner != UNDEF_NODEID && catchups.size() == 1) {
 				syncStats["pId"] =
 					picojson::value(static_cast<double>(currentCatchupPId));
@@ -1106,7 +1067,7 @@ void SystemService::getSyncStats(
 */
 
 void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
-	picojson::array &limitStats = setJsonArray(result);
+	picojson::array &limitStats = picojsonUtil::setJsonArray(result);
 
 	typedef std::pair<const char8_t*, ChunkBufferStats::Param> NamedParam;
 	const NamedParam pgParamList[] = {
@@ -1153,7 +1114,8 @@ void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
 		for (size_t categoryId = 0;
 				categoryId < categoryCount; categoryId++) {
 			ChunkBufferStats stats(NULL);
-			plStats.getPGCategoryChunkBufferStats(pgId, categoryId, stats);
+			plStats.getPGCategoryChunkBufferStats(
+					pgId, static_cast<ChunkCategoryId>(categoryId), stats);
 
 			const size_t count =
 					sizeof(pgCategoryParamList) / sizeof(*pgCategoryParamList);
@@ -1191,14 +1153,14 @@ void SystemService::getMemoryStats(
 	allocMgr.getAllocatorStats(
 		&idList[0], idList.size(), std::back_inserter(statsList));
 
-	picojson::object &resultObj = setJsonObject(result);
-	picojson::array &allocList = setJsonArray(resultObj["allocators"]);
+	picojson::object &resultObj = picojsonUtil::setJsonObject(result);
+	picojson::array &allocList = picojsonUtil::setJsonArray(resultObj["allocators"]);
 	for (StatsList::iterator it = statsList.begin(); it != statsList.end();
 		 ++it) {
 		const util::AllocatorStats &stats = *it;
 
 		allocList.push_back(picojson::value());
-		picojson::object &entry = setJsonObject(allocList.back());
+		picojson::object &entry = picojsonUtil::setJsonObject(allocList.back());
 		std::string name;
 		{
 			util::NormalOStringStream oss;
@@ -1210,7 +1172,7 @@ void SystemService::getMemoryStats(
 			}
 		}
 
-		picojson::object &statsObj = setJsonObject(entry[name]);
+		picojson::object &statsObj = picojsonUtil::setJsonObject(entry[name]);
 		const char8_t *const typeList[] = {
 			"totalSize", "peakTotalSize", "cacheSize", "cacheMissCount",
 			"cacheAdjustCount", "hugeAllocationCount",
@@ -1247,8 +1209,8 @@ void SystemService::getMemoryStats(
 	@brief Gets the statistics about synchronization
 */
 void SystemService::getSqlTempStoreStats(picojson::value &result) {
-	picojson::object &resultObj = setJsonObject(result);
-	picojson::array &ltsStats = setJsonArray(resultObj["sqlTempStoreGroupStats"]);
+	picojson::object &resultObj = picojsonUtil::setJsonObject(result);
+	picojson::array &ltsStats = picojsonUtil::setJsonArray(resultObj["sqlTempStoreGroupStats"]);
 
 	LocalTempStore &store =
 			clsSvc_->getSQLService()->getExecutionManager()->getJobManager()->getStore();
@@ -1417,6 +1379,7 @@ void SystemService::getLogs(
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Get logs failed"));
 	}
 }
+
 
 /*!
 	@brief Handles setEventLogLevel command
@@ -2239,8 +2202,9 @@ void SystemService::WebAPIServerThread::waitForShutdown() {
 	join();
 }
 
-void SystemService::WebAPIServerThread::start() {
-	util::Thread::start();
+void SystemService::WebAPIServerThread::start(
+		util::ThreadRunner *runner, const util::ThreadAttribute *attr) {
+	util::Thread::start(runner, attr);
 }
 
 SystemService::ListenerSocketHandler::ListenerSocketHandler(
@@ -2899,7 +2863,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setJson(result);
 			}
 		}
-
 		else if (request.pathElements_.size() >= 2 &&
 				 request.pathElements_[1] == "trace") {
 			if (request.pathElements_.size() == 2) {
@@ -3058,10 +3021,10 @@ void SystemService::ListenerSocketHandler::dispatch(
 			option.logArchive_ = false;
 			option.logDuplicate_ = false;
 			option.stopOnDuplicateError_ = true;
-			option.incrementalBackupLevel_ = -1;	 
-			option.isIncrementalBackup_ = false;  
-			option.isCumulativeBackup_ = false;   
-			option.skipBaseline_ = false; 
+			option.incrementalBackupLevel_ = -1;
+			option.isIncrementalBackup_ = false;
+			option.isCumulativeBackup_ = false;
+			option.skipBaseline_ = false;
 			if (request.parameterMap_.find("archiveLog") !=
 				request.parameterMap_.end()) {
 				if (request.parameterMap_["archiveLog"] == "1") {
@@ -3249,7 +3212,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 			picojson::object errorInfo;
 			int32_t errorNo = 0;
 			std::string reason;
-
+				 	
 			if (request.method_ != EBB_POST) {
 				errorNo = WEBAPI_CP_OTHER_REASON;
 				reason = "Request method is not POST";
@@ -3334,7 +3297,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setMethodError();
 				return;
 			}
-			int32_t mode;
 			if (request.parameterMap_.find("enable") !=
 				request.parameterMap_.end()) {
 				if (request.parameterMap_["enable"] == "true") {
@@ -3476,29 +3438,312 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 		}
 		else if (request.pathElements_.size() == 2 &&
-				 request.pathElements_[1] == "expirationCheck") {
-			const std::vector<std::string> namePath(
-				request.pathElements_.begin() + 2, request.pathElements_.end());
+		request.pathElements_[1] == "expirationCheck") {
+		const std::vector<std::string> namePath(
+			request.pathElements_.begin() + 2, request.pathElements_.end());
 
-			Timestamp time = 0;
-			if (request.parameterMap_.find("time") !=
-					request.parameterMap_.end()) {
-				try {
-					const util::DateTime inputTime(request.parameterMap_["time"].c_str(), false);
-					time = inputTime.getUnixTime();
-				}
-				catch (std::exception &e) {
-					response.setBadRequestError();
-					return;
-				}
-			} else {
+		Timestamp time = 0;
+		if (request.parameterMap_.find("time") !=
+			request.parameterMap_.end()) {
+			try {
+				const util::DateTime inputTime(request.parameterMap_["time"].c_str(), false);
+				time = inputTime.getUnixTime();
+			}
+			catch (std::exception& e) {
 				response.setBadRequestError();
 				return;
 			}
-			bool force = false;
-
-			txnSvc_->requestUpdateDataStoreStatus(eventSource, time, force);
 		}
+		else {
+			response.setBadRequestError();
+			return;
+		}
+		bool force = false;
+
+		txnSvc_->requestUpdateDataStoreStatus(eventSource, time, force);
+		}
+		else if (request.pathElements_.size() == 2 && request.pathElements_[1] == "redo") {
+
+			picojson::value result;
+			RestContext restCxt(result);
+			int64_t pId = -1;
+			int64_t requestId = -1;
+			std::string uuidString;
+
+			const char* checkParam = "partitionId";
+			if (request.parameterMap_.find(checkParam) !=
+				request.parameterMap_.end()) {
+				if (!response.checkParamValue(checkParam, pId, true)) {
+					return;
+				}
+			}
+			else {
+				util::NormalOStringStream oss;
+				oss << "PartitionId must be specified";
+				response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+				return;
+			}
+
+			checkParam = "uuid";
+			if (request.parameterMap_.find(checkParam) !=
+				request.parameterMap_.end()) {
+				uuidString = request.parameterMap_[checkParam];
+			}
+
+			checkParam = "requestId";
+			if (request.parameterMap_.find(checkParam) !=
+				request.parameterMap_.end()) {
+				if (!response.checkParamValue(checkParam, requestId, false)) {
+					return;
+				}
+			}
+
+			if (request.method_ == EBB_GET) {
+				if (!syncSvc_->getRedoManager().getStatus(
+						static_cast<PartitionId>(pId), uuidString, requestId,
+						restCxt)) {
+					response.setJson(result);
+					response.setBadRequestError();
+					return;
+				}
+				response.setJson(result);
+			}
+			else if (request.method_ == EBB_POST) {
+
+				std::string mode;
+				const char* checkParam = "mode";
+				if (request.parameterMap_.find(checkParam) !=
+					request.parameterMap_.end()) {
+					mode = request.parameterMap_[checkParam];
+				}
+				else {
+					util::NormalOStringStream oss;
+					oss << "Mode must be specified";
+					response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+					return;
+				}
+
+				if (mode == "redo") {
+					std::string logFilePath;
+					std::string logFileName;
+					int64_t startLsn = -1;
+					int64_t endLsn = -1;
+					bool forceApply = false;
+
+					checkParam = "logFilePath";
+					if (request.parameterMap_.find(checkParam) !=
+						request.parameterMap_.end()) {
+						logFilePath = request.parameterMap_[checkParam];
+					}
+					else {
+						util::NormalOStringStream oss;
+						oss << "logFilePath must be specified";
+						response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+						return;
+					}
+
+					checkParam = "logFileName";
+					if (request.parameterMap_.find(checkParam) !=
+						request.parameterMap_.end()) {
+						logFileName = request.parameterMap_[checkParam];
+					}
+					else {
+						util::NormalOStringStream oss;
+						oss << "logFileName must be specified";
+						response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+						return;
+					}
+
+					checkParam = "startLsn";
+					if (request.parameterMap_.find(checkParam) !=
+						request.parameterMap_.end()) {
+						if (!response.checkParamValue(checkParam, startLsn, false)) {
+							return;
+						}
+					}
+
+					checkParam = "endLsn";
+					if (request.parameterMap_.find(checkParam) !=
+						request.parameterMap_.end()) {
+						if (!response.checkParamValue(checkParam, endLsn, false)) {
+							return;
+						}
+					}
+
+					checkParam = "force";
+					if (request.parameterMap_.find(checkParam) !=
+						request.parameterMap_.end()) {
+						if (request.parameterMap_[checkParam] == "true") {
+							forceApply = true;
+						}
+						else if (request.parameterMap_[checkParam] != "false") {
+							util::NormalOStringStream oss;
+							oss << "Invalid force value";
+							response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+							response.setBadRequestError();
+							return;
+						}
+					}
+					
+					if (!syncSvc_->getRedoManager().put(
+							eventSource, alloc_, static_cast<PartitionId>(pId),
+							logFilePath, logFileName, startLsn, endLsn,
+							uuidString, requestId, forceApply, restCxt)) {
+						response.setJson(result);
+						response.setBadRequestError();
+						return;
+					}
+					response.setJson(result);
+				}
+				else if (mode == "cancel") {
+					if (!syncSvc_->getRedoManager().cancel(
+							eventSource, alloc_, static_cast<PartitionId>(pId),
+							uuidString, restCxt, requestId)) {
+						response.setJson(result);
+						response.setBadRequestError();
+						return;
+					}
+				}
+				else {
+					response.setBadRequestError();
+				}
+			}
+			else {
+				response.setMethodError();
+				return;
+			}
+		}
+		else if (request.pathElements_.size() == 2 && request.pathElements_[1] == "autoArchive") {
+			if (request.method_ == EBB_GET) {
+				picojson::value result;
+				cpSvc_->getAutoArchiveCommandParam(result);
+				response.setJson(result);
+			}
+			else if (request.method_ == EBB_POST) {
+				BackupOption option;
+				option.logArchive_ = true;
+				option.logDuplicate_ = true;
+				option.stopOnDuplicateError_ = true;
+				option.incrementalBackupLevel_ = -1;	 
+				option.isIncrementalBackup_ = false;  
+				option.isCumulativeBackup_ = false;   
+				option.skipBaseline_ = false; 
+
+				std::string archiveName;
+				if (request.parameterMap_.find("archiveName") !=
+					request.parameterMap_.end()) {
+					archiveName = request.parameterMap_["archiveName"];
+				}
+
+				if (request.parameterMap_.find("duplicateLog") !=
+					request.parameterMap_.end()) {
+					if (request.parameterMap_["duplicateLog"] == "1") {
+						option.logDuplicate_ = true;
+					}
+					else {
+						option.logDuplicate_ = false;
+					}
+				}
+
+				if (request.parameterMap_.find("stopOnDuplicateError") !=
+					request.parameterMap_.end()) {
+					if (option.logDuplicate_  && request.parameterMap_["stopOnDuplicateError"] == "1") {
+						option.stopOnDuplicateError_ = true;
+					}
+					else {
+						option.stopOnDuplicateError_ = false;
+					}
+				}
+
+				if (request.parameterMap_.find("skipBaseline") !=
+					request.parameterMap_.end()) {
+					if (option.logDuplicate_ && request.parameterMap_["skipBaseline"] == "1") {
+						option.skipBaseline_ = true;
+					}
+					else {
+						option.skipBaseline_ = false;
+					}
+				}
+				GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+					"Auto archive node called (archiveName="
+					<< archiveName
+					<< ", stopOnDuplicateError=" << ValueFormatter()(option.stopOnDuplicateError_)
+					<< ", skipBaseline=" << ValueFormatter()(option.skipBaseline_)
+					<< ", logDuplicate=" << ValueFormatter()(option.logDuplicate_)
+					<< ")");
+
+				picojson::value result;
+				try {
+					clsMgr_->checkNodeStatus();
+				}
+				catch (UserException& e) {
+					util::NormalOStringStream oss;
+					oss << "unacceptable condition (status="
+						<< clsMgr_->statusInfo_.getSystemStatus() << ")";
+					response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+				}
+				try {
+					if (!cpSvc_->requestOnlineBackup(eventSource, archiveName, CP_BACKUP, option, result)) {
+						response.setJson(result);
+						response.setBadRequestError();
+						return;
+					}
+				}
+				catch (UserException& e) {
+					UTIL_TRACE_EXCEPTION(SYSTEM_SERVICE, e,
+						"Auto archive node failed (name=" << archiveName << ", detail="
+						<< GS_EXCEPTION_MESSAGE(e) << ")");
+					response.setError(WEBAPI_CP_OTHER_REASON, "archive failed", 400);
+				}
+			}
+			else {
+				response.setMethodError();
+				return;
+			}
+		}
+		else if (request.pathElements_.size() == 2 && request.pathElements_[1] == "standby") {
+		if (request.method_ == EBB_GET) {
+			picojson::value result;
+			clsMgr_->getStandbyInfo().getMode(result);
+			response.setJson(result);
+			return;
+		}
+		else if (request.method_ == EBB_POST) {
+			bool isStandby = false;
+			const char* checkParam = "mode";
+			if (request.parameterMap_.find(checkParam) !=
+				request.parameterMap_.end()) {
+				if (request.parameterMap_[checkParam] == "true") {
+					isStandby = true;
+				}
+				else if (request.parameterMap_[checkParam] != "false") {
+					util::NormalOStringStream oss;
+					oss << "Invalid mode value";
+					response.setError(WEBAPI_CP_OTHER_REASON, oss.str().c_str(), 400);
+					response.setBadRequestError();
+					return;
+				}
+			}
+			else {
+				util::NormalOStringStream oss;
+				oss << "Failed to change standby mode (reason = not specifed mode)";
+				response.setError(WEBAPI_CONFIG_SET_ERROR, oss.str().c_str(), 400);
+			}
+			picojson::value result;
+			RestContext restCxt(result);
+			if (!clsSvc_->changeStandbyStatus(eventSource, alloc_, isStandby, restCxt)) {
+				response.setJson(result);
+				response.setBadRequestError();
+				return;
+			}
+			return;
+		}
+		else {
+			response.setMethodError();
+			return;
+		}
+		}
+
 		else if (request.pathElements_.size() == 2 &&
 				 request.pathElements_[1] == "dump") {
 			if (request.method_ != EBB_GET) {
@@ -3739,11 +3984,9 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 			util::String clientIdString(alloc_);
 			bool isError = false;
-			bool isAll = true;
 			if (request.parameterMap_.find("clientId") !=
 				request.parameterMap_.end()) {
 				clientIdString = request.parameterMap_["clientId"].c_str();
-				isAll = false;
 			}
 
 			util::String startTimeString(alloc_);
@@ -3786,7 +4029,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 		else if (request.pathElements_.size() == 3 &&
 			request.pathElements_[1] == "request" &&
 			request.pathElements_[2] == "constraint") {
-			SQLExecutionManager* executionManager = clsSvc_->getSQLService()->getExecutionManager();
 			DatabaseManager &dbManager = txnSvc_->getManager()->getDatabaseManager();
 			DatabaseId dbId = UNDEF_DBID;
 			int32_t mode = DatabaseManager::ExecutionConstraint::MODE_UNDEF;
@@ -4152,7 +4394,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 	else if (request.pathElements_.size() >= 2 &&
 			 request.pathElements_[0] == "cluster") {
 		picojson::value result;
-		picojson::object &tmp = setJsonObject(result);
+		picojson::object &tmp = picojsonUtil::setJsonObject(result);
 
 		NodeId masterNodeId = pt_->getMaster();
 
@@ -4238,7 +4480,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 
 			bool isRepair = false;
-			bool isShuffle = false;
 
 			clsMgr_->setUpdatePartition();
 
@@ -4320,15 +4561,14 @@ void SystemService::ListenerSocketHandler::dispatch(
 					}
 				}
 
-				bool optimized = false;
-				if (request.parameterMap_.find("optimize") !=
+				if (request.parameterMap_.find("assignmentRule") !=
 					request.parameterMap_.end()) {
-					const std::string retStr = request.parameterMap_["optimize"];
-					if (retStr == "true") {
-						pt_->assignOptimalGoal(alloc_);
+					const std::string retStr = request.parameterMap_["assignmentRule"];
+					if (retStr == "ROUNDROBIN") {
+						pt_->assignRoundRobinGoal(alloc_);
 						return;
 					}
-					else if (retStr == "false") {
+					else if (retStr == "DEFAULT") {
 					}
 					else {
 						response.setMethodError();
@@ -4366,7 +4606,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 					}
 				}
 				const picojson::value *paramValue = request.jsonValue_.get();
-				if (!sysSvc_->setGoalPartitions(alloc_, addressType, paramValue, result)) {
+				if (!sysSvc_->setGoalPartitions(alloc_, paramValue, result)) {
 					response.setJson(result);
 					response.setBadRequestError();
 				}
@@ -4384,130 +4624,11 @@ void SystemService::ListenerSocketHandler::dispatch(
 }
 
 bool SystemService::setGoalPartitions(util::StackAllocator &alloc, 
-		const ServiceTypeInfo& addressType,
 		const picojson::value *paramValue, picojson::value &result) {
 	std::string reason;
 	try {
-
-	bool forSSL = addressType.second;
-	util::Map<NodeAddress, NodeId> addressMap(alloc);
-	util::Map<NodeAddress, NodeId>::iterator itMap;
-	util::Vector<NodeId> liveNodeIdList(alloc);
-	pt_->getLiveNodeIdList(liveNodeIdList);
-	for (size_t pos = 0; pos < liveNodeIdList.size(); pos++) {
-		NodeId nodeId = liveNodeIdList[pos];
-		if (forSSL) {
-			NodeAddress address = pt_->getNodeAddress(nodeId, SYSTEM_SERVICE);
-			address.port_ = pt_->getSSLPortNo(nodeId);
-			addressMap.insert(std::make_pair(address, nodeId));
-		}
-		else {
-			NodeAddress &address = pt_->getNodeAddress(nodeId, SYSTEM_SERVICE);
-			addressMap.insert(std::make_pair(address, nodeId));
-		}
-	}
-	if (paramValue != NULL) {
-		util::Set<PartitionId> pIdSet(alloc);
-		std::string jsonString(picojson::value(*paramValue).serialize());
-		const picojson::array &entryList = JsonUtils::as<picojson::array>(*paramValue);
-		for (picojson::array::const_iterator entryIt = entryList.begin();
-				entryIt != entryList.end(); ++entryIt) {
-			const picojson::value &entry = *entryIt;
-			std::string pname = JsonUtils::as<std::string>(entry, "pId");
-			const picojson::value *owner =
-					JsonUtils::find<picojson::value>(entry, "owner");
-			const picojson::array *backupList =
-					JsonUtils::find<picojson::array>(entry, "backup");
-			int64_t intVal;
-			PartitionId pId = 0;
-			if (pname.size() > 0 && SQLProcessor::ValueUtils::toLong(pname.data(), pname.size(), intVal)) {
-				pId = static_cast<int32_t>(intVal);
-			}
-			else {
-				GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT, 
-						"Invalid format, pId=" << pname);
-			}
-			if (pId < 0 || pId >= pt_->getPartitionNum()) {
-				GS_THROW_USER_ERROR(
-						GS_ERROR_SC_GOAL_INVALID_FORMAT, "Invalid format range, pId=" << pId);
-			}
-			if (owner == NULL) {
-				GS_THROW_USER_ERROR(
-						GS_ERROR_SC_GOAL_NOT_OWNER, "Invalid format, not owner, pId=" << pId);
-			}
-			util::Set<PartitionId>::iterator it = pIdSet.find(pId);
-			if (it != pIdSet.end()) {
-				GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_DUPLICATE_PARTITION, 
-						"Duplicated partition pId=" << pId);
-			}
-			pIdSet.insert(pId);
-			PartitionRole role;
-			role.init(pId);
-			util::Set<NodeId> assignedList(alloc);
-			for (size_t i = 0;; i++) {
-				const picojson::value *addressValue;
-				if (i == 0) {
-					addressValue = owner;
-				}
-				else {
-					if (backupList == NULL || i > backupList->size()) {
-						break;
-					}
-					addressValue =
-							JsonUtils::find<picojson::value>((*backupList)[i - 1]);
-				}
-				if (addressValue == NULL ||
-						!addressValue->is<picojson::object>()) {
-					continue;
-				}
-				const char *systemAddress = JsonUtils::as<std::string>(*addressValue, "address").c_str();
-				uint16_t systemPort = static_cast<uint16_t>(
-									JsonUtils::asInt<uint16_t>(*addressValue, "port"));;
-				try {
-					const util::SocketAddress address(systemAddress, systemPort);
-				}
-				catch (std::exception &e) {
-					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED, 
-							"Target node is not resolve, reason=" << GS_EXCEPTION_MESSAGE(e));
-				}
-				NodeAddress tmpAddress(systemAddress, systemPort);
-				itMap = addressMap.find(tmpAddress);
-				if (itMap == addressMap.end()) {
-					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED, 
-							"Invalid node address=" << tmpAddress.dump() << ", pId=" << pId);
-				}
-				NodeId nodeId = (*itMap).second;
-				if (nodeId == UNDEF_NODEID) {
-					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED, 
-							"Invalid node address=" << tmpAddress.dump() << ", pId=" << pId);
-				}
-				util::Set<NodeId>::iterator it = assignedList.find(nodeId);
-				if (it != assignedList.end()) {
-					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT, 
-						"Duplicated node address=" << tmpAddress.dump() <<", pId=" << pId);
-				}
-				assignedList.insert(nodeId);
-				NodeAddress &nodeAddress = pt_->getNodeAddress(nodeId, CLUSTER_SERVICE);
-				if (i == 0) {
-					if (nodeId == UNDEF_NODEID) {
-						GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_NOT_OWNER,
-								"Not setted owner address, pId=" << pId);
-					}
-					role.setOwner(nodeId);
-					role.getOwnerAddress() = nodeAddress;
-				}
-				else {
-					role.getBackups().push_back(nodeId);
-				}
-			}
-			role.encodeAddress(pt_, role);
-			pt_->updateGoal(role);
-		}
-		if (pt_->isMaster()) {
-			GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_GOAL));
-		}
+		pt_->setGoalPartitions(alloc, paramValue);
 		return true;
-	}
 	}
 	catch (UserException &e) {
 		int32_t exceptionNo = e.getErrorCode();
@@ -4554,7 +4675,6 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 				<< reason << ", detail=" << GS_EXCEPTION_MESSAGE(e) << ")");
 		return false;
 	}
-	return true;
 }
 
 SystemService::ServiceTypeInfo
@@ -4805,7 +4925,6 @@ void SystemService::WebAPIResponse::setError(int32_t errorNo, const char* reason
 
 bool SystemService::WebAPIResponse::checkParamValue(const char* paramName, int64_t& value, bool isInteger) {
 	assert(paramName);
-	assert(!request_.parameterMap_[paramName].empty());
 	if (paramName && SQLProcessor::ValueUtils::toLong(request_.parameterMap_[paramName].data(),
 		request_.parameterMap_[paramName].size(), value)) {
 		if (isInteger && (value >= UINT32_MAX || value < 0)) {
@@ -5276,5 +5395,13 @@ void OutputStatsHandler::initialize(ManagerSet &mgrSet) {
 	sysSvc_ = mgrSet.sysSvc_;
 	pt_ = mgrSet.pt_;
 	clsMgr_ = mgrSet.clsMgr_;
+}
+
+void RestContext::setError(int32_t errorNo, const char* reason) {
+	reason_ = reason;
+	picojson::object errorInfo;
+	errorInfo["errorStatus"] = picojson::value(static_cast<double>(errorNo));
+	errorInfo["reason"] = picojson::value(reason);
+	result_ = picojson::value(errorInfo);
 }
 

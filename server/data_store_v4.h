@@ -505,7 +505,7 @@ public:
 
 	static const char* AuditEventType(DSInputMes *input);
 
-	const int32_t AuditCategoryType(DSInputMes *input);
+	int32_t AuditCategoryType(DSInputMes *input);
 	
 	static std::string getClientAddress(const Event *ev);
 

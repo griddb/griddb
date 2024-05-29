@@ -286,7 +286,7 @@ void SyntaxTree::CreateTableOption::dump(std::ostream &os) {
 		}
 		os << "]";
 	}
-	os << ", \"TablePartitionType\":" << partitionType_;
+	os << ", \"TablePartitionType\":" << static_cast<int32_t>(partitionType_);
 	if (partitionColumn_) {
 		os << ", \"TablePartitionColumn\":\"" << partitionColumn_->name_->c_str() << "\"";
 	}
@@ -519,11 +519,11 @@ int32_t SyntaxTree::Select::dumpCategoryType() {
 
 
 void SyntaxTree::Select::dump(std::ostream &os) {
-	os << "{\"Select\":{\"cmdType\":" << cmdType_; 
+	os << "{\"Select\":{\"cmdType\":" << static_cast<int32_t>(cmdType_); 
 	if (selectList_) {
 		SyntaxTree::dumpList<ExprList>(os, selectList_, "selectList");
 	}
-	os << ", \"selectOpt\":" << selectOpt_;
+	os << ", \"selectOpt\":" << static_cast<int32_t>(selectOpt_);
 	if (from_) {
 		os << ", \"fromExpr\":";
 		from_->dump(os);
@@ -727,7 +727,7 @@ SyntaxTree::Set* SyntaxTree::Set::duplicate(SQLAllocator &alloc) const {
 
 void SyntaxTree::Set::dump(std::ostream &os) {
 	os << "{\"Set\":{";
-	os << "\"type\":" << type_;
+	os << "\"type\":" << static_cast<int32_t>(type_);
 	if (left_) {
 		os << ", \"left\":";
 		left_->dump(os);
@@ -1078,10 +1078,10 @@ void SyntaxTree::Expr::dump(std::ostream &os) {
 		os << ", \"sortOrder\":\"DESC\"";
 	}
 	if (aggrOpts_ != 0) {
-		os << ", \"aggrateOpt\":" << aggrOpts_;
+		os << ", \"aggrateOpt\":" << static_cast<int32_t>(aggrOpts_);
 	}
 	if (joinOp_ > 0) {
-		os << ", \"joinOp\":" << joinOp_;
+		os << ", \"joinOp\":" << static_cast<int32_t>(joinOp_);
 	}
 	if (placeHolderCount_ > 0) {
 		os << ", \"placeHolderCount\":" << placeHolderCount_;
@@ -1436,8 +1436,11 @@ SyntaxTree::CreateTableOption* SyntaxTree::makeAlterTableAddColumnOption(
 }
 
 void SyntaxTree::checkTableConstraint(
-	SQLAllocator &alloc, TableColumnList *&columnList,
-	ExprList *constList) {
+		SQLAllocator &alloc, TableColumnList *&columnList,
+		ExprList *constList) {
+	UNUSED_VARIABLE(alloc);
+	UNUSED_VARIABLE(columnList);
+
 	if (constList) {
 		ExprList::iterator itr = constList->begin();
 		for (; itr != constList->end(); ++itr) {
@@ -1692,7 +1695,6 @@ TupleList::TupleColumnType SyntaxTree::toColumnType(
 TupleList::TupleColumnType SyntaxTree::determineType(const char *zIn) {
 	uint32_t h = 0;
 	TupleList::TupleColumnType aff = TupleList::TYPE_NULL;
-	const char *zChar = 0;
 
 	if (zIn == 0) return aff;
 	while (zIn[0]) {
@@ -1700,7 +1702,6 @@ TupleList::TupleColumnType SyntaxTree::determineType(const char *zIn) {
 		zIn++;
 		if (h == (('c'<<24)+('h'<<16)+('a'<<8)+'r')) { /* CHAR */
 			aff = TupleList::TYPE_STRING;
-			zChar = zIn;
 		}
 		else if (h == (('c'<<24)+('l'<<16)+('o'<<8)+'b')) { /* CLOB */
 			aff = TupleList::TYPE_STRING;
@@ -1713,7 +1714,6 @@ TupleList::TupleColumnType SyntaxTree::determineType(const char *zIn) {
 						 || aff == TupleList::TYPE_FLOAT
 						 || aff == TupleList::TYPE_DOUBLE)) {
 			aff = TupleList::TYPE_BLOB;
-			if (zIn[0] == '(') zChar = zIn;
 		}
 		else if (h == (('r'<<24)+('e'<<16)+('a'<<8)+'l') /* REAL */
 				&& (aff == TupleList::TYPE_NULL
@@ -1741,6 +1741,7 @@ bool SyntaxTree::checkPartitioningIntervalTimeField(
 		util::DateTime::FieldType type) {
 	switch(type) {
 	case util::DateTime::FIELD_DAY_OF_MONTH:
+	case util::DateTime::FIELD_HOUR:
 		return true;
 	default:
 		return false;
@@ -1761,7 +1762,8 @@ bool SyntaxTree::checkGroupIntervalTimeField(util::DateTime::FieldType type) {
 }
 
 void SyntaxTree::countLineAndColumn(
-	const char* srcSqlStr, const Expr* expr, size_t &line, size_t &column) {
+		const char8_t *srcSqlStr, const Expr* expr, size_t &line,
+		size_t &column) {
 	line = 0;
 	column = 0;
 	if (srcSqlStr != NULL && expr != NULL && expr->startToken_.value_[0]) {
@@ -1770,9 +1772,15 @@ void SyntaxTree::countLineAndColumn(
 }
 
 void SyntaxTree::countLineAndColumnFromToken(
-	const char* srcSqlStr, const SQLToken &token, size_t &line, size_t &column) {
+		const char8_t *srcSqlStr, const SQLToken &token, size_t &line,
+		size_t &column) {
 	line = 1;
 	column = 0;
+
+	if (isEmptyToken(token)) {
+		return;
+	}
+
 	for (const char* cur = srcSqlStr; cur < token.value_; ++cur) {
 		if (*cur == '\n') {
 			++line;
@@ -1782,6 +1790,16 @@ void SyntaxTree::countLineAndColumnFromToken(
 			++column;
 		}
 	}
+}
+
+bool SyntaxTree::isEmptyToken(const SQLToken &token) {
+	return (token.value_ == NULL);
+}
+
+SQLToken SyntaxTree::makeEmptyToken() {
+	SQLToken token;
+	token.reset();
+	return token;
 }
 
 /*!
@@ -1947,7 +1965,7 @@ void SQLPlanningVersion::parse(const char8_t *str) {
 			break;
 		}
 
-		elemList[nextElemPos] = elem;
+		elemList[nextElemPos] = static_cast<int32_t>(elem);
 		if (it == end) {
 			break;
 		}
@@ -2558,8 +2576,7 @@ int64_t SQLParserContext::checkAndGetViewSelectStr(SyntaxTree::Expr* &table) {
 		newNsId = viewNsId_;
 		checkViewCircularReference(table);
 		SQLParsedInfo viewParsedInfo(alloc_);
-		bool result = parseViewSelect(
-				viewSelectStr, viewParsedInfo);
+		parseViewSelect(viewSelectStr, viewParsedInfo);
 		if (viewParsedInfo.syntaxTreeList_.size() > 0) {
 			SyntaxTree::Expr *viewSelectExpr = SyntaxTree::Expr::makeExpr(
 					alloc_, SQLType::EXPR_SELECTION);

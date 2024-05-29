@@ -42,6 +42,14 @@ struct DDLBaseInfo;
 
 static int32_t DEFAULT_NOSQL_COMMAND_TIMEOUT = 60 * 5 * 1000;
 
+const char8_t* getPartitionStatusRowName(LargeContainerStatusType type);
+const char8_t* getTablePartitionTypeName(uint8_t type);
+const char8_t* getTablePartitionTypeName(
+		SyntaxTree::TablePartitionType partitionType);
+const char8_t* getContainerTypeName(uint8_t type);
+const char8_t* getDateTimeName(uint8_t type);
+const char8_t* getPartitionStatusName(LargeContainerStatusType type);
+
 struct TableProperty {
 
 	struct TablePropertyElem {
@@ -84,67 +92,6 @@ struct TableProperty {
 	TableMap map_;
 	UTIL_OBJECT_CODER_MEMBERS(list_);
 };
-
-static const char* getPartitionStatusRowName(LargeContainerStatusType type) {
-	switch (type) {
-	case PARTITION_STATUS_CREATE_START: return "CREATE SUB START";
-	case PARTITION_STATUS_CREATE_END: return "CREATE SUB END";
-	case PARTITION_STATUS_DROP_START: return "DROP SUB START";
-	case PARTITION_STATUS_DROP_END: return "DROP SUB END";
-	case INDEX_STATUS_CREATE_START: return "CREATE INDEX START";
-	case INDEX_STATUS_CREATE_END: return "CREATE INDEX END";
-	case INDEX_STATUS_DROP_START: return "DROP INDEX START";
-	case INDEX_STATUS_DROP_END: return "DROP INDEX END";
-	default: return "NONE";
-	}
-}
-
-static const char* getTablePartitionTypeName(uint8_t type) {
-	SyntaxTree::TablePartitionType partitionType
-		= static_cast<SyntaxTree::TablePartitionType>(type);
-	switch (partitionType) {
-	case SyntaxTree::TABLE_PARTITION_TYPE_HASH: return "HASH";
-	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE: return "INTERVAL";
-	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE_HASH: return "INTERVAL_HASH";
-	default:
-		return "NOT PARTITIONING";
-	}
-}
-
-static const char* getTablePartitionTypeName(SyntaxTree::TablePartitionType partitionType) {
-	switch (partitionType) {
-	case SyntaxTree::TABLE_PARTITION_TYPE_HASH: return "HASH";
-	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE: return "INTERVAL";
-	case SyntaxTree::TABLE_PARTITION_TYPE_RANGE_HASH: return "INTERVAL_HASH";
-	default:
-		return "NOT PARTITIONING";
-	}
-}
-
-static const char* getContainerTypeName(uint8_t type) {
-	ContainerType containerType = static_cast<ContainerType>(type);
-	switch (containerType) {
-	case COLLECTION_CONTAINER: return "COLLECTION";
-	case TIME_SERIES_CONTAINER: return "TIMESERIES";
-	default:
-		return "NOT SUPPORTED CONTAINER";
-	}
-}
-
-static const char* getDateTimeName(uint8_t type) {
-	util::DateTime::FieldType dateType = static_cast<util::DateTime::FieldType>(type);
-	switch (dateType) {
-	case util::DateTime::FIELD_YEAR: return "YEAR";
-	case util::DateTime::FIELD_MONTH: return "MONTH";
-	case util::DateTime::FIELD_DAY_OF_MONTH: return "DAY";
-	case util::DateTime::FIELD_HOUR: return "HOUR";
-	case util::DateTime::FIELD_MINUTE: return "MINUTE";
-	case util::DateTime::FIELD_SECOND: return "SECOND";
-	case util::DateTime::FIELD_MILLISECOND: return "MILLISECOND";
-	default:
-		return "NOT SUPPORTED DATE TYPE";
-	}
-}
 
 class NoSQLRequest {
 
@@ -205,7 +152,7 @@ struct LargeExecStatus {
 
 	LargeExecStatus(util::StackAllocator& eventStackAlloc) :
 		eventStackAlloc_(eventStackAlloc),
-		currentStatus_(currentStatus_),
+		currentStatus_(PARTITION_STATUS_NONE),
 		affinityNumber_(UNDEF_NODE_AFFINITY_NUMBER),
 		indexInfo_(eventStackAlloc) {}
 
@@ -279,30 +226,23 @@ struct TargetContainerInfo {
 	@brief コンテナ情報
 */
 struct TableContainerInfo {
+public:
+	TableContainerInfo() :
+			containerId_(0),
+			versionId_(0),
+			pId_(0), pos_(0),
+			affinity_(UNDEF_NODE_AFFINITY_NUMBER),
+			approxSize_(-1) {}
 
-	TableContainerInfo(SQLVariableSizeGlobalAllocator& globalVarAlloc) :
-		globalVarAlloc_(globalVarAlloc),
-		containerId_(0),
-		versionId_(0),
-		pId_(0), pos_(0),
-		affinity_(UNDEF_NODE_AFFINITY_NUMBER),
-		approxSize_(-1) {}
+	UTIL_OBJECT_CODER_MEMBERS(
+			containerId_, versionId_, pId_, approxSize_);
 
-	TableContainerInfo& operator=(const TableContainerInfo& right) {
-		return *this;
-	}
-
-	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	ContainerId containerId_;
 	uint32_t versionId_;
 	PartitionId pId_;
 	size_t pos_;
 	NodeAffinityNumber affinity_;
 	int64_t approxSize_;
-
-	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
-	UTIL_OBJECT_CODER_MEMBERS(
-		containerId_, versionId_, pId_, approxSize_);
 };
 
 static const uint32_t OLD_LARGE_CONTAINER_VERSION_ID = 0;
@@ -527,13 +467,6 @@ struct TablePartitioningInfo {
 		util::Vector<int64_t>& intervalList,
 		util::Vector<int64_t>& intervalCountList, int64_t& prevInterval);
 
-	bool createNewEntry(bool isOptionSetValue, int64_t& baseValue,
-		PartitionTable* pt, TransactionContext& txn,
-		BaseContainer* container, NodeAffinityNumber affinity);
-
-	bool dropEntry(bool isOptionSetValue, int64_t& baseValue,
-		PartitionTable* pt, NodeAffinityNumber affinity);
-
 	void checkExpirableInterval(int64_t currentTime,
 		int64_t currentErasableTimestamp, int64_t duration,
 		util::Vector<NodeAffinityNumber>& expiredAffinityNumbers,
@@ -560,7 +493,7 @@ struct TablePartitioningInfo {
 
 	size_t newEntry(NodeAffinityNumber affinity,
 		LargeContainerStatusType status,
-		int32_t partitioningNum, int64_t baseValue);
+		int32_t partitioningNum, int64_t baseValue, size_t maxAssignedEntryNum);
 
 	TablePartitioningVersionId incrementTablePartitioningVersionId() {
 		partitioningVersionId_++;
@@ -603,13 +536,9 @@ struct TablePartitioningInfo {
 	}
 
 	struct TimeSeriesProperty {
-
+	public:
 		TimeSeriesProperty() : timeUnit_(TIME_UNIT_DAY),
 			dividedNum_(BaseContainer::EXPIRE_DIVIDE_DEFAULT_NUM), elapsedTime_(-1) {
-		}
-
-		TimeSeriesProperty& operator=(const TimeSeriesProperty& right) {
-			return *this;
 		}
 
 		bool operator==(const TimeSeriesProperty& op) const {
@@ -618,10 +547,12 @@ struct TablePartitioningInfo {
 				&& dividedNum_ == op.dividedNum_
 				&& elapsedTime_ == op.elapsedTime_);
 		}
+
+		UTIL_OBJECT_CODER_MEMBERS(timeUnit_, dividedNum_, elapsedTime_);
+
 		TimeUnit timeUnit_;
 		uint16_t dividedNum_;
 		int32_t elapsedTime_;
-		UTIL_OBJECT_CODER_MEMBERS(timeUnit_, dividedNum_, elapsedTime_);
 	};
 
 	void setIntervalWorkerGroup(uint32_t group) {
@@ -725,7 +656,7 @@ struct TablePartitioningInfo {
 	void checkMaxAssigned(
 		TransactionContext& txn,
 		const FullContainerKey& containerKey,
-		int32_t partitioningNum);
+		int32_t partitioningNum, size_t maxAssignedNum);
 
 	bool checkInterval(int32_t pos) {
 		if (partitionType_ == SyntaxTree::TABLE_PARTITION_TYPE_HASH) {
@@ -741,8 +672,21 @@ struct TablePartitioningInfo {
 		util::NormalOStringStream oss;
 		if (SyntaxTree::isRangePartitioningType(partitionType_)) {
 			if (TupleColumnTypeUtils::isTimestampFamily(partitionColumnType_)) {
-				int64_t orgValue = intervalValue_ / 24 / 3600 / 1000;
-				oss << orgValue;
+				util::DateTime::FieldType dateType = static_cast<util::DateTime::FieldType>(intervalUnit_);
+				switch (dateType) {
+				case util::DateTime::FIELD_DAY_OF_MONTH: {
+					int64_t orgValue = intervalValue_ / 24 / 3600 / 1000;
+					oss << orgValue;
+					break;
+				}
+				case util::DateTime::FIELD_HOUR: {
+					int64_t orgValue = intervalValue_ / 1 / 3600 / 1000;
+					oss << orgValue;
+					break;
+				}
+				default:
+					break;
+				}
 			}
 			else {
 				oss << intervalValue_;
@@ -773,6 +717,8 @@ struct TablePartitioningInfo {
 	}
 
 	int32_t getHashPartitioningCount(int32_t pos) {
+		UNUSED_VARIABLE(pos);
+
 		switch (static_cast<SyntaxTree::TablePartitionType>(partitionType_)) {
 		case SyntaxTree::TABLE_PARTITION_TYPE_HASH:
 			return partitioningNum_;
@@ -881,17 +827,22 @@ struct TablePartitioningInfo {
 
 struct TablePartitioningIndexInfoEntry {
 
-	TablePartitioningIndexInfoEntry(util::StackAllocator& alloc) :
-		alloc_(alloc), indexName_(alloc),
-		columnIds_(alloc), indexType_(-1),
-		status_(PARTITION_STATUS_CREATE_START), pos_(0) {}
+	explicit TablePartitioningIndexInfoEntry(util::StackAllocator& alloc) :
+			alloc_(alloc), indexName_(alloc),
+			columnIds_(alloc), indexType_(-1),
+			status_(PARTITION_STATUS_CREATE_START), pos_(0) {}
 
-	TablePartitioningIndexInfoEntry(util::StackAllocator& alloc,
-		util::String& indexName, util::Vector<uint32_t>& columnIds,
-		MapType indexType) :
-		alloc_(alloc), indexName_(indexName),
-		columnIds_(columnIds), indexType_(indexType),
-		status_(PARTITION_STATUS_CREATE_START), pos_(0) {}
+	TablePartitioningIndexInfoEntry(
+			util::StackAllocator& alloc,
+			util::String& indexName, util::Vector<uint32_t>& columnIds,
+			MapType indexType) :
+			alloc_(alloc), indexName_(indexName),
+			columnIds_(columnIds), indexType_(indexType),
+			status_(PARTITION_STATUS_CREATE_START), pos_(0) {}
+
+	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+	UTIL_OBJECT_CODER_MEMBERS(
+		indexName_, columnIds_, indexType_, status_);
 
 	util::StackAllocator& alloc_;
 	util::String indexName_;
@@ -899,20 +850,16 @@ struct TablePartitioningIndexInfoEntry {
 	MapType indexType_;
 	LargeContainerStatusType status_;
 	int32_t pos_;
-
-	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
-	UTIL_OBJECT_CODER_MEMBERS(
-		indexName_, columnIds_, indexType_, status_);
 };
 
 struct TablePartitioningIndexInfo {
 
-	TablePartitioningIndexInfo(
-		util::StackAllocator& eventStackAlloc) :
-		eventStackAlloc_(eventStackAlloc),
-		indexEntryList_(eventStackAlloc_),
-		indexEntryMap_(eventStackAlloc_),
-		partitioningVersionId_(0) {}
+	explicit TablePartitioningIndexInfo(
+			util::StackAllocator& eventStackAlloc) :
+			eventStackAlloc_(eventStackAlloc),
+			indexEntryList_(eventStackAlloc_),
+			indexEntryMap_(eventStackAlloc_),
+			partitioningVersionId_(0) {}
 
 	util::StackAllocator& eventStackAlloc_;
 	util::Vector<TablePartitioningIndexInfoEntry*> indexEntryList_;
@@ -981,43 +928,34 @@ struct TableColumnOptionInfo {
 };
 
 struct TableColumnIndexInfoEntry {
-
-	TableColumnIndexInfoEntry(
-		SQLVariableSizeGlobalAllocator& globalVarAlloc) :
-		globalVarAlloc_(globalVarAlloc),
-		indexName_(globalVarAlloc),
-		indexType_(0) {}
-
-	TableColumnIndexInfoEntry& operator=(
-		const TableColumnIndexInfoEntry& right) {
-		return *this;
-	}
-
-	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
-	SQLString indexName_;
-	MapType indexType_;
+	explicit TableColumnIndexInfoEntry(
+			SQLVariableSizeGlobalAllocator& globalVarAlloc) :
+			indexName_(globalVarAlloc),
+			indexType_(0) {}
 
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_MEMBERS(indexName_, indexType_);
+
+	SQLString indexName_;
+	MapType indexType_;
 };
 
 struct TableColumnInfo {
-
 	typedef std::vector<TableColumnIndexInfoEntry, util::StdAllocator<
-		TableColumnIndexInfoEntry, SQLVariableSizeGlobalAllocator> >
-		TableColumnIndexInfoList;
+			TableColumnIndexInfoEntry, SQLVariableSizeGlobalAllocator> >
+			TableColumnIndexInfoList;
 
-	TableColumnInfo(SQLVariableSizeGlobalAllocator& globalVarAlloc) :
-		globalVarAlloc_(globalVarAlloc), name_(globalVarAlloc),
-		type_(0), option_(0),
-		tupleType_(TupleList::TYPE_NULL),
-		indexInfo_(globalVarAlloc_) {}
+	explicit TableColumnInfo(SQLVariableSizeGlobalAllocator& globalVarAlloc) :
+			name_(globalVarAlloc),
+			type_(0), option_(0),
+			tupleType_(TupleList::TYPE_NULL),
+			indexInfo_(globalVarAlloc) {}
 
-	TableColumnInfo& operator=(const TableColumnInfo& right) {
-		return *this;
-	}
+	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+	UTIL_OBJECT_CODER_MEMBERS(
+			name_, type_, option_,
+			columnOption_, indexInfo_, tupleType_);
 
-	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	SQLString name_;
 	uint8_t type_;
 	uint8_t option_;
@@ -1026,10 +964,6 @@ struct TableColumnInfo {
 
 	TableColumnOptionInfo columnOption_;
 	TableColumnIndexInfoList indexInfo_;
-
-	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
-	UTIL_OBJECT_CODER_MEMBERS(name_, type_, option_,
-		columnOption_, indexInfo_, tupleType_);
 };
 
 struct TableSchemaInfo {
@@ -1593,7 +1527,7 @@ public:
 		return StatementHandler::TXN_CLIENT_VERSION;
 	}
 
-	void getSessionUUID(UUIDValue sessionUUID) const {
+	void getSessionUUID(UUIDValue &sessionUUID) const {
 		memcpy(&sessionUUID, context_->clientId_.uuid_,
 			sizeof(sessionUUID));
 	}
@@ -2029,31 +1963,7 @@ MapType getAvailableIndex(const DataStoreConfig& dsConfig, const char* indexName
 	ColumnType targetColumnType,
 	ContainerType targetContainerType, bool primaryCheck);
 
-static const char* getPartitionStatusName(LargeContainerStatusType type) {
-	switch (type) {
-	case PARTITION_STATUS_CREATE_START: return "CREATING PARTITION";
-	case PARTITION_STATUS_CREATE_END: return "NORMAL";
-	case PARTITION_STATUS_DROP_START: return "DROPPED";
-	case PARTITION_STATUS_DROP_END: return "REMOVED";
-	case INDEX_STATUS_CREATE_START: return "CREATING INDEX";
-	case INDEX_STATUS_CREATE_END: return "NORMAL";
-	case INDEX_STATUS_DROP_START: return "DROPPED INDEX";
-	case INDEX_STATUS_DROP_END: return "NORMAL";
-	default: return "NONE";
-	}
-}
-
-static bool isDenyException(int32_t errorCode) {
-	return (errorCode == GS_ERROR_TXN_PARTITION_ROLE_UNMATCH
-		|| errorCode == GS_ERROR_TXN_PARTITION_STATE_UNMATCH
-		|| errorCode == GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH
-		|| errorCode == GS_ERROR_DS_COL_LOCK_CONFLICT
-		|| errorCode == GS_ERROR_DS_TIM_LOCK_CONFLICT
-		|| errorCode == GS_ERROR_NOSQL_FAILOVER_TIMEOUT
-		|| errorCode == GS_ERROR_SQL_COMPILE_INVALID_NODE_ASSIGN
-		|| errorCode == GS_ERROR_TXN_REAUTHENTICATION_FIRED
-		);
-}
+bool isDenyException(int32_t errorCode);
 
 void dumpRecoverContainer(util::StackAllocator& alloc,
 	const char* tableName, NoSQLContainer* container);
@@ -2062,21 +1972,8 @@ void checkConnectedDbName(
 	util::StackAllocator& alloc, const char* connectedDb,
 	const char* currentDb, bool isCaseSensitive);
 
-static TupleList::TupleColumnType setColumnTypeNullable(
+TupleList::TupleColumnType setColumnTypeNullable(
 	TupleList::TupleColumnType type, bool nullable);
-
-static TupleList::TupleColumnType setColumnTypeNullable(
-	TupleList::TupleColumnType type, bool nullable) {
-	if (TupleColumnTypeUtils::isNull(type) || TupleColumnTypeUtils::isAny(type)) {
-		return type;
-	}
-	if (nullable) {
-		return static_cast<TupleList::TupleColumnType>(type | TupleList::TYPE_MASK_NULLABLE);
-	}
-	else {
-		return static_cast<TupleList::TupleColumnType>(type & ~TupleList::TYPE_MASK_NULLABLE);
-	}
-}
 
 class NoSQLStore;
 
@@ -2088,42 +1985,7 @@ NoSQLContainer* recoverySubContainer(util::StackAllocator& alloc,
 	int32_t partitionNum,
 	NodeAffinityNumber affinity);
 
-static void checkException(std::exception& e) {
-	const util::Exception check = GS_EXCEPTION_CONVERT(e, "");
-	int32_t errorCode = check.getErrorCode();
-
-	if (errorCode == GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED
-		|| errorCode == GS_ERROR_DS_DS_CONTAINER_EXPIRED) {
-	}
-	else {
-		GS_RETHROW_USER_OR_SYSTEM(e, "");
-	}
-}
-
-static void checkException(EventType type, std::exception& e) {
-	switch (type) {
-	case PUT_ROW:
-	case PUT_MULTIPLE_ROWS:
-	case UPDATE_ROW_BY_ID:
-	case UPDATE_MULTIPLE_ROWS_BY_ID_SET:
-	case REMOVE_MULTIPLE_ROWS_BY_ID_SET:
-	case DROP_CONTAINER:
-	case SQL_GET_CONTAINER:
-	case GET_CONTAINER:
-	case GET_CONTAINER_PROPERTIES:
-	case CREATE_INDEX:
-	case DELETE_INDEX: {
-		const util::Exception check = GS_EXCEPTION_CONVERT(e, "");
-		int32_t errorCode = check.getErrorCode();
-		if (errorCode != GS_ERROR_DS_DS_CONTAINER_EXPIRED) {
-			GS_RETHROW_USER_OR_SYSTEM(e, "");
-		}
-		break;
-	}
-	default: {
-		GS_RETHROW_USER_OR_SYSTEM(e, "");
-	}
-	}
-}
+void checkException(std::exception& e);
+void checkException(EventType type, std::exception& e);
 
 #endif

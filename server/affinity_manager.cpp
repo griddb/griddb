@@ -34,6 +34,7 @@ double AffinityManager::getActivity() const {
 }
 
 bool AffinityManager::resize(int32_t capacity) {
+	UNUSED_VARIABLE(capacity);
 	return true;
 }
 

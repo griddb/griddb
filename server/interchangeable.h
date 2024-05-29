@@ -114,7 +114,7 @@ private:
 	void calculateWALBufferSize();
 	void calculateAffinityManagerSize();
 
-	void collectLoad(int32_t &activePartitionCount, uint64_t &totalLimitNum);
+	void collectLoad(int32_t &activePartitionCount);
 	void calculateEMA(uint64_t minNum, uint64_t totalLimitNum);
 };
 #endif 

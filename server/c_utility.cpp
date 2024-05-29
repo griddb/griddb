@@ -165,6 +165,7 @@ GSResult cutilCreateVariableSizeAllocator(
 		CUtilAllocatorInfo info, CUtilVariableSizeAllocator **allocator) {
 	assert(config != NULL);
 	assert(allocator != NULL);
+	UNUSED_VARIABLE(config);
 
 	try {
 		SQLVariableSizeGlobalAllocatorTraits traits;
