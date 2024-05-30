@@ -31,6 +31,7 @@
 #include "picojson.h"
 #include <fstream>
 #include "zlib_utils.h"
+#include "json.h"
 
 
 
@@ -45,6 +46,7 @@ UTIL_TRACER_DECLARE(CHECKPOINT_SERVICE_STATUS_DETAIL);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 
 const std::string CheckpointService::PID_LSN_INFO_FILE_NAME("gs_lsn_info.json");
+const std::string CheckpointService::AUTO_ARCHIVE_COMMAND_INFO_FILE_NAME("gs_auto_archive_command_param.json"); 
 
 const char *const CheckpointService::INCREMENTAL_BACKUP_FILE_SUFFIX =
 		"_incremental";
@@ -208,6 +210,8 @@ void CheckpointStats::SetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_CP_REQUESTED_CHECKPOINT_OPERATION);
 	STAT_ADD(STAT_TABLE_CP_PERIODIC_CHECKPOINT); 
 	STAT_ADD(STAT_TABLE_CP_BACKUP_OPERATION);
+	STAT_ADD(STAT_TABLE_CP_AUTO_ARCHIVE);
+	STAT_ADD(STAT_TABLE_CP_AUTO_ARCHIVE_NAME);
 }
 
 
@@ -221,6 +225,11 @@ CheckpointStats::Updator::Updator(
 
 bool CheckpointStats::Updator::operator()(StatTable &stat) {
 	stats_.table_.apply(stat);
+	stat.set(STAT_TABLE_CP_AUTO_ARCHIVE, cpSvc_->isAutoArchvice());
+	if (cpSvc_->isAutoArchvice()) {
+		stat.set(STAT_TABLE_CP_AUTO_ARCHIVE_NAME, cpSvc_->getArchiveName());
+	}
+
 	return true;
 }
 
@@ -316,47 +325,49 @@ bool CheckpointOperationState::Entry::resolveInitialValue(
 	@brief コンストラクタ
 */
 CheckpointService::CheckpointService(
-		const ConfigTable &config, EventEngine::Config eeConfig,
-		EventEngine::Source source, const char8_t *name,
-		ServiceThreadErrorHandler &serviceThreadErrorHandler) :
-		serviceThreadErrorHandler_(serviceThreadErrorHandler),
-		ee_(createEEConfig(config, eeConfig), source, name),
-		configTable_(config),
-		clusterService_(NULL),
-		clsEE_(NULL),
-		transactionService_(NULL),
-		transactionManager_(NULL),
-		txnEE_(NULL),
-		systemService_(NULL),
-		partitionList_(NULL),
-		partitionTable_(NULL),
-		initialized_(false),
-		syncService_(NULL),
-		fixedSizeAlloc_(NULL),
-		varAlloc_(util::AllocatorInfo(
-				ALLOCATOR_GROUP_CP, "checkpointServiceVar")),
-		requestedShutdownCheckpoint_(false),
-		pgConfig_(config),
-		cpInterval_(config.get<int32_t>(
-				CONFIG_TABLE_CP_CHECKPOINT_INTERVAL)),
-		logWriteMode_(config.get<int32_t>(
-				CONFIG_TABLE_DS_LOG_WRITE_MODE)),
-		backupTopPath_(config.get<const char8_t *>(CONFIG_TABLE_DS_BACKUP_PATH)),
-		syncTempTopPath_(config.get<const char8_t *>(CONFIG_TABLE_DS_SYNC_TEMP_PATH)),
-		chunkCopyIntervalMillis_(config.get<int32_t>(
-				CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL)),
-		backupEndPending_(false),
-		currentDuplicateLogMode_(false),
-		currentCpPId_(UNDEF_PARTITIONID),
-		parallelCheckpoint_(false), 
-		errorOccured_(false),
-		enableLsnInfoFile_(true), 
-		statUpdator_(varAlloc_),
-		lastMode_(CP_UNKNOWN),
-		archiveLogMode_(0),
-		enablePeriodicCheckpoint_(true), 
-		newestLogFormatVersion_(0)  
+	const ConfigTable& config, EventEngine::Config eeConfig,
+	EventEngine::Source source, const char8_t* name,
+	ServiceThreadErrorHandler& serviceThreadErrorHandler) :
+	serviceThreadErrorHandler_(serviceThreadErrorHandler),
+	ee_(createEEConfig(config, eeConfig), source, name),
+	configTable_(config),
+	clusterService_(NULL),
+	clsEE_(NULL),
+	transactionService_(NULL),
+	transactionManager_(NULL),
+	txnEE_(NULL),
+	systemService_(NULL),
+	partitionList_(NULL),
+	partitionTable_(NULL),
+	initialized_(false),
+	syncService_(NULL),
+	fixedSizeAlloc_(NULL),
+	varAlloc_(util::AllocatorInfo(
+		ALLOCATOR_GROUP_CP, "checkpointServiceVar")),
+	requestedShutdownCheckpoint_(false),
+	pgConfig_(config),
+	cpInterval_(config.get<int32_t>(
+		CONFIG_TABLE_CP_CHECKPOINT_INTERVAL)),
+	logWriteMode_(config.get<int32_t>(
+		CONFIG_TABLE_DS_LOG_WRITE_MODE)),
+	backupTopPath_(config.get<const char8_t*>(CONFIG_TABLE_DS_BACKUP_PATH)),
+	syncTempTopPath_(config.get<const char8_t*>(CONFIG_TABLE_DS_SYNC_TEMP_PATH)),
+	chunkCopyIntervalMillis_(config.get<int32_t>(
+		CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL)),
+	backupEndPending_(false),
+	currentDuplicateLogMode_(false),
+	currentCpPId_(UNDEF_PARTITIONID),
+	parallelCheckpoint_(false), 
+	errorOccured_(false),
+	enableLsnInfoFile_(true), 
+	statUpdator_(varAlloc_),
+	lastMode_(CP_UNKNOWN),
+	archiveLogMode_(0),
+	enablePeriodicCheckpoint_(true), 
+	newestLogFormatVersion_(0),  
+	autoArchiveInfo_(config) 
 {
+	statUpdator_.cpSvc_ = this;
 	try {
 		backupInfo_.setConfigValue(
 				config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
@@ -379,7 +390,6 @@ CheckpointService::CheckpointService(
 
 		lastCpStartLsnList_.assign(pgConfig_.getPartitionCount(), UNDEF_LSN);
 
-		uint8_t temp = 0;
 
 		setLastMode(CP_UNKNOWN);
 		setPeriodicCheckpointFlag(true);
@@ -435,6 +445,8 @@ void CheckpointService::initialize(ManagerSet &resourceSet) {
 
 		Partition& partition = partitionList_->partition(0);
 		newestLogFormatVersion_ = partition.logManager().getLogFormatVersion();
+
+		checkPrevAutoArchiveInfo();
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -694,6 +706,9 @@ void CheckpointService::runCheckpoint(
 		traceCheckpointStart(message);
 
 		prepareAllCheckpoint(message);
+
+		writeAutoArchiveCommandInfo(message);
+
 		checkFailureLongtermSyncCheckpoint(message.mode(), 0);
 		if (message.mode() != CP_PREPARE_LONGTERM_SYNC
 			&& message.mode() != CP_STOP_LONGTERM_SYNC
@@ -792,24 +807,27 @@ void CheckpointService::runCheckpoint(
 }
 
 void CheckpointService::checkFailureBeforeWriteGroupLog(int32_t mode) {
+	UNUSED_VARIABLE(mode);
 }
 void CheckpointService::checkFailureAfterWriteGroupLog(int32_t mode) {
+	UNUSED_VARIABLE(mode);
 }
 void CheckpointService::checkFailureWhileWriteChunkMetaLog(int32_t mode) {
+	UNUSED_VARIABLE(mode);
 }
 
 void CheckpointService::checkFailureLongtermSyncCheckpoint(int32_t mode, int32_t point) {
+	UNUSED_VARIABLE(mode);
+	UNUSED_VARIABLE(point);
 }
 /*!
 	@brief 長期同期停止処理
 */
 void CheckpointService::stopLongtermSync(
 		PartitionId pId, EventContext &ec, CheckpointMainMessage &message) {
+	UNUSED_VARIABLE(ec);
 
-	int32_t mode = message.mode();
 	PartitionLock pLock(*transactionManager_, pId);
-
-	Partition& partition = partitionList_->partition(pId);
 
 	const int64_t ssn = message.ssn();
 	assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
@@ -895,16 +913,19 @@ void CheckpointService::partitionCheckpoint(
 			(partition.chunkManager().getStatus() == 1));
 	const bool needCheckpoint = stateEntry.resolveNeedCheckpoint(
 			partition.needCheckpoint(phase == CP_PHASE_PRE_WRITE));
-	const bool isNormalCheckpoint =
-			(mode == CP_NORMAL || mode == CP_REQUESTED || mode == CP_SHUTDOWN);
 
 	if (mode == CP_AFTER_RECOVERY) {
+
+
+		setAutoArchiveInfo(pId, phase);
 
 		partition.fullCheckpoint(phase);
 
 		if (phase == CP_PHASE_FINISH) {
 			lsnInfo_.setLsn(pId, partition.logManager().getLSN());
 			partitionTable_->setStartLSN(pId, partition.logManager().getStartLSN());
+			AutoArchiveOutputOption option;
+			writeAutoArchiveInfo(pId, OUTPUT_CHECKPOINT, option);
 		}
 	}
 	else if ( checkpointReady && ((mode != CP_NORMAL) || needCheckpoint) ) {
@@ -922,9 +943,8 @@ void CheckpointService::partitionCheckpoint(
 			DuplicateLogMode duplicateLogMode;
 			const uint32_t flag = message.flag();
 			const bool duplicateFlag = ((flag & BACKUP_DUPLICATE_LOG_MODE_FLAG) != 0);
-			const bool skipBaseLineFlag = ((flag & BACKUP_SKIP_BASELINE_MODE_FLAG) != 0);
-			if (message.isBackupMode() && duplicateFlag) {
-				duplicateLogMode.status_ = DuplicateLogMode::DUPLICATE_LOG_ENABLE;
+			if (message.isBackupMode() && (duplicateFlag || autoArchiveInfo_.enableAutoArchive_)) {
+				duplicateLogMode.status_ = duplicateFlag ? DuplicateLogMode::DUPLICATE_LOG_ENABLE : DuplicateLogMode::DUPLICATE_LOG_DISABLE;
 				duplicateLogMode.stopOnDuplicateErrorFlag_ =
 						((flag & BACKUP_STOP_ON_DUPLICATE_ERROR_FLAG) != 0);
 				util::NormalOStringStream oss;
@@ -932,6 +952,8 @@ void CheckpointService::partitionCheckpoint(
 				util::FileSystem::createDirectoryTree(oss.str().c_str());
 				duplicateLogMode.duplicateLogPath_ = oss.str();
 			}
+			resetAutoArchiveInfo(pId);
+
 			util::LockGuard<util::Mutex> guard(partition.mutex());
 			if (message.isBackupMode()) {
 				partition.startCheckpoint(&duplicateLogMode);
@@ -948,6 +970,8 @@ void CheckpointService::partitionCheckpoint(
 				int64_t blockCount = partition.collectOffset(mode, bitmap);
 				stateEntry.setBlockCount(blockCount);
 			}
+			AutoArchiveOutputOption option;
+			writeAutoArchiveInfo(pId, OUTPUT_CHECKPOINT, option);
 		}
 		if (phase == CP_PHASE_PRE_WRITE && mode == CP_PREPARE_LONGTERM_SYNC) {
 			const int64_t ssn = message.ssn();
@@ -1109,6 +1133,12 @@ void CheckpointService::partitionCheckpoint(
 
 	if (phase == CP_PHASE_FINISH) {
 		lsnInfo_.setLsn(pId, partition.logManager().getLSN());
+
+		AutoArchiveOutputOption option;
+		if (mode == CP_AFTER_RECOVERY) {
+			writeAutoArchiveInfo(pId, OUTPUT_RECOVERY, option);
+		}
+
 		checkSystemError();
 
 		GS_TRACE_INFO(
@@ -1397,7 +1427,10 @@ void CheckpointService::requestSyncCheckpoint(
 /*
 	@brief 長期同期オーナ側の停止要求
 */
-void CheckpointService::cancelSyncCheckpoint(EventContext& ec, PartitionId pId, int64_t ssn) {
+void CheckpointService::cancelSyncCheckpoint(
+		EventContext& ec, PartitionId pId, int64_t ssn) {
+	UNUSED_VARIABLE(pId);
+
 	CpLongtermSyncInfo* longSyncInfo = getCpLongtermSyncInfo(ssn);
 	if (longSyncInfo != NULL) {
 		try {
@@ -1490,27 +1523,40 @@ bool CheckpointService::checkBackupRunnable(BackupContext &cxt) {
 
 bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 	if (cxt.mode_ == CP_BACKUP || cxt.mode_ == CP_BACKUP_START) {
+		const char* targetName = !cxt.option_.logArchive_ ? "Backup" : "Archive";
+		const char* targetNameSmall = !cxt.option_.logArchive_ ? "backup" : "archive";
 		if (cxt.backupName_.empty()) {
-			cxt.reason_ = "BackupName is empty";
+			util::NormalOStringStream oss;
+			oss << targetName << "Name is empty";
+			cxt.reason_ = oss.str();
 			cxt.errorNo_ = WEBAPI_CP_BACKUPNAME_IS_EMPTY;
 			cxt.errorInfo_["errorStatus"] =
-					picojson::value(static_cast<double>(cxt.errorNo_));
+				picojson::value(static_cast<double>(cxt.errorNo_));
 			cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
 			cxt.result_ = picojson::value(cxt.errorInfo_);
 			GS_TRACE_ERROR(
 					CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
-					"BackupName is empty ("
+				targetName << " is empty ("
 					"mode=" << checkpointModeToString(cxt.mode_) << ")");
 			return false;
 		}
-
 		try {
 			AlphaOrDigitKey::validate(
 				cxt.backupName_.c_str(), static_cast<uint32_t>(cxt.backupName_.size()),
-				MAX_BACKUP_NAME_LEN, "backupName");
+				MAX_BACKUP_NAME_LEN, targetNameSmall);
 		} catch (UserException &e) {
+			if (cxt.option_.logArchive_) {
+				util::NormalOStringStream oss;
+				oss << targetName << "Name is invalid";
+				cxt.reason_ = oss.str();
+				cxt.errorNo_ = WEBAPI_CP_BACKUPNAME_IS_INVALID;
+				cxt.errorInfo_["errorStatus"] =
+					picojson::value(static_cast<double>(cxt.errorNo_));
+				cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
+				cxt.result_ = picojson::value(cxt.errorInfo_);
+			}
 			UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
-					"BackupName is invalid (name=" << cxt.backupName_ <<
+				targetName << "Name is invalid (name=" << cxt.backupName_ <<
 					", mode=" << checkpointModeToString(cxt.mode_) <<
 					", reason=" << GS_EXCEPTION_MESSAGE(e) <<")");
 			return false;
@@ -1519,7 +1565,7 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 			util::FileSystem::createDirectoryTree(backupTopPath_.c_str());
 			if (!util::FileSystem::isDirectory(backupTopPath_.c_str())) {
 				util::NormalOStringStream oss;
-				oss << "Failed to create backup top dir (path="
+				oss << "Failed to create " << targetNameSmall << " top dir(path = "
 					<< backupTopPath_ << ")";
 				cxt.reason_ = oss.str();
 				cxt.errorNo_ = WEBAPI_CP_CREATE_BACKUP_PATH_FAILED;
@@ -1528,7 +1574,7 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 				cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
 				cxt.result_ = picojson::value(cxt.errorInfo_);
 				GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
-						"Failed to create backup top dir (path=" <<
+						"Failed to create " << targetNameSmall << " top dir(path = " <<
 						backupTopPath_ <<
 						", mode=" << checkpointModeToString(cxt.mode_) << ")");
 				return false;
@@ -1536,7 +1582,7 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 		}
 		catch (std::exception &e) {
 			util::NormalOStringStream oss;
-			oss << "Failed to create backup top dir (path=" << backupTopPath_
+			oss << "Failed to create " << targetNameSmall << " top dir(path = " << backupTopPath_
 				<< ")";
 			cxt.reason_ = oss.str();
 			cxt.errorNo_ = WEBAPI_CP_CREATE_BACKUP_PATH_FAILED;
@@ -1545,7 +1591,7 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 			cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
 			cxt.result_ = picojson::value(cxt.errorInfo_);
 			UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
-					"Failed to create backup top dir (path=" <<
+					"Failed to create " << targetNameSmall << " top dir(path = " <<
 					backupTopPath_ <<
 					", mode=" << checkpointModeToString(cxt.mode_) <<
 					", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
@@ -1593,22 +1639,45 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 				cxt.backupPath_.append(oss.str());
 			}
 		}
-		if (util::FileSystem::exists(cxt.backupPath_.c_str())) {
-			util::NormalOStringStream oss;
-			oss << "Backup name is already used (name=" << cxt.backupName_
-				<< ", path=" << cxt.backupPath_ << ")";
-			cxt.reason_ = oss.str();
-			cxt.errorNo_ = WEBAPI_CP_BACKUPNAME_ALREADY_EXIST;
-			cxt.errorInfo_["errorStatus"] =
+		if (cxt.option_.logArchive_) {
+			if (!checkAutoArchiveCommandInfo(cxt)) {
+				return false;
+			}
+		}
+		else {
+			if (util::FileSystem::exists(cxt.backupPath_.c_str())) {
+				util::NormalOStringStream oss;
+				oss << "Backup name is already used (name=" << cxt.backupName_
+					<< ", path=" << cxt.backupPath_ << ")";
+				cxt.reason_ = oss.str();
+				cxt.errorNo_ = WEBAPI_CP_BACKUPNAME_ALREADY_EXIST;
+				cxt.errorInfo_["errorStatus"] =
 					picojson::value(static_cast<double>(cxt.errorNo_));
-			cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
-			cxt.result_ = picojson::value(cxt.errorInfo_);
-			GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+				cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
+				cxt.result_ = picojson::value(cxt.errorInfo_);
+				GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
 					"Backup name is already used (name=" <<
 					cxt.backupName_ << ", path=" << cxt.backupPath_ <<
 					", mode=" << checkpointModeToString(cxt.mode_) << ")");
-			return false;
+				return false;
+			}
+			if (cxt.option_.logDuplicate_ && isAutoArchiveDuplidateLog()) {
+				util::NormalOStringStream oss;
+				oss << "Auto archive log duplicate already running, (backupname=" << cxt.backupName_
+					<< ", archiveName=" << autoArchiveInfo_.autoArchiveName_
+					<< ", path=" << cxt.backupPath_ << ")";
+				cxt.reason_ = oss.str();
+				cxt.errorNo_ = WEBAPI_CP_BACKUP_MODE_IS_INVALID;
+				cxt.errorInfo_["errorStatus"] =
+					picojson::value(static_cast<double>(cxt.errorNo_));
+				cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
+				cxt.result_ = picojson::value(cxt.errorInfo_);
+				GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+					oss.str() << ", mode=" << checkpointModeToString(cxt.mode_) << ")");
+				return false;
+			}
 		}
+
 		if (cxt.option_.isIncrementalBackup_ && cxt.option_.incrementalBackupLevel_ == 1) {
 			u8string checkPath(cxt.origBackupPath_);
 			if (lastQueuedBackupStatus_.incrementalLevel_ == 0) {
@@ -1978,6 +2047,10 @@ void CheckpointService::checkSystemError() {
 
 uint64_t CheckpointService::backupLog(
 		uint32_t flag, PartitionId pId, const std::string &backupPath) {
+	UNUSED_VARIABLE(flag);
+	UNUSED_VARIABLE(pId);
+	UNUSED_VARIABLE(backupPath);
+
 	return 0;
 }
 
@@ -1987,6 +2060,8 @@ uint64_t CheckpointService::backupLog(
 	@note CPServiceのスレッドで実行
 */
 void FlushLogPeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
+	UNUSED_VARIABLE(ev);
+
 	try {
 		const uint64_t startClock = util::Stopwatch::currentClock();
 		const uint32_t partitionCount =
@@ -2028,6 +2103,8 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 bool CheckpointService::makeBackupDirectory(
 		int32_t mode, bool makeSubDir,
 		const std::string &backupPath) {
+	UNUSED_VARIABLE(makeSubDir);
+
 	if (mode == CP_BACKUP || mode == CP_BACKUP_START) {
 		try {
 			util::FileSystem::createDirectoryTree(backupPath.c_str());
@@ -2284,7 +2361,7 @@ bool CheckpointService::getLongSyncChunk(
 			}
 			std::unique_ptr<NoLocker> noLocker(UTIL_NEW NoLocker());
 			StatStopwatch::NonStat ioWatch;
-			uint32_t remain = size / chunkSize;
+			uint32_t remain = static_cast<uint32_t>(size / chunkSize);
 			size_t fileRemain = info->readyCount_ - info->readCount_;
 			uint8_t *addr = buffer;
 			for(uint32_t chunkCount = 0; remain > 0 && fileRemain > 0; ++chunkCount) {
@@ -2451,6 +2528,8 @@ void CheckpointService::requestStartCheckpointForLongtermSync(
 void CheckpointService::requestStopCheckpointForLongtermSync(
 		const Event::Source &eventSource,
 		PartitionId pId, int64_t ssn) {
+	UNUSED_VARIABLE(pId);
+
 	CpLongtermSyncInfo* longSyncInfo = getCpLongtermSyncInfo(ssn);
 	if (longSyncInfo != NULL) {
 		try {
@@ -2533,5 +2612,377 @@ CheckpointService::CheckpointDataCleaner::~CheckpointDataCleaner() {
 	stats(CheckpointStats::CP_STAT_END_TIME).set(
 			static_cast<uint64_t>(util::DateTime::now(false).getUnixTime()));
 	stats(CheckpointStats::CP_STAT_PENDING_PARTITION_COUNT).set(0);
+}
+
+ 
+void CheckpointService::writeAutoArchiveRoleInfo(PartitionId pId, PartitionStatus status) {
+	if (autoArchiveInfo_.enableAutoArchiveSetting_ && autoArchiveInfo_.enableAutoArchive_) {
+		try {
+			bool isWriteFile = false;
+			PartitionRoleStatus prevStatus, currentStatus;
+			if (status == PartitionTable::PT_STOP) {
+				currentStatus = PartitionTable::PT_NONE;
+				isWriteFile = true;
+			}
+			else {
+				partitionTable_->getPartitionRoleStatus(pId, prevStatus, currentStatus, 0);
+				if (prevStatus != currentStatus) {
+					if (currentStatus == PartitionTable::PT_OWNER || currentStatus == PartitionTable::PT_BACKUP) {
+						if (status == PartitionTable::PT_ON && partitionTable_->getRuleNo() != PartitionTable::PARTITION_RULE_REMOVE) {
+							isWriteFile = true;
+						}
+					}
+					else if (currentStatus == PartitionTable::PT_NONE) {
+						isWriteFile = true;
+					}
+				}
+			}
+			if (isWriteFile) {
+				AutoArchiveOutputOption option;
+				option.roleStatus_ = currentStatus;
+				option.throwException_ = true;
+				writeAutoArchiveInfo(pId, OUTPUT_ROLE, option);
+			}
+		}
+		catch (std::exception& e) {
+			handleAutoArchiveError(e, "Failed to write auto archive role info");
+		}
+	}
+}
+
+void CheckpointService::getAutoArchiveCommandParam(picojson::value &result) {
+	if (autoArchiveInfo_.enableAutoArchiveSetting_ && autoArchiveInfo_.enableAutoArchive_) {
+		picojson::object autoArchiveInfo;
+		autoArchiveInfo["archiveName"] = picojson::value(autoArchiveInfo_.autoArchiveName_);
+		autoArchiveInfo["stopOnDuplicateError"] = picojson::value(autoArchiveInfo_.autoArchiveStopOnErrorFlag_);
+		autoArchiveInfo["skipBaseline"] = picojson::value(autoArchiveInfo_.autoArchiveSkipBaseLineFlag_);
+		autoArchiveInfo["duplicateLog"] = picojson::value(autoArchiveInfo_.autoArchiveDuplicateLogFlag_);
+		result = picojson::value(autoArchiveInfo);
+	}
+}
+
+
+bool CheckpointService::isAutoArchiveDuplidateLog() {
+	return (autoArchiveInfo_.enableAutoArchive_ && autoArchiveInfo_.autoArchiveDuplicateLogFlag_);
+}
+
+void CheckpointService::handleAutoArchiveError(std::exception& e, const char* str) {
+	util::NormalOStringStream oss;
+	oss << str << " (reason = " << GS_EXCEPTION_MESSAGE(e) << ")";
+	if (autoArchiveInfo_.isStopOnError()) {
+		GS_RETHROW_SYSTEM_ERROR(e, "");
+	}
+	else {
+		UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e, oss.str());
+	}
+}
+
+void CheckpointService::checkPrevAutoArchiveInfo() {
+	const std::string& autoArchiveName = autoArchiveInfo_.autoArchiveName_;
+	if (!autoArchiveName.empty() && autoArchiveInfo_.enableAutoArchiveSetting_) {
+		util::Stopwatch watch;
+		watch.reset();
+		watch.start();
+		try {
+			std::string autoArchivePath;
+			util::FileSystem::createPath(backupTopPath_.c_str(), autoArchiveName.c_str(), autoArchivePath);
+			if (util::FileSystem::exists(autoArchivePath.c_str())) {
+				std::string commandFilePath;
+				util::FileSystem::createPath(autoArchivePath.c_str(), AUTO_ARCHIVE_COMMAND_INFO_FILE_NAME.c_str(), commandFilePath);
+				if (util::FileSystem::exists(commandFilePath.c_str())) {
+					std::allocator<char> alloc;
+					util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > buf(alloc);
+					ParamTable::fileToBuffer(commandFilePath.c_str(), buf);
+					std::string allStr(buf.begin(), buf.end());
+					CommonUtility::replaceAll(allStr, "\r\n", "\n");
+					CommonUtility::replaceAll(allStr, "\r", "\n");
+					picojson::value value;
+					const std::string err = JsonUtils::parseAll(value, allStr.c_str(), allStr.c_str() + allStr.size());
+					if (!err.empty()) {
+						GS_THROW_USER_ERROR(GS_ERROR_CP_AUTO_ARCHIVE_FAILED,
+							"Failed to parse command file (fileName='" << commandFilePath << "' , reason=(" << err.c_str() << "))");
+					}
+					std::string archiveName = JsonUtils::as<std::string>(value, "archiveName");
+					if (archiveName != autoArchiveInfo_.autoArchiveName_) {
+						GS_THROW_USER_ERROR(GS_ERROR_CP_AUTO_ARCHIVE_FAILED,
+							"Archive name is not match config file (specified=" << archiveName << ", expected=" << autoArchiveInfo_.autoArchiveName_ << ")");
+					}
+					else {
+						autoArchiveInfo_.autoArchiveStopOnErrorFlag_ = JsonUtils::as<bool>(value, "stopOnDuplicateError");
+						autoArchiveInfo_.autoArchiveSkipBaseLineFlag_ = true;
+						autoArchiveInfo_.autoArchiveDuplicateLogFlag_ = JsonUtils::as<bool>(value, "duplicateLog");
+						if (!autoArchiveInfo_.autoArchiveDuplicateLogFlag_) {
+							GS_TRACE_WARNING(
+								CHECKPOINT_SERVICE, GS_TRACE_CP_AUTO_ARCHIVE, "Not enable auto archive (reason = prev auto archive duplicateLog mode is false)");
+							autoArchiveInfo_.enableAutoArchive_ = false;
+							return;
+						}
+						for (PartitionId pId = 0; pId < partitionTable_->getPartitionNum(); pId++) {
+							util::NormalOStringStream oss;
+							oss << autoArchivePath.c_str() << "/txnlog/" << pId;
+							if (!util::FileSystem::exists(autoArchivePath.c_str())) {
+								autoArchiveInfo_.enableAutoArchive_ = false;
+								break;
+							}
+						}
+						autoArchiveInfo_.enableAutoArchive_ = true;
+						GS_TRACE_WARNING(
+							CHECKPOINT_SERVICE, GS_TRACE_CP_AUTO_ARCHIVE,
+							"Enable auto archive mode (" <<
+							"archiveName=" << archiveName <<
+							", stopOnDuplicateError=" << util::ValueFormatter()(autoArchiveInfo_.autoArchiveStopOnErrorFlag_) <<
+							", skipBaseLine=" << util::ValueFormatter()(autoArchiveInfo_.autoArchiveSkipBaseLineFlag_) <<
+							", duplicateLog=" << util::ValueFormatter()(autoArchiveInfo_.autoArchiveDuplicateLogFlag_) << ") (elapsedMills="
+							<< watch.elapsedMillis() << ")");
+					}
+				}
+			}
+		}
+		catch (std::exception& e) {
+			handleAutoArchiveError(e, "Failed to check auto archive info");
+			autoArchiveInfo_.enableAutoArchive_ = false;
+		}
+	}
+}
+
+void CheckpointService::resetAutoArchiveInfo(PartitionId pId) {
+	if (autoArchiveInfo_.enableAutoArchiveSetting_ && autoArchiveInfo_.enableAutoArchive_) {
+		autoArchiveInfo_.autoArchiveSequenceNoList_[pId] = 0;
+	}
+}
+
+void CheckpointService::setAutoArchiveInfo(PartitionId pId, const CheckpointPhase phase) {
+	if (autoArchiveInfo_.enableAutoArchiveSetting_ && autoArchiveInfo_.enableAutoArchive_ && phase != CP_PHASE_FINISH) {
+		try {
+			const std::string& autoArchiveName = autoArchiveInfo_.autoArchiveName_;
+			DuplicateLogMode duplicateLogMode;
+			duplicateLogMode.status_ = DuplicateLogMode::DUPLICATE_LOG_ENABLE;
+			util::NormalOStringStream oss;
+			std::string archivePath;
+			util::FileSystem::createPath(backupTopPath_.c_str(), autoArchiveName.c_str(), archivePath);
+			oss << archivePath.c_str() << "/txnlog/" << pId;
+			duplicateLogMode.duplicateLogPath_ = oss.str().c_str();
+			duplicateLogMode.status_ =
+				(autoArchiveInfo_.autoArchiveDuplicateLogFlag_ ? DuplicateLogMode::DUPLICATE_LOG_ENABLE : DuplicateLogMode::DUPLICATE_LOG_DISABLE);
+			duplicateLogMode.stopOnDuplicateErrorFlag_ = autoArchiveInfo_.autoArchiveStopOnErrorFlag_;
+			Partition& partition = partitionList_->partition(pId);
+			partition.logManager().setDuplicateLogMode(duplicateLogMode);
+		}
+		catch (std::exception& e) {
+			handleAutoArchiveError(e, "Failed to set auto archive info");
+		}
+	}
+}
+
+bool CheckpointService::checkAutoArchiveCommandInfo(BackupContext& cxt) {
+	const std::string& autoArchiveName = autoArchiveInfo_.autoArchiveName_;
+	util::NormalOStringStream oss;
+	if (autoArchiveName.empty()) {
+		oss << "Not setting config file of archive name";
+	}
+	else if (!autoArchiveInfo_.enableAutoArchiveSetting_) {
+		oss << "Not setting config file of enable auto archive";
+	}
+	else if (autoArchiveName.compare(cxt.backupName_)) {
+		oss << "Archive name is not match config file (specified=" << cxt.backupName_ << ", expected=" << autoArchiveName << ")";
+	}
+	else {
+		return true;
+	}
+	cxt.reason_ = oss.str();
+	cxt.errorNo_ = WEBAPI_CP_BACKUPNAME_UNMATCH;
+	cxt.errorInfo_["errorStatus"] =
+		picojson::value(static_cast<double>(cxt.errorNo_));
+	cxt.errorInfo_["reason"] = picojson::value(cxt.reason_);
+	cxt.result_ = picojson::value(cxt.errorInfo_);
+	GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+		oss.str().c_str() << ", archiveName=" << cxt.backupName_ << ", path=" << cxt.backupPath_ <<
+		", mode=" << checkpointModeToString(cxt.mode_) << ")");
+	return false;
+}
+
+void CheckpointService::writeAutoArchiveCommandInfo(CheckpointMainMessage& message) {
+	const uint32_t flag = message.flag();
+	const bool archiveLog = ((flag & BACKUP_ARCHIVE_LOG_MODE_FLAG) != 0);
+	const std::string& autoArchiveName = autoArchiveInfo_.autoArchiveName_;
+	if (archiveLog && !autoArchiveName.empty() && autoArchiveInfo_.enableAutoArchiveSetting_
+		&& message.mode() != CP_AFTER_RECOVERY) {
+		try {
+			AutoArchiveOutputType type = OUTPUT_COMMAND;
+			AutoArchiveOutputOption option;
+			option.skipBaseLine_ = ((flag & BACKUP_SKIP_BASELINE_MODE_FLAG) != 0);
+			option.stopOnDuplicateError_ = ((flag & BACKUP_STOP_ON_DUPLICATE_ERROR_FLAG) != 0);
+			option.duplicateLog_ = ((flag & BACKUP_DUPLICATE_LOG_MODE_FLAG) != 0);
+			if (writeAutoArchiveInfo(UNDEF_PARTITIONID, type, option)) {
+				const char* enableStr = option.duplicateLog_ ? "Enable" : "Disable";
+				GS_TRACE_WARNING(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_AUTO_ARCHIVE,
+					enableStr << " (" <<
+					"archiveName=" << autoArchiveName <<
+					", stopOnDuplicateError=" << util::ValueFormatter()(option.skipBaseLine_) <<
+					", skipBaseLine=" << util::ValueFormatter()(option.stopOnDuplicateError_) <<
+					", duplicateLog=" << util::ValueFormatter()(option.duplicateLog_));
+
+				autoArchiveInfo_.autoArchiveStopOnErrorFlag_ = option.stopOnDuplicateError_;
+				autoArchiveInfo_.autoArchiveSkipBaseLineFlag_ = option.skipBaseLine_;
+				autoArchiveInfo_.autoArchiveDuplicateLogFlag_ = option.duplicateLog_;
+				autoArchiveInfo_.enableAutoArchive_ = option.duplicateLog_;
+			}
+		}
+		catch (std::exception& e) {
+			handleAutoArchiveError(e, "Failed to write auto archive command info");
+		}
+	}
+}
+
+void CheckpointService::writeAutoArchiveInfoFile(const std::string& pathName, const std::string& fileName, const std::string& data) {
+	try {
+		int32_t retryCount = 10;
+		int32_t retryWaitTime = 100;
+		const char* buf = !data.empty() ? data.c_str() : NULL;
+		const size_t size = buf ? data.size() : 0;
+		UtilFile::writeFile(pathName, fileName, buf, size, false, retryCount, retryWaitTime);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+bool CheckpointService::writeAutoArchiveInfo(PartitionId pId, AutoArchiveOutputType type, AutoArchiveOutputOption& option) {
+	if (autoArchiveInfo_.enableAutoArchiveSetting_ &&
+			((type == OUTPUT_COMMAND) || (type != OUTPUT_COMMAND && autoArchiveInfo_.autoArchiveClusterRoleOutput_))) {
+		const std::string& autoArchiveName = autoArchiveInfo_.autoArchiveName_;
+		if (type != OUTPUT_COMMAND && !autoArchiveInfo_.enableAutoArchive_) {
+			return false;
+		}
+		try {
+			util::NormalOStringStream pathOss;
+			util::NormalOStringStream fileOss;
+
+			if (pId == UNDEF_PARTITIONID) {
+				pId = 0;
+			}
+			std::string uuid = partitionList_->partition(pId).getUuid();
+			std::string extendStr;
+			if (!uuid.empty()) {
+				extendStr = "_" + uuid;
+			}
+			const char* suffix = "info";
+			pathOss << backupTopPath_ << "/" << autoArchiveName.c_str();
+			if (!util::FileSystem::exists(pathOss.str().c_str())) {
+				GS_THROW_USER_ERROR(GS_ERROR_CP_AUTO_ARCHIVE_FAILED,
+					"Archive top directory is not found (name=" << autoArchiveName << ", path=" << backupTopPath_);
+			}
+			if (type != OUTPUT_COMMAND) {
+				pathOss << "/txnlog/" << pId;
+				if (!autoArchiveInfo_.autoArchiveInfoClusterInfoPathName_.empty()) {
+					pathOss << "/" << autoArchiveInfo_.autoArchiveInfoClusterInfoPathName_;
+				}
+				if (!util::FileSystem::exists(pathOss.str().c_str())) {
+					util::FileSystem::createDirectoryTree(pathOss.str().c_str());
+				}
+			}
+
+			switch (type) {
+			case OUTPUT_RECOVERY: {
+				LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
+				const char* prefix = "RECOVERY";
+				fileOss << prefix << "_" << pId << "_" << (logManager.getLogVersion() - 1) << "_" << logManager.getLSN() << extendStr << "." << suffix;
+				const std::string data;
+				writeAutoArchiveInfoFile(pathOss.str(), fileOss.str(), data);
+				break;
+			}
+			case OUTPUT_ROLE: {
+				LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
+				const char* prefix = "ROLE";
+				partitionTable_->dumpPartitionRoleStatus(option.roleStatus_);
+				fileOss << prefix << "_" << pId << "_" << (logManager.getLogVersion()) << "_"
+					<< autoArchiveInfo_.autoArchiveSequenceNoList_[pId] << "_"
+					<< partitionTable_->dumpPartitionRoleStatus(option.roleStatus_) << "_" << logManager.getLSN() << extendStr << "." << suffix;
+				autoArchiveInfo_.autoArchiveSequenceNoList_[pId]++;
+				const std::string data;
+				writeAutoArchiveInfoFile(pathOss.str(), fileOss.str(), data);
+				break;
+			}
+			case OUTPUT_CHECKPOINT: {
+				LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
+				const char* prefix = "CP";
+				LogSequentialNumber startLsn = logManager.getCurrentStartLSN(true);
+				LogSequentialNumber endLsn = logManager.getCurrentStartLSN(false);
+				if (startLsn != endLsn) {
+					startLsn++;
+				}
+				fileOss << prefix << "_" << pId << "_" << (logManager.getLogVersion() - 1) << "_"
+					<< startLsn << "_" << endLsn << extendStr << "." << suffix;
+				const std::string data;
+				writeAutoArchiveInfoFile(pathOss.str(), fileOss.str(), data);
+				break;
+			}
+			case OUTPUT_SUMMARY: {
+				break;
+			}
+			case OUTPUT_COMMAND: {
+				fileOss << AUTO_ARCHIVE_COMMAND_INFO_FILE_NAME;
+				AutoArchiveCommand command(autoArchiveName, option.stopOnDuplicateError_, option.skipBaseLine_, option.duplicateLog_);
+				picojson::value jsonOutValue;
+				JsonUtils::OutStream out(jsonOutValue);
+				util::ObjectCoder().encode(out, command);
+				const std::string jsonString(jsonOutValue.serialize());
+				writeAutoArchiveInfoFile(pathOss.str(), fileOss.str(), jsonString);
+				break;
+			}
+			default:
+				break;
+			}
+			return true;
+		}
+		catch (std::exception& e) {
+			if (option.throwException_) {
+				GS_RETHROW_USER_OR_SYSTEM(e, "");
+			}
+			else {
+				UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
+					"Failed to write auto archive info (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+CheckpointService::AutoArchiveInfo::AutoArchiveInfo(const ConfigTable& config) : 
+	enableAutoArchiveSetting_(config.get<bool>(CONFIG_TABLE_DS_ENABLE_AUTO_ARCHIVE)),
+	enableAutoArchive_(false), 
+	autoArchiveName_(config.get<const char8_t*>(CONFIG_TABLE_DS_AUTO_ARCHIVE_NAME)),
+	autoArchiveInfoClusterInfoPathName_(config.get<const char8_t*>(CONFIG_TABLE_DS_AUTO_ARCHIVE_OUTPUT_CLUSTER_INFO_PATH)),
+	autoArchiveStopOnErrorFlag_(false),
+	autoArchiveSkipBaseLineFlag_(false),
+	autoArchiveDuplicateLogFlag_(false),
+	autoArchiveClusterRoleOutput_(config.get<bool>(CONFIG_TABLE_DS_ENABLE_AUTO_ARCHIVE_OUTPUT_CLUSTER_INFO)) {
+	try {
+		if (!enableAutoArchiveSetting_ && !autoArchiveName_.empty()) {
+			GS_THROW_USER_ERROR(GS_ERROR_CP_AUTO_ARCHIVE_FAILED, "ArchiveName is setting, but auto archive is disable");
+		}
+
+		if (!enableAutoArchiveSetting_) {
+			return;
+		}
+		if (autoArchiveName_.empty()) {
+			GS_THROW_USER_ERROR(GS_ERROR_CP_AUTO_ARCHIVE_FAILED, "Archive name is empty");
+		}
+		AlphaOrDigitKey::validate(autoArchiveName_.c_str(), static_cast<uint32_t>(autoArchiveName_.size()),
+			MAX_BACKUP_NAME_LEN, "archiveName");
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(e, "Auto archive failed (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	autoArchiveSequenceNoList_.assign(config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM), 0);
+}
+
+bool CheckpointService::isAutoArchvice() {
+	return autoArchiveInfo_.enableAutoArchive_;
+}
+const char* CheckpointService::getArchiveName() {
+	return autoArchiveInfo_.autoArchiveName_.c_str();
 }
 

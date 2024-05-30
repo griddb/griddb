@@ -274,7 +274,8 @@ private:
 	util::String getBibContainerOptionInfo(TransactionContext &txn);
 
 	uint32_t calcRowImageSize(uint32_t rowFixedSize) {
-		uint32_t rowImageSize_ = sizeof(RowHeader) + rowFixedSize;
+		uint32_t rowImageSize_ =
+				static_cast<uint32_t>(sizeof(RowHeader) + rowFixedSize);
 		return rowImageSize_;
 	}
 	uint32_t calcRowFixedDataSize() {
@@ -282,7 +283,8 @@ private:
 			ValueProcessor::calcNullsByteSize(columnSchema_->getColumnNum()) +
 			columnSchema_->getRowFixedColumnSize();
 		if (columnSchema_->getVariableColumnNum()) {
-			rowFixedDataSize += sizeof(OId);
+			rowFixedDataSize =
+					static_cast<uint32_t>(rowFixedDataSize + sizeof(OId));
 		}
 		return rowFixedDataSize;
 	}

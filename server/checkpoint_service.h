@@ -141,6 +141,10 @@ public:
 
 	Mapper mapper_;
 	CheckpointStats stats_;
+
+public:
+	CheckpointService* cpSvc_;
+
 };
 
 /*!
@@ -274,6 +278,7 @@ public:
 	friend class CheckpointServiceMainHandler;
 
 	static const std::string PID_LSN_INFO_FILE_NAME;
+	static const std::string AUTO_ARCHIVE_COMMAND_INFO_FILE_NAME;
 
 	static const uint32_t BACKUP_ARCHIVE_LOG_MODE_FLAG = 1;
 	static const uint32_t BACKUP_DUPLICATE_LOG_MODE_FLAG = 1 << 1;
@@ -497,9 +502,70 @@ public:
 	void checkFailureAfterWriteGroupLog(int32_t mode);
 	void checkFailureWhileWriteChunkMetaLog(int32_t mode);
 	void checkFailureLongtermSyncCheckpoint(int32_t mode, int32_t point);
+	
+	struct BackupContext;
+
+	void writeAutoArchiveRoleInfo(PartitionId pId, PartitionStatus status);
+	void getAutoArchiveCommandParam(picojson::value &result);
+	bool isAutoArchvice();
+	const char* getArchiveName();
 
 private:
 	static const int32_t CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE = 40;
+
+	struct AutoArchiveInfo {
+		AutoArchiveInfo(const ConfigTable& config);
+		bool enableAutoArchiveSetting_;
+		bool enableAutoArchive_;
+		const std::string autoArchiveName_;
+		const std::string autoArchiveInfoClusterInfoPathName_;
+		bool autoArchiveStopOnErrorFlag_;
+		bool autoArchiveSkipBaseLineFlag_;
+		bool autoArchiveDuplicateLogFlag_;
+		bool autoArchiveClusterRoleOutput_;
+		std::vector<int64_t> autoArchiveSequenceNoList_;
+		bool isStopOnError() {
+			return autoArchiveStopOnErrorFlag_;
+		}
+	};
+
+	struct AutoArchiveCommand {
+		AutoArchiveCommand() : stopOnDuplicateError_(false), skipBaseLine_(false) {}
+		AutoArchiveCommand(const std::string& archiveName, bool stopOnDuplicateError, bool skipBaseLine, bool duplicateLog) :
+			archiveName_(archiveName), stopOnDuplicateError_(stopOnDuplicateError), skipBaseLine_(skipBaseLine), duplicateLog_(duplicateLog){}
+		std::string archiveName_;
+		bool stopOnDuplicateError_;
+		bool skipBaseLine_;
+		bool duplicateLog_;
+		UTIL_OBJECT_CODER_MEMBERS(archiveName_, stopOnDuplicateError_, skipBaseLine_, duplicateLog_);
+	};
+
+	enum AutoArchiveOutputType {
+		OUTPUT_RECOVERY,
+		OUTPUT_ROLE,
+		OUTPUT_CHECKPOINT,
+		OUTPUT_SUMMARY,
+		OUTPUT_COMMAND
+	};
+
+	struct AutoArchiveOutputOption {
+		AutoArchiveOutputOption() : stopOnDuplicateError_(false), skipBaseLine_(false), duplicateLog_(true), roleStatus_(PartitionTable::PT_NONE), throwException_(false) {}
+		bool stopOnDuplicateError_;
+		bool skipBaseLine_;
+		bool duplicateLog_;
+		PartitionRoleStatus roleStatus_;
+		bool throwException_;
+	};
+
+	bool isAutoArchiveDuplidateLog();
+	void checkPrevAutoArchiveInfo();
+	void resetAutoArchiveInfo(PartitionId pId);
+	void setAutoArchiveInfo(PartitionId pId, const CheckpointPhase phase);
+	bool checkAutoArchiveCommandInfo(BackupContext& cxt);
+	void writeAutoArchiveCommandInfo(CheckpointMainMessage& message);
+	void writeAutoArchiveInfoFile(const std::string& pathName, const std::string &fileName, const std::string& data);
+	bool writeAutoArchiveInfo(PartitionId pId, AutoArchiveOutputType type, AutoArchiveOutputOption& option);
+	void handleAutoArchiveError(std::exception& e, const char* str);
 
 	/*!
 		@brief Manages LSNs for each Partition.
@@ -642,7 +708,7 @@ private:
 
 	const int32_t cpInterval_;	
 	const int32_t logWriteMode_;  
-	const std::string backupTopPath_;  
+	const std::string backupTopPath_;
 	util::Mutex cpLongtermSyncMutex_;
 	const std::string syncTempTopPath_;  
 
@@ -654,7 +720,7 @@ private:
 		chunkCopyIntervalMillis_;  
 
 	volatile bool backupEndPending_;
-
+	
 	std::string lastBackupPath_;
 	bool currentDuplicateLogMode_;
 
@@ -683,13 +749,12 @@ private:
 	util::Atomic<int64_t> totalNormalCpOperation_;
 	util::Atomic<int64_t> totalRequestedCpOperation_;
 	util::Atomic<int64_t> totalBackupOperation_;
-
 	util::Atomic<int32_t> archiveLogMode_;
-
 	BackupStatus lastQueuedBackupStatus_;
 	BackupStatus lastCompletedBackupStatus_;
 	util::Atomic<bool> enablePeriodicCheckpoint_;
 	util::Atomic<int32_t> newestLogFormatVersion_;
+	AutoArchiveInfo autoArchiveInfo_;
 
 };
 

@@ -41,8 +41,6 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 	VariableArrayCursor inputArrayCursor(const_cast<uint8_t *>(inputField));
 	uint32_t inputArrayLength = inputArrayCursor.getArrayLength();
 
-	uint32_t targetArrayLength = 0;
-
 	MatrixCursor *strArrayObject =
 		reinterpret_cast<MatrixCursor *>(objectRowField);
 	assert(strArrayObject);
@@ -153,9 +151,12 @@ int32_t StringArrayProcessor::compareElements(TransactionContext& txn,
 /*!
 	@brief Set field value to message
 */
-void StringArrayProcessor::getField(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
-	MessageRowStore *messageRowStore) {
+void StringArrayProcessor::getField(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
+		MessageRowStore *messageRowStore) {
+	UNUSED_VARIABLE(txn);
+
 
 	const MatrixCursor *arrayObject =
 		reinterpret_cast<const MatrixCursor *>(objectValue->data());
@@ -196,10 +197,13 @@ void StringArrayProcessor::getField(TransactionContext &txn,
 /*!
 	@brief Clone field value
 */
-void StringArrayProcessor::clone(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, ColumnType, const void *srcObjectField,
-	void *destObjectField, AllocateStrategy &allocateStrategy,
-	OId neighborOId) {
+void StringArrayProcessor::clone(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		ColumnType, const void *srcObjectField,
+		void *destObjectField, AllocateStrategy &allocateStrategy,
+		OId neighborOId) {
+	UNUSED_VARIABLE(txn);
+
 	const MatrixCursor *srcArrayObject =
 		reinterpret_cast<const MatrixCursor *>(srcObjectField);
 	assert(srcArrayObject);
@@ -221,8 +225,11 @@ void StringArrayProcessor::clone(TransactionContext &txn,
 /*!
 	@brief Remove field value
 */
-void StringArrayProcessor::remove(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType, uint8_t *objectField) {
+void StringArrayProcessor::remove(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, ColumnType, uint8_t *objectField) {
+	UNUSED_VARIABLE(txn);
+
 
 	uint8_t *addr = objectField;
 	uint32_t varDataElemSize = ValueProcessor::decodeVarSize(addr);

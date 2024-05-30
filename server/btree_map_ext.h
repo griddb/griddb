@@ -27,27 +27,42 @@ struct BtreeMap::TermConditionUpdator {
 public:
 	virtual ~TermConditionUpdator();
 
-	virtual void update(SearchContext &sc) = 0;
 	virtual void next() = 0;
+
+	void bind(SearchContext &sc) {
+		sc_ = &sc;
+		update(sc);
+	}
+
+	void unbind() {
+		sc_ = NULL;
+	}
 
 	bool exists() const {
 		return exists_;
 	}
-
 	void close() {
 		exists_ = false;
 	}
 
 protected:
-	TermConditionUpdator() : exists_(true) {
+	TermConditionUpdator() :
+			exists_(true), sc_(NULL) {
 	}
+
+	virtual void update(SearchContext &sc) = 0;
 
 	void reset() {
 		exists_ = true;
 	}
 
+	SearchContext* getActiveSearchContext() {
+		return sc_;
+	}
+
 private:
 	bool exists_;
+	SearchContext *sc_;
 };
 
 template<typename P, typename K, typename V, typename R>
@@ -57,8 +72,7 @@ public:
 			sc_(sc) {
 	}
 
-	void rewrite(TermConditionUpdator &condUpdator) {
-		condUpdator.update(sc_);
+	void rewrite() {
 	}
 
 private:
@@ -72,7 +86,7 @@ public:
 			TransactionContext &txn, SearchContext &sc);
 	~TermConditionRewriter();
 
-	void rewrite(TermConditionUpdator &condUpdator);
+	void rewrite();
 
 private:
 	enum {

@@ -130,7 +130,7 @@ std::string ColumnInfo::dump(
 	@brief Initialize the area in ColumnSchema
 */
 void ColumnSchema::initialize(uint32_t columnNum) {
-	columnNum_ = columnNum;
+	columnNum_ = static_cast<uint16_t>(columnNum);
 	rowFixedColumnSize_ = 0;
 	firstColumnNum_ = 0;
 	firstVarColumnNum_ = 0;
@@ -174,7 +174,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManagerV4 &objectManager,
 			hasVariableColumn = true;
 		}
 
-		*rowKeyNumPtr = columnId;
+		*rowKeyNumPtr = static_cast<uint16_t>(columnId);
 		rowKeyNumPtr++;
 
 		columnId++;
@@ -193,9 +193,9 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManagerV4 &objectManager,
 			columnId++;
 		}
 	}
-	uint32_t nullsAndVarOffset =
-		ValueProcessor::calcNullsByteSize(columnNum_) +
-		(hasVariableColumn ? sizeof(OId) : 0);
+	size_t nullsAndVarOffset =
+			ValueProcessor::calcNullsByteSize(columnNum_) +
+			(hasVariableColumn ? sizeof(OId) : 0);
 	rowFixedColumnSize_ = 0;
 	uint16_t variableColumnIndex = 0;  
 	for (uint16_t i = 0; i < columnNum_; i++) {
@@ -205,7 +205,8 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManagerV4 &objectManager,
 			++variableColumnIndex;
 		}
 		else {
-			columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
+			columnInfoList[i].setOffset(static_cast<uint16_t>(
+					nullsAndVarOffset + rowFixedColumnSize_));
 			rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
 		}
 	}
@@ -235,8 +236,8 @@ void ColumnSchema::set(util::StackAllocator &alloc,
 	UNUSED_VARIABLE(alloc);
 	ColumnInfo *columnInfoList = getColumnInfoList();
 	uint16_t variableColumnIndex = 0;  
-	uint32_t nullsAndVarOffset =
-		ValueProcessor::calcNullsByteSize(columnNum_);  
+	size_t nullsAndVarOffset =
+			ValueProcessor::calcNullsByteSize(columnNum_);  
 	for (uint16_t i = 0; i < columnNum_; i++) {
 		ColumnId oldColumnId = columnIds[i];
 		columnInfoList[i] = srcSchema->getColumnInfo(oldColumnId);
@@ -246,7 +247,8 @@ void ColumnSchema::set(util::StackAllocator &alloc,
 			++variableColumnIndex;
 		}
 		else {
-			columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
+			columnInfoList[i].setOffset(static_cast<uint16_t>(
+					nullsAndVarOffset + rowFixedColumnSize_));
 			rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
 		}
 	}
@@ -254,12 +256,12 @@ void ColumnSchema::set(util::StackAllocator &alloc,
 
 	if (variableColumnIndex > 0) {
 		nullsAndVarOffset =
-			ValueProcessor::calcNullsByteSize(columnNum_) + sizeof(OId);
+				ValueProcessor::calcNullsByteSize(columnNum_) + sizeof(OId);
 		rowFixedColumnSize_ = 0;
 		for (uint16_t i = 0; i < columnNum_; i++) {
 			if (!columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(
-					nullsAndVarOffset + rowFixedColumnSize_);
+				columnInfoList[i].setOffset(static_cast<uint16_t>(
+						nullsAndVarOffset + rowFixedColumnSize_));
 				rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
 			}
 		}
@@ -393,7 +395,7 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 
 std::string ColumnSchema::dump(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy& strategy) {
 	util::NormalOStringStream ss;
-	for (size_t i = 0; i < getColumnNum(); i++) {
+	for (uint32_t i = 0; i < getColumnNum(); i++) {
 		ss << "[" << i << "]" << getColumnInfo(i).dump(txn, objectManager, strategy) << std::endl;
 	}
 	return ss.str();
@@ -501,9 +503,9 @@ IndexData IndexSchema::createIndexData(TransactionContext &txn, const util::Vect
 			ColumnSchema *columnSchema = funcInfo->getColumnSchema();
 			uint32_t fixedColumnsSize = columnSchema->getRowFixedColumnSize();
 			bool hasVariable = columnSchema->getVariableColumnNum() > 0;
-			elemSize = CompositeInfoObject::calcSize(
-				columnSchema->getColumnNum(),
-				fixedColumnsSize, hasVariable) + sizeof(OId);
+			elemSize = static_cast<uint32_t>(CompositeInfoObject::calcSize(
+					columnSchema->getColumnNum(),
+					fixedColumnsSize, hasVariable) + sizeof(OId));
 		}
 		BtreeMap map(txn, *getObjectManager(),
 			container->getMapAllocateStrategy(), container, funcInfo);
@@ -630,7 +632,7 @@ IndexTypes IndexSchema::getIndexTypes(
 				getOptionOId(indexDataPos), withPartialMatch) &&
 			(withUncommitted || status == DDL_READY)) {
 			MapType mapType = getMapType(indexDataPos);
-			indexType |= (1 << mapType);
+			indexType |= static_cast<IndexTypes>(1 << mapType);
 		}
 	}
 
@@ -935,9 +937,12 @@ void IndexSchema::getIndex(
 }
 
 void IndexSchema::expand(TransactionContext &txn) {
+	UNUSED_VARIABLE(txn);
+
 	setDirty();
 	const uint16_t orgIndexNum = getIndexNum();
-	const uint16_t newReserveIndexNum = getReserveNum() * 2;
+	const uint16_t newReserveIndexNum =
+			static_cast<uint16_t>(getReserveNum() * 2);
 
 	BaseObject duplicateObj(*getObjectManager(), strategy_);
 	OId duplicateOId;
@@ -955,7 +960,10 @@ void IndexSchema::expand(TransactionContext &txn) {
 	setReserveNum(newReserveIndexNum);
 }
 
-bool IndexSchema::expandNullStats(TransactionContext &txn, uint32_t oldColumnNum, uint32_t newColumnNum) {
+bool IndexSchema::expandNullStats(
+		TransactionContext &txn, uint32_t oldColumnNum, uint32_t newColumnNum) {
+	UNUSED_VARIABLE(txn);
+
 	uint16_t oldNullBitsSize = RowNullBits::calcBitsSize(oldColumnNum);
 	uint16_t newNullBitsSize = RowNullBits::calcBitsSize(newColumnNum);
 	if (oldNullBitsSize == newNullBitsSize) {
@@ -1005,8 +1013,11 @@ bool IndexSchema::findDefaultIndexType(ColumnType columnType, MapType &type) {
 /*!
 	@brief Allocate ShareValueList Object
 */
-void ShareValueList::initialize(TransactionContext &txn, uint32_t allocateSize,
-	AllocateStrategy &allocateStrategy, bool onMemory) {
+void ShareValueList::initialize(
+		TransactionContext &txn, uint32_t allocateSize,
+		AllocateStrategy &allocateStrategy, bool onMemory) {
+	UNUSED_VARIABLE(allocateStrategy);
+
 	if (onMemory) {
 		void *binary = txn.getDefaultAllocator().allocate(allocateSize);
 		setBaseAddr(static_cast<uint8_t *>(binary));

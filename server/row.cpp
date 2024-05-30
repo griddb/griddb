@@ -39,8 +39,8 @@ BaseContainer::RowArray::RowArray(TransactionContext &txn, BaseContainer *contai
 	rowCache_(txn, container), defaultImpl_(NULL) {
 
 	if (container->getContainerType() == COLLECTION_CONTAINER) {
-		latestParam_.rowDataOffset_ = getColFixedOffset();
-		latestParam_.rowIdOffset_ = getColRowIdOffset();
+		latestParam_.rowDataOffset_ = static_cast<uint32_t>(getColFixedOffset());
+		latestParam_.rowIdOffset_ = static_cast<uint32_t>(getColRowIdOffset());
 		latestParam_.rowHeaderOffset_ = COL_ROW_HEADER_OFFSET;
 	} else if (container->getContainerType() == TIME_SERIES_CONTAINER) {
 		latestParam_.rowDataOffset_ = sizeof(RowHeader);
@@ -409,8 +409,11 @@ std::string BaseContainer::RowArray::Row::dump(TransactionContext &txn) {
 
 
 
-BaseContainer::RowCache::RowCache(TransactionContext &txn, BaseContainer *container)
-	: fieldCacheList_(txn.getDefaultAllocator()) {
+BaseContainer::RowCache::RowCache(
+		TransactionContext &txn, BaseContainer *container) :
+		fieldCacheList_(txn.getDefaultAllocator()) {
+	UNUSED_VARIABLE(txn);
+
 	ObjectManagerV4 &objectManager = *(container->getObjectManager());
 	new (frontFieldCache_.addr())
 			FieldCache(objectManager, container->getRowAllocateStrategy());

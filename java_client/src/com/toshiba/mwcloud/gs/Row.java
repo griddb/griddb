@@ -479,7 +479,10 @@ public interface Row {
 	 * として{@code null}が指定された場合
 	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
 	 * </div><div lang="en">
-	 * Sets the TIMESTAMP value to the specified field.
+	 * Sets a value in the specified normal-precision TIMESTAMP type field.
+	 *
+	 * <p>In the current version, no value can be set in 
+	 * a high-precision TIMESTAMP type field.</p>
 	 *
 	 * <p>If the contents of a specified object is changed after it has been invoked,
 	 * it is not defined whether the contents of this object will be changed or not.</p>
@@ -489,7 +492,7 @@ public interface Row {
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
-	 * @throws GSException if the type of the specified field does not match the type of the Column.
+	 * @throws GSException if the value does not match the type and precision of the specified Column number.
 	 * </div>
 	 */
 	public void setTimestamp(int column, Date fieldValue) throws GSException;
@@ -513,19 +516,22 @@ public interface Row {
 	 * @throws GSException 範囲外のカラム番号が指定された場合
 	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
 	 * </div><div lang="en">
-	 * Returns the TIMESTAMP value of the specified field.
+	 * Retrieves a value from the specified normal-precision TIMESTAMP type field.
 	 *
 	 * <p>If the contents of a specified object is changed after it has been invoked,
 	 * it is not defined whether the contents of this object will be changed or not.
 	 * Moreover, after an object is returned, updating this object will not change
 	 * the contents of the returned object.</p>
+	 * 
+	 * <p>In the current version, no value can be retrieved 
+	 * from a high-precision TIMESTAMP type field.</p>
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
 	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if the type of the specified field does not match the type of the Column.
+	 * @throws GSException if the value does not match the type and precision of the specified Column number.
 	 * </div>
 	 */
 	public Date getTimestamp(int column) throws GSException;
@@ -549,6 +555,21 @@ public interface Row {
 	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Sets a value in the specified high-precision TIMESTAMP type field.
+	 *
+	 * <p>When the content of the specified object is modified after calling it, 
+	 * whether the content of this object will change or not is undefined.</p>
+	 *
+	 * <p>In the current version, no value can be set in 
+	 * a normal-precision TIMESTAMP type field.</p>
+	 *
+	 * @param column column number of the target field; a value from zero or greater than zero to a value less than the number of columns
+	 * @param fieldValue value of the target field
+	 *
+	 * @throws GSException if the specified Column number is out of range.
+	 * @throws GSException if null is specified as a field value 
+	 * for the column to which NOT NULL constraints are set.
+	 * @throws GSException if the value does not match the type and precision of the specified Column number.
 	 * @since 5.3
 	 * </div>
 	 */
@@ -575,6 +596,22 @@ public interface Row {
 	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Retrieves a value from the specified high-precision TIMESTAMP type field.
+	 *
+	 * <p>When the content of the returned object is modified after calling it, 
+	 * whether the content of this object will change or not is undefined.
+	 * Moreover, the content of the returned object will not change 
+	 * due to the operations on this object.</p>
+	 *
+	 * <p>In the current version, no value can be retrieved from 
+	 * a normal-precision TIMESTAMP type field.</p>
+	 *
+	 * @param column column number of the target field; a value from zero or greater than zero to a value less than the number of columns
+	 *
+	 * @return a value of the target field; {@code null}, if NULL Is set.
+	 *
+	 * @throws GSException if the specified Column number is out of range.
+	 * @throws GSException if the value does not match the type and precision of the specified Column number.
 	 * @since 5.3
 	 * </div>
 	 */

@@ -90,8 +90,9 @@ struct StatementMessage {
 		FEATURE_V4_5 = 4,
 		FEATURE_V5_3 = 5,
 		FEATURE_V5_5 = 6,
+		FEATURE_V5_6 = 7,
 
-		FEATURE_SUPPORTED_MAX = FEATURE_V5_5
+		FEATURE_SUPPORTED_MAX = FEATURE_V5_6
 	};
 
 	struct FixedTypes {
@@ -2055,14 +2056,16 @@ StatementMessage::CustomOptionCoder<
 template<>
 template<typename S>
 inline void StatementMessage::CustomOptionCoder<util::TimeZone, 0>::encode(
-	S& out, const ValueType& value) const {
+		S& out, const ValueType& value) const {
 	out << value.getOffsetMillis();
 }
 
 template<>
 template<typename S>
 inline util::TimeZone StatementMessage::CustomOptionCoder<util::TimeZone, 0>::decode(
-	S& in, util::StackAllocator& alloc) const {
+		S& in, util::StackAllocator& alloc) const {
+	UNUSED_VARIABLE(alloc);
+
 	util::TimeZone::Offset offsetMillis;
 	in >> offsetMillis;
 
@@ -2117,7 +2120,10 @@ StatementMessage::CustomOptionCoder<
 template<>
 template<typename S>
 inline void StatementMessage::CustomOptionCoder<SQLTableInfo*, 0>::encode(
-	S& out, const ValueType& value) const {
+		S& out, const ValueType& value) const {
+	UNUSED_VARIABLE(out);
+	UNUSED_VARIABLE(value);
+
 	TXN_THROW_ENCODE_ERROR(GS_ERROR_TXN_ENCODE_FAILED, "");
 }
 

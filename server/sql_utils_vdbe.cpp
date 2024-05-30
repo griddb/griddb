@@ -962,27 +962,28 @@ int gsCursorLast(SQLCursor *pCur, int *pRes) {
 	return -1;
 }
 
-int gsCursorPosition(SQLCursor *pCur, int64_t *pos) {
+//int gsCursorPosition(SQLCursor *pCur, int64_t *pos) {
+int gsCursorPosition(SQLCursor *pCur, i64 *pos) {
 	static_cast<void>(pCur);
 	static_cast<void>(pos);
 	return -1;
 }
 
-int gsCursorPosition2(SQLCursor *pCur, int *blockNo, int64_t *pos) {
+int gsCursorPosition2(SQLCursor *pCur, int *blockNo, i64 *pos) {
 	static_cast<void>(pCur);
 	static_cast<void>(blockNo);
 	static_cast<void>(pos);
 	return -1;
 }
 
-int gsCursorMove(SQLCursor *pCur, int64_t *pos, int *pRes) {
+int gsCursorMove(SQLCursor *pCur, i64 *pos, int *pRes) {
 	static_cast<void>(pCur);
 	static_cast<void>(pos);
 	static_cast<void>(pRes);
 	return -1;
 }
 
-int gsCursorMove2(SQLCursor *pCur, int blockNo, int64_t *pos, int *pRes) {
+int gsCursorMove2(SQLCursor *pCur, int blockNo, i64 *pos, int *pRes) {
 	static_cast<void>(pCur);
 	static_cast<void>(blockNo);
 	static_cast<void>(pos);
@@ -1010,7 +1011,8 @@ int64_t gsRowCount(SQLStatement *pSqlStatement, int iTable) {
 }
 
 int gsGetValueString(
-		SQLCursor *pCur, int iCol, const char **value, size_t *size) {
+//		SQLCursor *pCur, int iCol, const char **value, size_t *size) {
+		SQLCursor *pCur, int iCol, char **value, size_t *size) {
 	static_cast<void>(pCur);
 	static_cast<void>(iCol);
 	static_cast<void>(value);
@@ -1082,7 +1084,8 @@ int gsGetValueBlob(SQLCursor *pCur, int iCol, GSBlobTag *value) {
 }
 
 int gsGetValueStringNull(SQLCursor *pCur, int iCol,
-		const char **value, size_t *size, int *pRes) {
+//		const char **value, size_t *size, int *pRes) {
+		char **value, size_t *size, int *pRes) {
 	static_cast<void>(pCur);
 	static_cast<void>(iCol);
 	static_cast<void>(value);

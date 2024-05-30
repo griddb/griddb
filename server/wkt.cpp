@@ -101,19 +101,23 @@ const wktParser_YYACTIONTYPE wktParser::yy_default[] = {
 };
 
 #ifdef wktParser_YYFALLBACK
-const wktParser_YYCODETYPE wktParser::yyFallback[] = {};
+const wktParser_YYCODETYPE wktParser::yyFallback[] = {
+};
 #endif /* wktParser_YYFALLBACK */
 
 #ifndef NDEBUG
 /* For tracing shifts, the names of all terminals and nonterminals
 ** are required.  The following table supplies these names */
 const char *const wktParser::yyTokenName[] = {
-	"$", "ANY", "GISFUNC", "LP", "RP", "EMPTY", "SEMICOLON", "INTEGER", "MINUS",
-	"COMMA", "FLOAT", "PLUS", "error", "signed", "number", "plus_num",
-	"minus_num", "geom", "gisarg", "gisexpr", "gismultipolygon3d",
-	"gisnpolygonlist3d", "gispolygon3d", "gispolygon2d", "gisnpointlist3d",
-	"gisnpointlist2d", "gismultipoint3d", "gismultipoint2d", "gispointlist3d",
-	"gispointlist2d", "gispoint2d", "gispoint3d", "gisqsf", "plus_opt",
+	"$", "ANY", "GISFUNC", "LP",
+	"RP", "EMPTY", "SEMICOLON", "INTEGER",
+	"MINUS", "COMMA", "FLOAT", "PLUS",
+	"error", "signed", "number", "plus_num",
+	"minus_num", "geom", "gisarg", "gisexpr",
+	"gismultipolygon3d", "gisnpolygonlist3d", "gispolygon3d", "gispolygon2d",
+	"gisnpointlist3d", "gisnpointlist2d", "gismultipoint3d", "gismultipoint2d",
+	"gispointlist3d", "gispointlist2d", "gispoint2d", "gispoint3d",
+	"gisqsf", "plus_opt",
 };
 #endif /* NDEBUG */
 
@@ -163,11 +167,44 @@ const char *const wktParser::yyRuleName[] = {
 #endif /* NDEBUG */
 
 const struct wktParser::RULEINFO wktParser::yyRuleInfo[] = {
-	{17, 4}, {17, 4}, {18, 1}, {18, 3}, {18, 4}, {18, 0}, {19, 1}, {19, 1},
-	{19, 1}, {19, 1}, {19, 1}, {19, 1}, {23, 3}, {23, 1}, {25, 5}, {25, 3},
-	{27, 1}, {29, 3}, {29, 1}, {30, 2}, {20, 1}, {21, 5}, {21, 3}, {22, 1},
-	{24, 5}, {24, 3}, {26, 1}, {28, 3}, {28, 1}, {31, 3}, {32, 13}, {13, 1},
-	{13, 1}, {15, 2}, {16, 2}, {14, 1}, {33, 1}, {33, 0},
+	{17, 4},
+	{17, 4},
+	{18, 1},
+	{18, 3},
+	{18, 4},
+	{18, 0},
+	{19, 1},
+	{19, 1},
+	{19, 1},
+	{19, 1},
+	{19, 1},
+	{19, 1},
+	{23, 3},
+	{23, 1},
+	{25, 5},
+	{25, 3},
+	{27, 1},
+	{29, 3},
+	{29, 1},
+	{30, 2},
+	{20, 1},
+	{21, 5},
+	{21, 3},
+	{22, 1},
+	{24, 5},
+	{24, 3},
+	{26, 1},
+	{28, 3},
+	{28, 1},
+	{31, 3},
+	{32, 13},
+	{13, 1},
+	{13, 1},
+	{15, 2},
+	{16, 2},
+	{14, 1},
+	{33, 1},
+	{33, 0},
 };
 
 /* APPENDIX */

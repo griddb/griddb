@@ -725,6 +725,7 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		 ** The following routine is called if the stack overflows.
 		 */
 		void yyStackOverflow(SQLParser_YYMINORTYPE *yypMinor){
+			UNUSED_VARIABLE(yypMinor);
 			yyidx--;
 #ifndef NDEBUG
 			if( yyTraceFILE ){
@@ -962,7 +963,7 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, yymsp[-1].minor.yy0,
 				"PRIMARY KEY and NULL options can not be specified at the same time");
 	}
-	yymsp[-2].minor.yy400->option_ |= flag;
+	yymsp[-2].minor.yy400->option_ |= static_cast<SyntaxTree::ColumnOption>(flag);
 	yygotominor.yy400 = yymsp[-2].minor.yy400;
 }
         break;
@@ -980,7 +981,7 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, yymsp[-1].minor.yy0,
 				"NOT NULL and NULL options can not be specified at the same time");
 	}
-	yymsp[-2].minor.yy400->option_ |= flag;
+	yymsp[-2].minor.yy400->option_ |= static_cast<SyntaxTree::ColumnOption>(flag);
 	yygotominor.yy400 = yymsp[-2].minor.yy400;
 }
         break;
@@ -1002,7 +1003,7 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, yymsp[0].minor.yy0,
 				"NOT NULL and NULL options can not be specified at the same time");
 	}
-	yymsp[-1].minor.yy400->option_ |= flag;
+	yymsp[-1].minor.yy400->option_ |= static_cast<SyntaxTree::ColumnOption>(flag);
 	yygotominor.yy400 = yymsp[-1].minor.yy400;
 }
         break;
@@ -2100,6 +2101,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 							 hintSelect->hintList_->size() > 0) {
 						token = hintSelect->hintList_->at(0)->startToken_;
 					}
+					else {
+						token = SyntaxTree::makeEmptyToken();
+					}
 					SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 							token, "Hint specified more than once");
 				}
@@ -2160,6 +2164,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 				else if (select->hintList_ && select->hintList_->size() > 0) {
 					token = select->hintList_->at(0)->startToken_;
 				}
+				else {
+					token = SyntaxTree::makeEmptyToken();
+				}
 				SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 						token, "Invalid hint found");
 			}
@@ -2206,6 +2213,8 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 				break;
 			case SyntaxTree::SET_OP_INTERSECT:
 				unionOpName = "INTERSECT";
+				break;
+			case SyntaxTree::SET_OP_NONE:
 				break;
 			}
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
@@ -2277,6 +2286,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 			}
 			else if (hintSelect->hintList_->size() > 0) {
 				token = hintSelect->hintList_->at(0)->startToken_;
+			}
+			else {
+				token = SyntaxTree::makeEmptyToken();
 			}
 			SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 					token, "Hint specified more than once");
@@ -2729,7 +2741,6 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
       case 159: /* seltabtree ::= stl_prefix LP select RP as on_opt using_opt */
 {
 
-	SyntaxTree::QualifiedName* qName = NULL;
 	if (!yymsp[-6].minor.yy512 && (yymsp[-1].minor.yy512 || yymsp[0].minor.yy304)) {
 		if (yymsp[-1].minor.yy512) {
 			SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
@@ -2777,6 +2788,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		if (yymsp[-4].minor.yy72->right_->hintList_->size() > 0) {
 			token = yymsp[-4].minor.yy72->right_->hintList_->at(0)->startToken_;
 		}
+		else {
+			token = SyntaxTree::makeEmptyToken();
+		}
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 				token, "Invalid hint found");
 	}
@@ -2785,7 +2799,6 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
       case 160: /* seltabtree ::= stl_prefix LP seltabtree RP as on_opt using_opt */
 {
 
-	SyntaxTree::QualifiedName* qName = NULL;
 	if (!yymsp[-6].minor.yy512 && (yymsp[-1].minor.yy512 || yymsp[0].minor.yy304)) {
 		if (yymsp[-1].minor.yy512) {
 			SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
@@ -3132,13 +3145,16 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		if (yymsp[0].minor.yy72->right_->hintList_->size() > 0) {
 			token = yymsp[0].minor.yy72->right_->hintList_->at(0)->startToken_;
 		}
+		else {
+			token = SyntaxTree::makeEmptyToken();
+		}
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 				token, "Invalid hint found");
 	}
 }
         break;
       case 213: /* insert_cmd ::= INSERT orconf */
-{yygotominor.yy401 = yymsp[0].minor.yy262;}
+{yygotominor.yy401 = static_cast<uint8_t>(yymsp[0].minor.yy262);}
         break;
       case 214: /* insert_cmd ::= REPLACE */
 {yygotominor.yy401 = SyntaxTree::RESOLVETYPE_REPLACE;}
@@ -3806,6 +3822,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		if (yymsp[-1].minor.yy72->right_->hintList_->size() > 0) {
 			token = yymsp[-1].minor.yy72->right_->hintList_->at(0)->startToken_;
 		}
+		else {
+			token = SyntaxTree::makeEmptyToken();
+		}
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 				token, "Invalid hint found");
 	}
@@ -3832,6 +3851,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		if (yymsp[-1].minor.yy72->right_->hintList_->size() > 0) {
 			token = yymsp[-1].minor.yy72->right_->hintList_->at(0)->startToken_;
 		}
+		else {
+			token = SyntaxTree::makeEmptyToken();
+		}
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 				token, "Invalid hint found");
 	}
@@ -3850,6 +3872,9 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 		SQLToken token;
 		if (yymsp[-1].minor.yy72->right_->hintList_->size() > 0) {
 			token = yymsp[-1].minor.yy72->right_->hintList_->at(0)->startToken_;
+		}
+		else {
+			token = SyntaxTree::makeEmptyToken();
 		}
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 				token, "Invalid hint found");
@@ -3990,6 +4015,7 @@ SQLPARSER_SAFE_DELETE((yypminor->yy139));
 			int32_t yymajor,                   /* The major type of the error token */
 			SQLParser_YYMINORTYPE yyminor            /* The minor type of the error token */
 			){
+			UNUSED_VARIABLE(yymajor);
 #define TOKEN (yyminor.yy0)
 
 	if (TOKEN.value_[0]) {

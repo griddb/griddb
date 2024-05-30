@@ -1733,7 +1733,9 @@ Expr *Expr::evalSubBinOp(TransactionContext &txn, ObjectManagerV4 &objectManager
 		QP_SAFE_DELETE(x1);
 		QP_SAFE_DELETE(x2);
 		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_CRITICAL_LOGIC_ERROR, "Internal logic error: Operation not defined, operation type = " << opType);
+				GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
+				"Internal logic error: Operation not defined, operation type = " <<
+				static_cast<int32_t>(opType));
 	}
 
 	bool result = false;
@@ -1915,7 +1917,7 @@ void Expr::getMappingVariableInfo(
  *
  * @return Comparison result
  */
-bool Expr::operator==(Expr &e) {
+bool Expr::operator==(const Expr &e) const {
 	if (e.type_ != type_) {
 		return false;
 	}
@@ -1963,7 +1965,9 @@ bool Expr::operator==(Expr &e) {
 	}
 	case BOOL_EXPR:
 	{
-		return *static_cast<BoolExpr *>(this) ==  *static_cast<BoolExpr *>(&e);
+		return (
+				static_cast<const BoolExpr&>(*this) ==
+				static_cast<const BoolExpr&>(e));
 	}
 	case COLUMN:
 	case EXPRLABEL:
@@ -2361,13 +2365,12 @@ TermCondition *Expr::toCondition(
 			break;
 		default:
 			condOp = ComparatorTable::findOperator(
-					c.opType_, columnType, valueType);
+					c.opType_, columnType, valueType, false);
 			break;
 		}
 		if (condOp == NULL) {
 			return NULL; 
 		}
-		ComparatorTable::getOperator(c.opType_, columnType, valueType);
 		c.operator_ = condOp;
 	}
 	else if (type_ == COLUMN) {
@@ -2401,7 +2404,7 @@ TermCondition *Expr::toCondition(
 				} else {
 					RtreeMap::SearchContext::GeometryCondition *geomCond = 
 						QP_NEW RtreeMap::SearchContext::GeometryCondition();
-					geomCond->relation_ = static_cast<uint32_t>(op_g);
+					geomCond->relation_ = static_cast<uint8_t>(op_g);
 					if (geomCond->relation_ == GEOMETRY_QSF_INTERSECT) {
 						geomCond->pkey_ = *reinterpret_cast<const TrPv3Key *>(r1);
 					}

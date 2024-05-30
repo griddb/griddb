@@ -131,30 +131,31 @@ void MessageRowStore::getField(
 /*!
 	@brief Get array length
 */
-uint32_t MessageRowStore::getArrayLength(ColumnId) const {
+uint32_t MessageRowStore::getArrayLength(ColumnId) {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
 /*!
 	@brief Get array data size
 */
-uint32_t MessageRowStore::getTotalArraySize(ColumnId) const {
+uint32_t MessageRowStore::getTotalArraySize(ColumnId) {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
 /*!
 	@brief Get element of array
 */
-void MessageRowStore::getArrayElement(ColumnId,
-		uint32_t, const void *&, uint32_t &) const {
+void MessageRowStore::getArrayElement(
+		ColumnId, uint32_t, const void *&, uint32_t &) {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
 /*!
 	@brief Get element of array
 */
-void MessageRowStore::getArrayElement(ColumnId columnId,
-		uint32_t arrayIndex, const uint8_t *&data, uint32_t &size) const {
+void MessageRowStore::getArrayElement(
+		ColumnId columnId, uint32_t arrayIndex, const uint8_t *&data,
+		uint32_t &size) {
 	getArrayElement(
 			columnId, arrayIndex, reinterpret_cast<const void*&>(data), size);
 }
@@ -301,7 +302,7 @@ InputMessageRowStore::InputMessageRowStore(
 		bool validateOnConstruct) :
 		MessageRowStore(dsConfig, columnInfoList, columnCount),
 		rowCount_(rowCount), rowIdIncluded_(false),
-		rowIdSize_(rowIdIncluded_ ? sizeof(RowId) : 0),
+		rowIdSize_(static_cast<uint32_t>(rowIdIncluded_ ? sizeof(RowId) : 0)),
 		varDataIn_(getVarDataInput(data, size, rowCount, (rowIdIncluded_ ? sizeof(RowId) : 0) + fixedRowSize)),
 		fixedDataIn_(util::ByteStream<util::ArrayInStream>(util::ArrayInStream(
 				data, size - varDataIn_.base().remaining()))),
@@ -322,7 +323,9 @@ InputMessageRowStore::InputMessageRowStore(
 		}
 	}
 	nullsBytes_ = ValueProcessor::calcNullsByteSize(columnCount);
-	rowImageSize_ = (rowIdIncluded_ ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedColumnSize_;
+	rowImageSize_ = static_cast<uint32_t>(
+			(rowIdIncluded_ ? sizeof(RowId) : 0) +
+			nullsOffset_ + nullsBytes_ + rowFixedColumnSize_);
 
 	if (validateOnConstruct) {
 		while (next()) {
@@ -339,7 +342,7 @@ InputMessageRowStore::InputMessageRowStore(
 		bool validateOnConstruct) :
 		MessageRowStore(dsConfig, columnInfoList, columnCount),
 		rowCount_(rowCount), rowIdIncluded_(rowIdIncluded),
-		rowIdSize_(rowIdIncluded_ ? sizeof(RowId) : 0),
+		rowIdSize_(static_cast<uint32_t>(rowIdIncluded_ ? sizeof(RowId) : 0)),
 		varDataIn_(util::ByteStream<util::ArrayInStream>(util::ArrayInStream(varData, varDataSize))),
 		fixedDataIn_(util::ByteStream<util::ArrayInStream>(util::ArrayInStream(fixedData, fixedDataSize))),
 		varData_(static_cast<uint8_t*>(varData)),
@@ -359,7 +362,9 @@ InputMessageRowStore::InputMessageRowStore(
 		}
 	}
 	nullsBytes_ = ValueProcessor::calcNullsByteSize(columnCount);
-	rowImageSize_ = (rowIdIncluded_ ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedColumnSize_;
+	rowImageSize_ = static_cast<uint32_t>(
+			(rowIdIncluded_ ? sizeof(RowId) : 0) +
+			nullsOffset_ + nullsBytes_ + rowFixedColumnSize_);
 
 	if (validateOnConstruct) {
 		while (next()) {
@@ -505,8 +510,9 @@ uint32_t InputMessageRowStore::getTotalArraySize(ColumnId columnId) {
 /*!
 	@brief Get element of array
 */
-void InputMessageRowStore::getArrayElement(ColumnId columnId,
-		uint32_t arrayIndex, const void *&data, uint32_t &size) {
+void InputMessageRowStore::getArrayElement(
+		ColumnId columnId, uint32_t arrayIndex, const void *&data,
+		uint32_t &size) {
 	assert(hasActiveRow());
 
 	const ColumnInfo &info = getColumnInfo(columnId);
@@ -668,7 +674,8 @@ void InputMessageRowStore::moveVarData(const ColumnInfo &info,
 		for (; lastVarColumnNth_ < info.getColumnOffset(); lastVarColumnNth_++) {
 			uint32_t varElemSize = ValueProcessor::getVarSize(varDataIn); 
 			varDataIn.base().position(varDataIn.base().position() + varElemSize);
-			lastVarColumnOffset_ = varDataIn.base().position();
+			lastVarColumnOffset_ =
+					static_cast<uint32_t>(varDataIn.base().position());
 		}
 	}
 }
@@ -896,7 +903,7 @@ OutputMessageRowStore::OutputMessageRowStore(
 {
 	assert((fieldsInitialized_.assign(
 			columnCount + (rowIdIncluded_ ? 1 : 0), false), true));
-	rowIdSize_ = rowIdIncluded ? sizeof(RowId) : 0;
+	rowIdSize_ = static_cast<uint32_t>(rowIdIncluded ? sizeof(RowId) : 0);
 	variableColumnNum_ = 0;
 	nullsOffset_ = 0;
 	rowFixedColumnSize_ = 0;
@@ -910,7 +917,9 @@ OutputMessageRowStore::OutputMessageRowStore(
 		}
 	}
 	nullsBytes_ = ValueProcessor::calcNullsByteSize(columnCount);
-	rowImageSize_ = (rowIdIncluded ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedColumnSize_;
+	rowImageSize_ = static_cast<uint32_t>(
+			(rowIdIncluded ? sizeof(RowId) : 0) +
+			nullsOffset_ + nullsBytes_ + rowFixedColumnSize_);
 }
 
 /*!

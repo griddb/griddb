@@ -29,19 +29,19 @@
 
 class ObjectManagerV4;
 
-static const uint32_t VAR_SIZE_1BYTE_THRESHOLD = 128;
-static const uint32_t VAR_SIZE_4BYTE_THRESHOLD = UINT32_C(1) << 30;
-static const uint64_t VAR_SIZE_8BYTE_THRESHOLD = UINT64_C(1) << 62;
+const uint32_t VAR_SIZE_1BYTE_THRESHOLD = 128;
+const uint32_t VAR_SIZE_4BYTE_THRESHOLD = UINT32_C(1) << 30;
+const uint64_t VAR_SIZE_8BYTE_THRESHOLD = UINT64_C(1) << 62;
 
-static const uint32_t NEXT_OBJECT_LINK_INFO_SIZE = 8;  
-static const uint32_t LINK_VARIABLE_COLUMN_DATA_SIZE =
+const uint32_t NEXT_OBJECT_LINK_INFO_SIZE = 8;  
+const uint32_t LINK_VARIABLE_COLUMN_DATA_SIZE =
 	static_cast<const uint32_t>(sizeof(uint32_t) + sizeof(uint64_t));  
-static const uint32_t AFFINITY_STRING_MAX_LENGTH =
+const uint32_t AFFINITY_STRING_MAX_LENGTH =
 	8;  
-static const char *const DEFAULT_AFFINITY_STRING =
+const char *const DEFAULT_AFFINITY_STRING =
 	"";  
 
-static const Timestamp MINIMUM_EXPIRED_TIMESTAMP = -1;
+const Timestamp MINIMUM_EXPIRED_TIMESTAMP = -1;
 
 typedef uint8_t RowHeader;
 
@@ -55,20 +55,20 @@ const bool DS_CHUNK_CATEGORY_SMALL_SIZE_SEARCH[] = {
 const int16_t DS_ADDITIONAL_CHUNK_CATEGORY_NUM =
 	17;  
 
-static const uint32_t CHUNK_SIZE = 1 << DS_CHUNK_EXP_SIZE;  
-static const uint32_t OBJECT_BLOCK_HEADER_SIZE =
+const uint32_t CHUNK_SIZE = 1 << DS_CHUNK_EXP_SIZE;  
+const uint32_t OBJECT_BLOCK_HEADER_SIZE =
 	4;  
 
-static const ChunkCategoryId ALLOCATE_META_CHUNK =
+const ChunkCategoryId ALLOCATE_META_CHUNK =
 	0;  
-static const ChunkCategoryId ALLOCATE_NO_EXPIRE_MAP = 1;  
-static const ChunkCategoryId ALLOCATE_NO_EXPIRE_ROW = 2;  
-static const ChunkCategoryId ALLOCATE_EXPIRE_MAP = 3;	 
-static const ChunkCategoryId ALLOCATE_EXPIRE_ROW = 4;	 
+const ChunkCategoryId ALLOCATE_NO_EXPIRE_MAP = 1;  
+const ChunkCategoryId ALLOCATE_NO_EXPIRE_ROW = 2;  
+const ChunkCategoryId ALLOCATE_EXPIRE_MAP = 3;	 
+const ChunkCategoryId ALLOCATE_EXPIRE_ROW = 4;	 
 
-static const AffinityGroupId DEFAULT_AFFINITY_GROUP_ID = 0;
+const AffinityGroupId DEFAULT_AFFINITY_GROUP_ID = 0;
 
-static const ExpireIntervalCategoryId DEFAULT_EXPIRE_CATEGORY_ID = 0;
+const ExpireIntervalCategoryId DEFAULT_EXPIRE_CATEGORY_ID = 0;
 
 enum StoreType {
 	V4_COMPATIBLE = 0,
@@ -77,7 +77,7 @@ enum StoreType {
 	UNDEF_STORE
 };
 
-static const uint32_t LIMIT_COLUMN_NAME_SIZE = 256;  
+const uint32_t LIMIT_COLUMN_NAME_SIZE = 256;  
 
 const ResultSize PARTIAL_RESULT_SIZE =
 	1 * 1000;  
@@ -130,7 +130,6 @@ enum CheckpointMode {
 	CP_PREPARE_LONGTERM_SYNC,	
 	CP_STOP_LONGTERM_SYNC,		
 	CP_AFTER_LONGTERM_SYNC,		
-
 	CP_MODE_END
 };
 
@@ -219,37 +218,37 @@ const uint16_t FixedSizeOfColumnType[] = {
 typedef int32_t SchemaFeatureLevel;
 
 typedef uint8_t ContainerType;
-static const ContainerType COLLECTION_CONTAINER = 0;
-static const ContainerType TIME_SERIES_CONTAINER = 1;
-static const ContainerType UNDEF_CONTAINER = 0xfe;
-static const ContainerType ANY_CONTAINER = 0xff;
+const ContainerType COLLECTION_CONTAINER = 0;
+const ContainerType TIME_SERIES_CONTAINER = 1;
+const ContainerType UNDEF_CONTAINER = 0xfe;
+const ContainerType ANY_CONTAINER = 0xff;
 
-static const char *const GS_CAPITAL_PREFIX = "GS#";
-static const char *const GS_CAPITAL_PUBLIC = "PUBLIC";  
-static const char *const GS_CAPITAL_INFO_SCHEMA =
+const char *const GS_CAPITAL_PREFIX = "GS#";
+const char *const GS_CAPITAL_PUBLIC = "PUBLIC";  
+const char *const GS_CAPITAL_INFO_SCHEMA =
 	"INFORMATION_SCHEMA";  
-static const char *const GS_CAPITAL_ADMIN_USER =
+const char *const GS_CAPITAL_ADMIN_USER =
 	"ADMIN";  
-static const char *const GS_CAPITAL_SYSTEM_USER =
+const char *const GS_CAPITAL_SYSTEM_USER =
 	"SYSTEM";  
 
-static const char *const GS_SYSTEM = "gs#system";  
-static const char *const GS_USERS = "#_users@0";
-static const char *const GS_DATABASES = "#_databases@0";
-static const char *const GS_PUBLIC = "public";  
-static const char *const GS_INFO_SCHEMA =
+const char *const GS_SYSTEM = "gs#system";  
+const char *const GS_USERS = "#_users@0";
+const char *const GS_DATABASES = "#_databases@0";
+const char *const GS_PUBLIC = "public";  
+const char *const GS_INFO_SCHEMA =
 	"information_schema";							 
-static const char *const GS_ADMIN_USER = "admin";	
-static const char *const GS_SYSTEM_USER = "system";  
-static const char *const GS_PREFIX = "gs#";			 
+const char *const GS_ADMIN_USER = "admin";	
+const char *const GS_SYSTEM_USER = "system";  
+const char *const GS_PREFIX = "gs#";			 
 
-static const DatabaseId UNDEF_DBID = UNDEF_ROWID;
-static const DatabaseId MAX_DBID = MAX_ROWID;
-static const DatabaseId DBID_RESERVED_RANGE = 100;
-static const DatabaseId GS_PUBLIC_DB_ID = 0;
-static const DatabaseId GS_SYSTEM_DB_ID = 1;
+const DatabaseId UNDEF_DBID = UNDEF_ROWID;
+const DatabaseId MAX_DBID = MAX_ROWID;
+const DatabaseId DBID_RESERVED_RANGE = 100;
+const DatabaseId GS_PUBLIC_DB_ID = 0;
+const DatabaseId GS_SYSTEM_DB_ID = 1;
 
-static const char* UNIQUE_GROUP_ID_KEY = "#unique";
+const char *const UNIQUE_GROUP_ID_KEY = "#unique";
 
 /*!
 	@brief Represents the attribute of container
@@ -278,14 +277,14 @@ enum PutRowOption {
 };
 
 typedef int8_t MapType;
-static const MapType MAP_TYPE_BTREE = 0;
-static const MapType MAP_TYPE_HASH = 1;
-static const MapType MAP_TYPE_SPATIAL = 2;
-static const MapType MAP_TYPE_NUM = 3;
+const MapType MAP_TYPE_BTREE = 0;
+const MapType MAP_TYPE_HASH = 1;
+const MapType MAP_TYPE_SPATIAL = 2;
+const MapType MAP_TYPE_NUM = 3;
 
-static const MapType MAP_TYPE_DEFAULT = -1;
-static const MapType MAP_TYPE_VECTOR = -2;
-static const MapType MAP_TYPE_ANY = -3;
+const MapType MAP_TYPE_DEFAULT = -1;
+const MapType MAP_TYPE_VECTOR = -2;
+const MapType MAP_TYPE_ANY = -3;
 
 const MapType DEFAULT_INDEX_TYPE[] = {
 	MAP_TYPE_BTREE,		
@@ -317,13 +316,13 @@ inline const char8_t* getMapTypeStr(MapType type) {
 }
 
 typedef uint8_t TimeUnit;
-static const TimeUnit TIME_UNIT_YEAR = 0;
-static const TimeUnit TIME_UNIT_MONTH = 1;
-static const TimeUnit TIME_UNIT_DAY = 2;
-static const TimeUnit TIME_UNIT_HOUR = 3;
-static const TimeUnit TIME_UNIT_MINUTE = 4;
-static const TimeUnit TIME_UNIT_SECOND = 5;
-static const TimeUnit TIME_UNIT_MILLISECOND = 6;
+const TimeUnit TIME_UNIT_YEAR = 0;
+const TimeUnit TIME_UNIT_MONTH = 1;
+const TimeUnit TIME_UNIT_DAY = 2;
+const TimeUnit TIME_UNIT_HOUR = 3;
+const TimeUnit TIME_UNIT_MINUTE = 4;
+const TimeUnit TIME_UNIT_SECOND = 5;
+const TimeUnit TIME_UNIT_MILLISECOND = 6;
 
 enum ExpireType {
 	NO_EXPIRE,
@@ -680,8 +679,10 @@ struct ChunkCompressionTypes {
 		@brief Chunk compression mode
 	*/
 	enum Mode {
-		NO_BLOCK_COMPRESSION, 
-		BLOCK_COMPRESSION, 
+		NO_BLOCK_COMPRESSION,   
+		BLOCK_COMPRESSION,      
+		BLOCK_COMPRESSION_ZLIB, 
+		BLOCK_COMPRESSION_ZSTD, 
 
 		MODE_END
 	};
@@ -821,8 +822,8 @@ struct KeyDataStoreValue : public Serializable {
 		output << "(";
 		output << val.containerId_ << ",";
 		output << val.oId_ << ",";
-		output << val.storeType_ << ",";
-		output << val.attribute_ << ")";
+		output << static_cast<int32_t>(val.storeType_) << ",";
+		output << static_cast<int32_t>(val.attribute_) << ")";
 		return output;
 	}
 

@@ -240,7 +240,8 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  * <tr><td>LONG</td><td>{@link Long} or {@code long}</td></tr>
  * <tr><td>FLOAT</td><td>{@link Float} or {@code float}</td></tr>
  * <tr><td>DOUBLE</td><td>{@link Double} or {@code double}</td></tr>
- * <tr><td>TIMESTAMP</td><td>{@link java.util.Date}</td></tr>
+ * <tr><td>TIMESTAMP (of normal-precision (millisecond))</td><td>{@link java.util.Date}</td></tr>
+ * <tr><td>TIMESTAMP (of high-precision (microsecond/nanosecond))</td><td>{@link java.sql.Timestamp}</td></tr>
  * <tr><td>BLOB</td><td>Class implementing {@link Blob}</td></tr>
  * <tr><td>STRING array</td><td>{@code String[]}</td></tr>
  * <tr><td>BOOL array</td><td>{@code boolean[]}</td></tr>
@@ -302,6 +303,11 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  * <tr><td>ARRAY</td><td>Array with 0 element</td></tr>
  * </tbody>
  * </table>
+ *
+ * <p>日時精度は、{@link TimePrecision#value()}もしくは
+ * {@link ColumnInfo#getTimePrecision()}により明示的に指定できます。</p>
+ * <p>date/time precision can be explicitly specified using 
+ * {@link TimePrecision#value()} or {@link ColumnInfo#getTimePrecision()}.</p>
  *
  * <p>During transaction processing, the auto commit mode is enabled by default.
  * In the auto commit mode, change operations are confirmed sequentially

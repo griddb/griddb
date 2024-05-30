@@ -96,7 +96,7 @@ void BindParamSet::copyBindParamSet(const BindParamSet& rhs) {
 	try {
 		reset();
 		prepare(rhs.columnSize_, rhs.rowCount_);
-		for (size_t pos = 0; pos < rhs.rowCount_; pos++) {
+		for (int32_t pos = 0; pos < rhs.rowCount_; pos++) {
 			for (int32_t columnNo = 0; columnNo < rhs.columnSize_; columnNo++) {
 				ColumnType type = rhs.bindParamList_[pos][columnNo]->type_;
 				TupleValue& value = rhs.bindParamList_[pos][columnNo]->value_;
@@ -266,8 +266,11 @@ void SQLExecutionManager::initialize(const ManagerSet& mgrSet) {
 			cacheSize, mgrSet.pt_, mgrSet.partitionList_, mgrSet.sqlSvc_);
 }
 
-void SQLExecutionManager::remove(EventContext& ec,
-	ClientId& targetClientId, bool withCheck, int32_t point, JobId* jobId) {
+void SQLExecutionManager::remove(
+		EventContext& ec,
+		ClientId& targetClientId, bool withCheck, int32_t point, JobId* jobId) {
+	UNUSED_VARIABLE(point);
+
 	SQLExecution* execution = NULL;
 	try {
 		JobId cancelJobId;
@@ -567,16 +570,9 @@ void SQLExecution::setRequest(RequestInfo& request) {
 }
 
 SQLTableInfoList* SQLExecution::generateTableInfo(SQLExpandViewContext& cxt) {
-	util::StackAllocator& alloc = cxt.getAllocator();
 	SQLParsedInfo& parsedInfo = *cxt.parsedInfo_;
-	const char8_t* defaultDbName = cxt.defaultDbName_;
 	SQLConnectionControl* control = cxt.control_;
-	EventContext& ec = *cxt.ec_;
 	SQLTableInfoList* tableInfoList = cxt.tableInfoList_;
-	util::Set<util::String>* tableSet = cxt.tableSet_;
-	bool useCache = cxt.useCache_;
-	bool withVersion = cxt.withVersion_;
-	util::Vector<NodeId>& liveNodeIdList = *cxt.liveNodeIdList_;
 
 	std::pair<util::Set<util::String>::iterator, bool> outResult;
 	cxt.forceMetaDataQuery_ = false;
@@ -622,18 +618,17 @@ SQLTableInfoList* SQLExecution::generateTableInfo(SQLExpandViewContext& cxt) {
 }
 
 const SQLTableInfo* SQLExecution::getTableInfo(
-	SQLExpandViewContext& cxt,
-	SyntaxTree::Expr* expr,
-	uint32_t viewDepth,
-	bool viewOnly)
-{
+		SQLExpandViewContext& cxt,
+		SyntaxTree::Expr* expr,
+		uint32_t viewDepth,
+		bool viewOnly) {
+	UNUSED_VARIABLE(viewDepth);
+
 	util::StackAllocator& alloc = cxt.getAllocator();
-	SQLParsedInfo& parsedInfo = *cxt.parsedInfo_;
 	const char8_t* defaultDbName = cxt.defaultDbName_;
 	SQLConnectionControl* control = cxt.control_;
 	EventContext& ec = *cxt.ec_;
 	SQLTableInfoList* tableInfoList = cxt.tableInfoList_;
-	util::Set<util::String>* tableSet = cxt.tableSet_;
 	bool useCache = cxt.useCache_;
 	bool withVersion = cxt.withVersion_;
 	util::Vector<NodeId>& liveNodeIdList = *cxt.liveNodeIdList_;
@@ -693,13 +688,13 @@ const SQLTableInfo* SQLExecution::getTableInfo(
 		PartitionTable* pt = executionManager_->getPartitionTable();
 		uint32_t partitionCount = pt->getPartitionNum();
 		if (isNodeExpansion) {
-			partitionCount = liveNodeIdList.size();
+			partitionCount = static_cast<uint32_t>(liveNodeIdList.size());
 		}
 		tableInfoList->prepareMeta(
 			*srcName, idInfo, context_.getDBId(), partitionCount);
 		return &sqlTableInfo;
 	}
-	bool isAdjust = false;
+
 	bool dbCaseSensitive = expr->qName_->dbCaseSensitive_;
 	util::String currentDb(alloc);
 	if (expr->qName_->db_) {
@@ -715,7 +710,6 @@ const SQLTableInfo* SQLExecution::getTableInfo(
 	}
 	else {
 		currentDb = util::String(defaultDbName, alloc);
-		isAdjust = true;
 	}
 	NameWithCaseSensitivity currentDbName(currentDb.c_str(), dbCaseSensitive);
 
@@ -836,7 +830,7 @@ void SQLExecution::execute(EventContext& ec,
 
 	SQLConnectionControl connectionControl(executionManager_, this);
 	JobId currentJobId;
-	int32_t currentVersionId = versionId;
+	uint32_t currentVersionId = versionId;
 	context_.getCurrentJobId(currentJobId);
 	if (versionId == UNDEF_JOB_VERSIONID) {
 		currentVersionId = currentJobId.versionId_;
@@ -851,7 +845,7 @@ void SQLExecution::execute(EventContext& ec,
 	if (context_.isRetryStatement()) {
 		JobId jobId(clientId_, context_.getExecId());
 		currentVersionId = 1;
-		jobId.versionId_ = currentVersionId;
+		jobId.versionId_ = static_cast<uint8_t>(currentVersionId);
 		context_.setCurrentJobId(jobId);
 	}
 
@@ -953,7 +947,6 @@ void SQLExecution::execute(EventContext& ec,
 			getContext().getConnectionOption().checkSelect(getParsedInfo());
 			checkClientResponse();
 
-			DatabaseId dbId = context_.getDBId();
 			DatabaseManager::Option option;
 			if (parsedInfo.syntaxTreeList_.size() > 0) {
 				option.dropOnly_ = parsedInfo.syntaxTreeList_[0]->isDropOnlyCommand();
@@ -994,7 +987,6 @@ void SQLExecution::execute(EventContext& ec,
 			}
 
 			TRACE_SQL_START(clientId_, jobManager_->getHostName(), "ASSIGN");
-			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 			JobInfo jobInfo(alloc);
 			jobInfo.startTime_ = startTime;
 			generateJobInfo(alloc, tableInfoList, executionStatus_.preparedPlan_,
@@ -1017,7 +1009,9 @@ void SQLExecution::execute(EventContext& ec,
 			if (context_.isPreparedStatement()) {
 				isPreparedRetry = true;
 			}
-			if (!checkJobVersionId(currentVersionId, false, responseJobId)) {
+			if (!checkJobVersionId(
+					static_cast<uint8_t>(currentVersionId), false,
+					responseJobId)) {
 				return;
 			}
 			if (handleError(ec, e1, currentVersionId, delayTime, request)) {
@@ -1032,13 +1026,16 @@ void SQLExecution::execute(EventContext& ec,
 		<< static_cast<int32_t>(MAX_JOB_VERSIONID));
 }
 
-void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
-	SQLTableInfoList* tableInfoList, SQLPreparedPlan* pPlan,
-	JobInfo* jobInfo, CommandId commandId,
-	EventMonotonicTime emNow, SQLConnectionControl& control,
-	util::Vector<NodeId>& liveNodeIdList, int32_t maxNodeNum) {
+void SQLExecution::generateJobInfo(
+		util::StackAllocator& alloc,
+		SQLTableInfoList* tableInfoList, SQLPreparedPlan* pPlan,
+		JobInfo* jobInfo, CommandId commandId,
+		EventMonotonicTime emNow, SQLConnectionControl& control,
+		util::Vector<NodeId>& liveNodeIdList, int32_t maxNodeNum) {
+	UNUSED_VARIABLE(commandId);
+	UNUSED_VARIABLE(control);
+
 	try {
-		SQLParsedInfo& parsedInfo = getParsedInfo();
 		jobInfo->syncContext_ = &context_.getSyncContext();
 		jobInfo->option_.plan_ = executionStatus_.preparedPlan_;
 		if (isTimeSeriesIncluded()) {
@@ -1094,7 +1091,6 @@ void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
 		}
 		util::XArray<NodeId> activeNodeListMap(alloc);
 		activeNodeListMap.assign(static_cast<size_t>(maxNodeNum), -1);
-		bool useHint = false;
 		util::Vector<int32_t> assignNodes(nodeNum, 0, alloc);
 		util::Vector<bool> checkNodes(nodeNum, false, alloc);
 		if (nodeNum > 1) {
@@ -1157,7 +1153,6 @@ void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
 						taskInfo->nodePos_ = 0;
 						continue;
 					}
-					NodeId ownerNodeId = UNDEF_NODEID;
 					taskInfo->nodePos_ = pt->getNewSQLOwner(node.tableIdInfo_.partitionId_);
 					if (taskInfo->nodePos_ != 0) {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INVALID_NODE_ASSIGN,
@@ -1294,8 +1289,10 @@ void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
 	@param [in] request リクエスト
 	@return なし
 */
-void SQLExecution::fetch(EventContext& ec, Event& ev,
-	RequestInfo& request) {
+void SQLExecution::fetch(
+		EventContext& ec, Event& ev, RequestInfo& request) {
+	UNUSED_VARIABLE(ev);
+
 	try {
 		setRequest(request);
 		checkCancel();
@@ -1507,6 +1504,9 @@ void SQLExecution::close(EventContext& ec, RequestInfo& request) {
 }
 
 void SQLExecution::executeCancel(EventContext& ec, bool clientCancel) {
+	UNUSED_VARIABLE(ec);
+	UNUSED_VARIABLE(clientCancel);
+
 	GS_TRACE_INFO(DISTRIBUTED_FRAMEWORK, GS_TRACE_SQL_INTERNAL_DEBUG,
 		"Execute cancel, clientId=" << clientId_);
 	std::exception occurredException;
@@ -1737,7 +1737,6 @@ void SQLExecution::encodeSuccessExplainAnalyze(
 	varCxt.setVarAllocator(&localVarAlloc_);
 	varCxt.setGroup(&group_);
 
-	PartitionTable* pt = executionManager_->getPartitionTable();
 	SQLPreparedPlan* plan = NULL;
 	restorePlanInfo(plan, eventStackAlloc, varCxt);
 	cleanupSerializedData();
@@ -1947,7 +1946,6 @@ void SQLExecutionManager::resizeTableCache(
 }
 
 void SQLExecution::checkClientResponse() {
-	SQLParsedInfo& parsedInfo = getParsedInfo();
 	if (analyzedQueryInfo_.isExplain() || analyzedQueryInfo_.isExplainAnalyze()) {
 		return;
 	}
@@ -2060,7 +2058,8 @@ public:
 		case SyntaxTree::TABLE_PARTITION_TYPE_UNDEF:
 		case SyntaxTree::TABLE_PARTITION_TYPE_HASH: {
 			size_t targetPos = static_cast<size_t>(affinity);
-			if (targetPos == -1 || storeList_.size() <= targetPos) {
+			if (targetPos == static_cast<size_t>(-1) ||
+					storeList_.size() <= targetPos) {
 				GS_THROW_USER_ERROR(GS_ERROR_TXN_CONTAINER_SCHEMA_UNMATCH, "");
 			}
 			if (storeList_[targetPos] != NULL) {
@@ -2159,13 +2158,11 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 	util::StackAllocator& eventStackAlloc = ec.getAllocator();
 	util::Stopwatch watch;
 	watch.start();
-	SQLService* sqlSvc = executionManager_->getSQLService();
 	SQLParsedInfo& parsedInfo = getParsedInfo();
 	PartitionTable* pt = executionManager_->getPartitionTable();
 	const uint32_t partitionNum =
 		executionManager_->getPartitionTable()->getPartitionNum();
 	bool releaseCache = false;
-	PartitionId pId = 0;
 	TableSchemaInfo* tableSchema = NULL;
 	const char8_t* currentDBName = NULL;
 
@@ -2243,13 +2240,10 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 			int32_t keyColumnId = tableSchema->partitionInfo_.partitioningColumnId_;
 			int32_t subKeyColumnId = tableSchema->partitionInfo_.subPartitioningColumnId_;
 			int32_t partitioningCount = tableSchema->partitionInfo_.getCurrentPartitioningCount();
-			int32_t startPos = 0;
 			if (partitioningCount == 0) {
 				partitioningCount = 1;
 			}
-			else {
-				startPos = 1;
-			}
+
 			TupleValue::VarContext varCxt;
 			varCxt.setStackAllocator(&eventStackAlloc);
 			varCxt.setVarAllocator(&localVarAlloc_);
@@ -2260,21 +2254,16 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 				tableSchema->nosqlColumnInfoList_,
 				static_cast<uint32_t>(tableSchema->columnInfoList_.size()));
 
-			int32_t subContainerId = 0;
 			int64_t currentSize = 0;
 			int64_t sizeLimit = executionManager_->getNoSQLSizeLimit();
-			bool isFirst = true;
 			BulkEntry* currentStore;
-			NodeAffinityNumber affinity = UNDEF_NODE_AFFINITY_NUMBER;
 			if (parsedInfo.syntaxTreeList_[0]->cmdOptionValue_
 				== SyntaxTree::RESOLVETYPE_REPLACE) {
 				cmdOption.putRowOption_ = PUT_INSERT_OR_UPDATE;
 			}
 			watcher.lap(ExecutionProfilerWatcher::PARSE);
 
-			NoSQLContainer* currentContainer = NULL;
-			NoSQLStore* command
-				= conn->getNoSQLStore(context_.getDBId(), context_.getDBName());
+			conn->getNoSQLStore(context_.getDBId(), context_.getDBName());
 			for (size_t rowPos = 0; rowPos < mergeSelectList.size(); rowPos++) {
 				if (tableSchema->columnInfoList_.size() != mergeSelectList[rowPos]->size()) {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_MISMATCH_SCHEMA,
@@ -2408,14 +2397,16 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 				totalRowCount += currentStore->rowStore_->getRowCount();
 			}
 			response_.updateCount_ = totalRowCount;
-			executionManager_->incOperation(false, ec.getWorkerId(), totalRowCount);
+			executionManager_->incOperation(
+					false, ec.getWorkerId(),
+					static_cast<int32_t>(totalRowCount));
 		}
 		catch (std::exception& e) {
 			needSchemaRefresh = true;
 			const util::Exception checkException = GS_EXCEPTION_CONVERT(e, "");
 			int32_t errorCode = checkException.getErrorCode();
 			bool clearCache = false;
-			SQLReplyType replyType = checkReplyType(errorCode, clearCache);
+			checkReplyType(errorCode, clearCache);
 			if (tableSchema && clearCache) {
 				updateRemoteCache(ec, jobManager_->getEE(SQL_SERVICE),
 					pt,
@@ -2633,7 +2624,6 @@ void SQLExecutionManager::getProfiler(
 
 	util::Vector<ClientId> clientIdList(alloc);
 	getCurrentClientIdList(clientIdList);
-	const char* label = "SQLExecutionManager::getProfiler";
 
 	for (size_t pos = 0; pos < clientIdList.size(); pos++) {
 		Latch latch(clientIdList[pos], this);
@@ -2697,9 +2687,12 @@ void SQLExecutionManager::getCurrentClientIdList(
 	}
 }
 
-void SQLExecutionManager::cancelAll(const Event::Source& eventSource,
-	util::StackAllocator& alloc, util::Vector<ClientId>& clientIdList,
-	CancelOption& option) {
+void SQLExecutionManager::cancelAll(
+		const Event::Source& eventSource,
+		util::StackAllocator& alloc, util::Vector<ClientId>& clientIdList,
+		CancelOption& option) {
+	UNUSED_VARIABLE(alloc);
+
 	try {
 		if (clientIdList.empty()) {
 			getCurrentClientIdList(clientIdList);
@@ -2994,7 +2987,10 @@ void SQLExecution::assignDistributedTarget(
 	resultSet.setDistributedTargetStatus(uncovered, reduced);
 }
 
-bool SQLExecution::checkJobVersionId(uint8_t versionId, bool isFetch, JobId* jobId) {
+bool SQLExecution::checkJobVersionId(
+		uint8_t versionId, bool isFetch, JobId* jobId) {
+	UNUSED_VARIABLE(jobId);
+
 	uint8_t currentVersionId = context_.getCurrentJobVersionId();
 	if (versionId != UNDEF_JOB_VERSIONID && versionId != currentVersionId) {
 		if (isFetch) {
@@ -3075,6 +3071,8 @@ void SQLExecutionManager::clearConnection(Event& ev, bool isNewSQL) {
 }
 
 void SQLExecution::cleanupPrevJob(EventContext& ec) {
+	UNUSED_VARIABLE(ec);
+
 	if (context_.isPreparedStatement()) {
 		JobId currentJobId;
 		context_.getCurrentJobId(currentJobId);
@@ -3285,9 +3283,12 @@ bool SQLExecution::metaDataQueryCheck(SQLConnectionControl* control) {
 		|| forceMetaDataQuery);
 }
 
-bool SQLExecution::checkRefreshTable(EventContext& ec, NameWithCaseSensitivity& tableName,
-	util::StackAllocator& alloc, TableSchemaInfo* tableSchema,
-	EventMonotonicTime currentEmTime) {
+bool SQLExecution::checkRefreshTable(
+		EventContext& ec, NameWithCaseSensitivity& tableName,
+		util::StackAllocator& alloc, TableSchemaInfo* tableSchema,
+		EventMonotonicTime currentEmTime) {
+	UNUSED_VARIABLE(alloc);
+
 	if (tableSchema->partitionInfo_.partitionType_
 		== SyntaxTree::TABLE_PARTITION_TYPE_UNDEF) {
 		if (tableSchema->containerAttr_ != CONTAINER_ATTR_VIEW) {
@@ -3353,7 +3354,6 @@ void SQLExecution::cleanupTableCache() {
 			if (qName == NULL || qName->table_ == NULL) {
 				continue;
 			}
-			util::String* tableName = (*it)->qName_->table_;
 			if (SQLCompiler::Meta::isSystemTable(*qName)) {
 				continue;
 			}
@@ -3417,7 +3417,7 @@ void SQLExecution::PreparedInfo::cleanup() {
 void SQLExecution::PreparedInfo::copySerialized(util::XArray<uint8_t>& binary) {
 	if (binary.size() > 0) {
 		serializedPlan_ = static_cast<char8_t*>(globalVarAlloc_.allocate(binary.size()));
-		serializedPlanSize_ = binary.size();
+		serializedPlanSize_ = static_cast<int32_t>(binary.size());
 		memcpy(serializedPlan_, binary.data(), binary.size());
 	}
 }
@@ -3425,7 +3425,7 @@ void SQLExecution::PreparedInfo::copySerialized(util::XArray<uint8_t>& binary) {
 void SQLExecution::PreparedInfo::copyBind(util::XArray<uint8_t>& binary) {
 	if (binary.size() > 0) {
 		serializedBindInfo_ = static_cast<char8_t*>(globalVarAlloc_.allocate(binary.size()));
-		serializedBindInfoSize_ = binary.size();
+		serializedBindInfoSize_ = static_cast<int32_t>(binary.size());
 		memcpy(serializedBindInfo_, binary.data(), binary.size());
 	}
 }
@@ -3470,8 +3470,9 @@ void SQLExecution::restorePlanInfo(SQLPreparedPlan*& plan,
 	preparedInfo_.restorePlan(plan, eventStackAlloc, varCxt);
 }
 
-bool SQLExecution::fetchBatch(EventContext &ec, 
-		std::vector<int64_t> *countList) {
+bool SQLExecution::fetchBatch(
+		EventContext &ec, std::vector<int64_t> *countList) {
+	UNUSED_VARIABLE(countList);
 
 	bool responsed = executionStatus_.responsed_;
 	if (executionStatus_.currentType_
@@ -3502,7 +3503,7 @@ bool SQLExecution::fetchBatch(EventContext &ec,
 			out, static_cast<uint32_t>(
 					batchCountList_.size()));
 
-	for (int32_t i = 0; i < batchCountList_.size(); i++) {
+	for (size_t i = 0; i < batchCountList_.size(); i++) {
 
 		executionManager_->incOperation(
 				false, ec.getWorkerId(),
@@ -3709,9 +3710,12 @@ void SQLExecution::checkConcurrency(EventContext& ec, std::exception* e) {
 	}
 }
 
-bool SQLExecution::handleError(EventContext& ec,
-	std::exception& e, int32_t currentVersionId, int64_t& delayTime,
-	RequestInfo &request) {
+bool SQLExecution::handleError(
+		EventContext& ec,
+		std::exception& e, int32_t currentVersionId, int64_t& delayTime,
+		RequestInfo &request) {
+	UNUSED_VARIABLE(request);
+
 	const util::Exception checkException = GS_EXCEPTION_CONVERT(e, "");
 	int32_t errorCode = checkException.getErrorCode();
 	bool cacheClear = false;
@@ -4067,7 +4071,7 @@ void SQLExecution::SQLExecutionContext::setQuery(util::String& query) const {
 	}
 }
 
-const DatabaseId SQLExecution::SQLExecutionContext::getDBId() const {
+DatabaseId SQLExecution::SQLExecutionContext::getDBId() const {
 	return clientInfo_.dbId_;
 }
 
@@ -4095,7 +4099,7 @@ void SQLExecution::SQLExecutionContext::setEndTime(int64_t endTime) {
 	executionStatus_.endTime_ = endTime;
 }
 
-const double SQLExecution::SQLExecutionContext::getStoreMemoryAgingSwapRate() const {
+double SQLExecution::SQLExecutionContext::getStoreMemoryAgingSwapRate() const {
 	return clientInfo_.storeMemoryAgingSwapRate_;
 }
 
@@ -4162,6 +4166,8 @@ bool SQLExecution::replyClient(SQLExecution::SQLReplyContext& cxt) {
 }
 
 void SQLExecution::SQLExecutionContext::getCurrentJobId(JobId& jobId, bool isLocal) {
+	UNUSED_VARIABLE(isLocal);
+
 	util::LockGuard<util::Mutex> guard(lock_);
 	jobId = currentJobId_;
 }
@@ -4233,7 +4239,6 @@ const std::string SQLExecution::QueryAnalyzedInfo::getTableNameList()  {
 			if (srcName == NULL) {
 				continue;
 			}
-			const util::String* tableName = srcName->table_;
 			if (srcName->table_ == NULL) {
 				continue;
 			}
@@ -4366,7 +4371,12 @@ SQLExecution::ExecutionProfilerWatcher::~ExecutionProfilerWatcher() {
 }
 
 bool SQLExecution::checkExecutionConstraint(uint32_t& delayStartTime, uint32_t& delayExecutionTime) {
-	if (!jobManager_->getTransactionService()->getManager()->getDatabaseManager().isEnableRequsetConstraint()) {
+	if (jobManager_->getClusterService()->getManager()->getStandbyInfo().isStandby() && isNotSelect()) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_DENY_REQUEST,
+			"Deny updatable query (standby mode)");
+	}
+
+	if (!jobManager_->getTransactionService()->getManager()->getDatabaseManager().isEnableRequestConstraint()) {
 		return false;
 	}
 	DatabaseId dbId = context_.getDBId();

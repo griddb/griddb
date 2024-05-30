@@ -36,7 +36,11 @@
 
 #include "value.h"
 
-void BaseContainer::getErasableList(TransactionContext &txn, Timestamp erasableTimeUpperLimit, util::XArray<ArchiveInfo> &list) {
+void BaseContainer::getErasableList(
+		TransactionContext &txn, Timestamp erasableTimeUpperLimit,
+		util::XArray<ArchiveInfo> &list) {
+	UNUSED_VARIABLE(txn);
+
 	Timestamp erasableTimeLowerLimit = getDataStore()->stats().getBatchFreeTime();
 	if (erasableTimeLowerLimit < dataStore_->getConfig().getErasableExpiredTime()) {
 		erasableTimeLowerLimit = dataStore_->getConfig().getErasableExpiredTime();

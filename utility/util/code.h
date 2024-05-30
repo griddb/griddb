@@ -3536,7 +3536,7 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 	a |= *p;
 	++p;
 	if ( !(a & 0x80) ) {
-		a &= (0x7f << 28) | (0x7f << 14) | (0x7f);
+		a &= (0x7fUL << 28) | (0x7f << 14) | (0x7f);
 		b &= (0x7f << 14) | (0x7f);
 		b = b << 7;
 		a |= b;
@@ -3549,7 +3549,7 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 	b |= *p;
 	++p;
 	if ( !(b & 0x80) ) {
-		b &= (0x7f << 28) | (0x7f << 14) | (0x7f);
+		b &= (0x7fUL << 28) | (0x7f << 14) | (0x7f);
 		a = a << 7;
 		a |= b;
 		s = s >> 4;

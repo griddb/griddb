@@ -27,7 +27,9 @@
 typedef NoSQLCommonUtils NoSQLUtils;
 
 
-
+//
+// ScanCursor
+//
 
 SQLContainerUtils::ScanCursor::~ScanCursor() {
 }
@@ -35,6 +37,9 @@ SQLContainerUtils::ScanCursor::~ScanCursor() {
 SQLContainerUtils::ScanCursor::ScanCursor() {
 }
 
+//
+// ScanCursor::Holder
+//
 
 SQLContainerUtils::ScanCursor::Holder::~Holder() {
 }
@@ -42,6 +47,9 @@ SQLContainerUtils::ScanCursor::Holder::~Holder() {
 SQLContainerUtils::ScanCursor::Holder::Holder() {
 }
 
+//
+// ScanCursorAccessor
+//
 
 SQLContainerUtils::ScanCursorAccessor::~ScanCursorAccessor() {
 }
@@ -58,6 +66,9 @@ SQLContainerUtils::ScanCursorAccessor::create(const Source &source) {
 SQLContainerUtils::ScanCursorAccessor::ScanCursorAccessor() {
 }
 
+//
+// ScanCursorAccessor::Source
+//
 
 SQLContainerUtils::ScanCursorAccessor::Source::Source(
 		SQLValues::VarAllocator &varAlloc,
@@ -69,9 +80,13 @@ SQLContainerUtils::ScanCursorAccessor::Source::Source(
 		columnTypeList_(columnTypeList),
 		indexLimit_(-1),
 		memLimit_(-1),
+		partialExecCountBased_(false),
 		cxtSrc_(cxtSrc) {
 }
 
+//
+// IndexScanInfo
+//
 
 SQLContainerUtils::IndexScanInfo::IndexScanInfo(
 		const SQLExprs::IndexConditionList &condList,
@@ -80,7 +95,9 @@ SQLContainerUtils::IndexScanInfo::IndexScanInfo(
 		inputIndex_(inputIndex) {
 }
 
-
+//
+// ContainerUtils
+//
 
 size_t SQLContainerUtils::ContainerUtils::findMaxStringLength(
 		const ResourceSet *resourceSet) {
@@ -180,6 +197,9 @@ SQLExprs::SyntaxExpr SQLContainerUtils::ContainerUtils::tqlToPredExpr(
 	return SQLContainerImpl::TQLTool::genPredExpr(alloc, query);
 }
 
+//
+// CursorImpl
+//
 
 SQLContainerImpl::CursorImpl::CursorImpl(Accessor &accessor, Data &data) :
 		accessor_(accessor),
@@ -316,6 +336,27 @@ bool SQLContainerImpl::CursorImpl::scanMeta(
 	return done;
 }
 
+bool SQLContainerImpl::CursorImpl::scanVisited(
+		OpContext &cxt, const Projection &proj) {
+	bool done = true;
+	RowIdFilter *filter = accessor_.findRowIdFilter();
+	if (filter != NULL) {
+		uint64_t rest = std::max<uint64_t>(cxt.getNextCountForSuspend(), 1);
+		SQLExprs::ExprContext &exprCxt = cxt.getExprContext();
+		RowIdFilter::RowIdCursor cursor(*filter);
+		for (; cursor.exists(); cursor.next()) {
+			if (--rest <= 0) {
+				done = false;
+				break;
+			}
+			const int64_t lastId = static_cast<int64_t>(cursor.get()) - 1;
+			exprCxt.setLastTupleId(0, lastId);
+			proj.project(cxt);
+		}
+	}
+	return done;
+}
+
 uint32_t SQLContainerImpl::CursorImpl::getOutputIndex() {
 	return data_.outIndex_;
 }
@@ -397,7 +438,7 @@ void SQLContainerImpl::CursorImpl::setUpSearchContext(
 				opType = DSExpression::GT;
 			}
 
-			TermCondition c(
+			TermCondition c = makeTermCondition(
 					columnType, columnType,
 					opType, cond.column_, value.data(), value.size());
 			sc.addCondition(txn, c, forKey);
@@ -415,12 +456,28 @@ void SQLContainerImpl::CursorImpl::setUpSearchContext(
 				opType = DSExpression::LT;
 			}
 
-			TermCondition c(
+			TermCondition c = makeTermCondition(
 					columnType, columnType,
 					opType, cond.column_, value.data(), value.size());
 			sc.addCondition(txn, c, forKey);
 		}
+
+		if (cond.firstHitOnly_) {
+			sc.setLimit(1);
+			sc.setOutputOrder(
+					(cond.descending_ ? ORDER_DESCENDING : ORDER_ASCENDING));
+		}
 	}
+}
+
+TermCondition SQLContainerImpl::CursorImpl::makeTermCondition(
+		ColumnType columnType, ColumnType valueType,
+		DSExpression::Operation opType, uint32_t columnId,
+		const void *value, uint32_t valueSize) {
+	const bool opExtra = true;
+	return TermCondition(
+			columnType, valueType, opType, columnId, value, valueSize,
+			opExtra);
 }
 
 SQLContainerImpl::CursorImpl::RowsTargetType
@@ -441,7 +498,7 @@ SQLContainerImpl::CursorImpl::prepareFullScan(
 	IndexSearchContext &indexSc = prepareIndexSearchContext(cxt, NULL);
 	sc = &indexSc.tree();
 
-	RowIdFilter *rowIdFilter = checkRowIdFilter(cxt, txn, *container, true);
+	RowIdFilter *rowIdFilter = checkRowIdFilter(txn, *container, true);
 	scanner = tryCreateScanner(cxt, proj, *container, rowIdFilter);
 
 	ColumnIdList &columnList = indexSc.columnList();
@@ -490,11 +547,10 @@ SQLContainerImpl::CursorImpl::prepareRangeScan(
 	assert(container != NULL);
 
 	TransactionContext &txn = resolveTransactionContext();
-	ResultSet &resultSet = accessor_.resolveResultSet();
 
-	RowIdFilter *rowIdFilter = checkRowIdFilter(cxt, txn, *container, false);
+	RowIdFilter *rowIdFilter = checkRowIdFilter(txn, *container, false);
 	if (checkUpdatesStart(*handler, *oIdTable)) {
-		rowIdFilter = restartRangeScanWithUpdates(
+		rowIdFilter = &restartRangeScanWithUpdates(
 				cxt, txn, proj, *container, *oIdTable);
 	}
 
@@ -534,7 +590,7 @@ void SQLContainerImpl::CursorImpl::finishRangeScan(
 			detectRangeScanFinish(container, handler, oIdTable);
 
 	ResultSet &resultSet = accessor_.resolveResultSet();
-	RowIdFilter *rowIdFilter = findRowIdFilter();
+	RowIdFilter *rowIdFilter = accessor_.findRowIdFilter();
 
 	IndexSearchContext *sc =
 			accessor_.resolveScope().findIndexSearchContext();
@@ -550,14 +606,15 @@ void SQLContainerImpl::CursorImpl::finishRangeScan(
 		accessor_.activateResultSetPreserving(resultSet);
 	}
 
-	bool limitReached = false;
-	if (!totallyFinished && accessor_.isRowIdFilterLimitReached(rowIdFilter)) {
+	bool rowDuplicatable = false;
+	if (!totallyFinished && RowIdFilter::tryAdjust(rowIdFilter) &&
+			!accessor_.isRowDuplicatable() &&
+			oIdTable->isUpdatesAcceptable()) {
 		setRowDuplicatable(cxt);
-		limitReached = true;
+		rowDuplicatable = true;
 	}
 
-	if (totallyFinished || limitReached) {
-		accessor_.finishRowIdFilter(rowIdFilter);
+	if (totallyFinished || rowDuplicatable) {
 		applyRangeScanResultProfile(cxt, oIdTable);
 		done = true;
 	}
@@ -860,6 +917,11 @@ void SQLContainerImpl::CursorImpl::updatePartialExecutionSize(
 		return;
 	}
 
+	if (accessor_.isPartialExecCountBased()) {
+		cxt.setNextCountForSuspend(0);
+		return;
+	}
+
 	const std::pair<uint64_t, uint64_t> &range =
 			accessor_.getPartialExecSizeRange();
 	uint64_t &last = data_.lastPartialExecSize_;
@@ -890,7 +952,7 @@ bool SQLContainerImpl::CursorImpl::checkUpdatesStart(
 	return handler.isUpdated();
 }
 
-SQLContainerImpl::RowIdFilter*
+SQLContainerImpl::RowIdFilter&
 SQLContainerImpl::CursorImpl::restartRangeScanWithUpdates(
 		OpContext &cxt, TransactionContext &txn, const Projection &proj,
 		BaseContainer &container, OIdTable &oIdTable) {
@@ -908,8 +970,7 @@ SQLContainerImpl::CursorImpl::restartRangeScanWithUpdates(
 	clearScanner();
 
 	oIdTable.acceptUpdates();
-	return &resolveRowIdFilter(
-			cxt, accessor_.getMaxRowId(txn, container));
+	return accessor_.prepareRowIdFilter(txn, container);
 }
 
 bool SQLContainerImpl::CursorImpl::detectRangeScanFinish(
@@ -1133,9 +1194,15 @@ uint32_t SQLContainerImpl::CursorImpl::getIndexOrdinal(size_t pos) {
 SQLContainerImpl::IndexSearchContext&
 SQLContainerImpl::CursorImpl::prepareIndexSearchContext(
 		OpContext &cxt, const IndexScanInfo *info) {
+	const uint32_t partialExecMaxMillis = 10;
+	const uint32_t *partialExecMaxMillisRef =
+			(accessor_.isPartialExecCountBased() ?
+					NULL : &partialExecMaxMillis);
+
 	return accessor_.resolveScope().prepareIndexSearchContext(
 			cxt.getVarContext(), info, cxt.getAllocatorManager(),
-			cxt.getAllocator().base());
+			cxt.getAllocator().base(), partialExecMaxMillisRef,
+			accessor_.getPartialExecSizeRange());
 }
 
 SQLContainerImpl::CursorImpl::IndexConditionCursor&
@@ -1204,6 +1271,7 @@ void SQLContainerImpl::CursorImpl::setRowDuplicatable(OpContext &cxt) {
 		if (oIdTable != NULL) {
 			oIdTable->restartCursor();
 		}
+		accessor_.clearRowIdFilter();
 	}
 
 	setIndexAbortion(cxt, true);
@@ -1465,22 +1533,18 @@ TransactionContext& SQLContainerImpl::CursorImpl::resolveTransactionContext() {
 }
 
 SQLContainerImpl::RowIdFilter* SQLContainerImpl::CursorImpl::checkRowIdFilter(
-		OpContext &cxt, TransactionContext& txn, BaseContainer &container,
-		bool readOnly) {
-	RowIdFilter *rowIdFilter = findRowIdFilter();
-	if (rowIdFilter != NULL) {
-		return rowIdFilter;
-	}
+		TransactionContext& txn, BaseContainer &container, bool readOnly) {
+	RowIdFilter *rowIdFilter = accessor_.findRowIdFilter();
 
-	if (!accessor_.isRowIdFiltering()) {
-		return NULL;
-	}
+	if (rowIdFilter == NULL) {
+		if (!accessor_.isRowIdFiltering()) {
+			return NULL;
+		}
 
-	rowIdFilter =
-			&resolveRowIdFilter(cxt, accessor_.getMaxRowId(txn, container));
+		rowIdFilter = &accessor_.prepareRowIdFilter(txn, container);
+	}
 
 	if (readOnly || accessor_.isRowDuplicatable()) {
-		accessor_.restoreRowIdFilter(*rowIdFilter);
 		rowIdFilter->setReadOnly();
 	}
 
@@ -1495,6 +1559,7 @@ void SQLContainerImpl::CursorImpl::setUpOIdTable(
 	IndexGroupIdMap *map = ALLOC_NEW(alloc) IndexGroupIdMap(alloc);
 	IndexOrdinalMap *ordinalMap = ALLOC_NEW(alloc) IndexOrdinalMap(alloc);
 
+	bool suspendable = true;
 	const OIdTableGroupId rootId = -1;
 	OIdTableGroupId nextId = 0;
 	uint32_t nextOrdinal = 0;
@@ -1522,8 +1587,10 @@ void SQLContainerImpl::CursorImpl::setUpOIdTable(
 		ordinalMap->insert(std::make_pair(pos, nextOrdinal));
 		nextOrdinal++;
 
+		suspendable &= !(it->firstHitOnly_);
 		it += count;
 	}
+	oIdTable.setSuspendable(suspendable);
 
 	assert(data_.indexGroupIdMap_ == NULL);
 	assert(data_.indexOrdinalMap_ == NULL);
@@ -1532,21 +1599,9 @@ void SQLContainerImpl::CursorImpl::setUpOIdTable(
 	data_.indexOrdinalMap_ = ordinalMap;
 }
 
-SQLContainerImpl::RowIdFilter* SQLContainerImpl::CursorImpl::findRowIdFilter() {
-	return data_.rowIdFilter_.get();
-}
-
-SQLContainerImpl::RowIdFilter&
-SQLContainerImpl::CursorImpl::resolveRowIdFilter(
-		OpContext &cxt, RowId maxRowId) {
-	if (data_.rowIdFilter_.get() == NULL) {
-		data_.rowIdFilter_ = ALLOC_UNIQUE(
-				cxt.getValueContext().getVarAllocator(), RowIdFilter,
-				cxt.getAllocatorManager(), cxt.getAllocator().base(), maxRowId);
-	}
-	return *data_.rowIdFilter_;
-}
-
+//
+// CursorImpl::IndexConditionCursor
+//
 
 SQLContainerImpl::CursorImpl::IndexConditionCursor::IndexConditionCursor(
 		const SQLExprs::IndexConditionList &condList) :
@@ -1602,6 +1657,9 @@ size_t SQLContainerImpl::CursorImpl::IndexConditionCursor::getCurrentSubPosition
 	return currentSubPos_;
 }
 
+//
+// CursorImpl::Data
+//
 
 SQLContainerImpl::CursorImpl::Data::Data(
 		SQLValues::VarAllocator &varAlloc, Accessor &accessor) :
@@ -1617,6 +1675,9 @@ SQLContainerImpl::CursorImpl::Data::Data(
 		lastIndexProfiler_(NULL) {
 }
 
+//
+// CursorImpl::HolderImpl
+//
 
 SQLContainerImpl::CursorImpl::HolderImpl::HolderImpl(
 		SQLValues::VarAllocator &varAlloc, Accessor &accessor,
@@ -1652,6 +1713,9 @@ SQLContainerImpl::CursorImpl::HolderImpl::resolveAccessor() {
 	return static_cast<CursorAccessorImpl&>(accessor);
 }
 
+//
+// CursorAccessorImpl
+//
 
 SQLContainerImpl::CursorAccessorImpl::CursorAccessorImpl(const Source &source) :
 		varAlloc_(source.varAlloc_),
@@ -1681,6 +1745,7 @@ SQLContainerImpl::CursorAccessorImpl::CursorAccessorImpl(const Source &source) :
 		indexLimit_(source.indexLimit_),
 		memLimit_(source.memLimit_),
 		partialExecSizeRange_(source.partialExecSizeRange_),
+		partialExecCountBased_(source.partialExecCountBased_),
 		indexSelection_(NULL) {
 }
 
@@ -1806,6 +1871,10 @@ int64_t SQLContainerImpl::CursorAccessorImpl::getMemoryLimit() {
 const std::pair<uint64_t, uint64_t>&
 SQLContainerImpl::CursorAccessorImpl::getPartialExecSizeRange() {
 	return partialExecSizeRange_;
+}
+
+bool SQLContainerImpl::CursorAccessorImpl::isPartialExecCountBased() {
+	return partialExecCountBased_;
 }
 
 void SQLContainerImpl::CursorAccessorImpl::startScope(
@@ -2268,40 +2337,29 @@ SQLContainerImpl::CursorAccessorImpl::findOIdTable() {
 	return oIdTable_.get();
 }
 
-bool SQLContainerImpl::CursorAccessorImpl::isRowIdFilterLimitReached(
-		RowIdFilter *rowIdFilter) {
-	if (rowIdFilter == NULL || isRowDuplicatable()) {
-		return false;
-	}
+SQLContainerImpl::RowIdFilter&
+SQLContainerImpl::CursorAccessorImpl::prepareRowIdFilter(
+		TransactionContext &txn, BaseContainer &container) {
+	if (rowIdFilter_.get() == NULL) {
+		OpContext cxt(cxtSrc_);
+		const RowId maxRowId = getMaxRowId(txn, container);
+		const int64_t memLimit = getMemoryLimit();
 
-	const int64_t memLimit = getMemoryLimit();
-	if (memLimit < 0 || rowIdFilter->getTotalAllocationSize() <=
-			static_cast<uint64_t>(memLimit)) {
-		return false;
+		rowIdFilter_ = ALLOC_UNIQUE(
+				varAlloc_, RowIdFilter,
+				cxtSrc_, cxt.getAllocatorManager(), cxt.getAllocator().base(),
+				maxRowId, memLimit);
 	}
-
-	return true;
+	return *rowIdFilter_;
 }
 
-void SQLContainerImpl::CursorAccessorImpl::restoreRowIdFilter(
-		RowIdFilter &rowIdFilter) {
-	assert(rowIdFiltering_);
-	if (rowIdFilterId_.get() != NULL) {
-		rowIdFilter.load(cxtSrc_, *rowIdFilterId_);
-	}
+SQLContainerImpl::RowIdFilter*
+SQLContainerImpl::CursorAccessorImpl::findRowIdFilter() {
+	return rowIdFilter_.get();
 }
 
-void SQLContainerImpl::CursorAccessorImpl::finishRowIdFilter(
-		RowIdFilter *rowIdFilter) {
-	if (!rowIdFiltering_ || rowIdFilter == NULL || rowIdFilter->isReadOnly() ||
-			isRangeScanFinished()) {
-		return;
-	}
-
-	assert(rowIdFilterId_.get() == NULL);
-
-	rowIdFilterId_ = UTIL_MAKE_LOCAL_UNIQUE(
-			rowIdFilterId_, uint32_t, rowIdFilter->save(cxtSrc_));
+void SQLContainerImpl::CursorAccessorImpl::clearRowIdFilter() {
+	rowIdFilter_.reset();
 }
 
 TransactionContext&
@@ -2594,6 +2652,9 @@ bool SQLContainerImpl::CursorAccessorImpl::getBit(
 	return ((unitBits & targetBit) != 0);
 }
 
+//
+// DirectValueAccessor
+//
 
 template<TupleColumnType T, bool VarSize>
 template<BaseContainer::RowArrayType RAType, typename Ret>
@@ -2651,12 +2712,18 @@ inline Ret SQLContainerImpl::CursorAccessorImpl::DirectValueAccessor<
 			cxt.getVarContext(), baseObject, data);
 }
 
+//
+// Constants
+//
 
 const uint16_t SQLContainerImpl::Constants::SCHEMA_INVALID_COLUMN_ID =
 		std::numeric_limits<uint16_t>::max();
 const uint32_t SQLContainerImpl::Constants::ESTIMATED_ROW_ARRAY_ROW_COUNT =
 		50;
 
+//
+// ColumnCode
+//
 
 SQLContainerImpl::ColumnCode::ColumnCode() :
 		accessor_(NULL) {
@@ -2683,6 +2750,9 @@ void SQLContainerImpl::ColumnCode::initialize(
 	accessor_ = &accessor;
 }
 
+//
+// ColumnEvaluator
+//
 
 template<RowArrayType RAType, typename T, bool Nullable>
 inline typename
@@ -2699,6 +2769,9 @@ SQLContainerImpl::ColumnEvaluator<RAType, T, Nullable>::eval(
 			false);
 }
 
+//
+// IdExpression
+//
 
 SQLContainerImpl::IdExpression::VariantBase::~VariantBase() {
 }
@@ -2718,6 +2791,9 @@ TupleValue SQLContainerImpl::IdExpression::VariantAt<V>::eval(
 	return TupleValue(value);
 }
 
+//
+// GeneralCondEvaluator
+//
 
 void SQLContainerImpl::GeneralCondEvaluator::initialize(
 		ExprFactoryContext &cxt, const Expression *expr,
@@ -2728,6 +2804,9 @@ void SQLContainerImpl::GeneralCondEvaluator::initialize(
 	expr_ = expr;
 }
 
+//
+// VarCondEvaluator
+//
 
 void SQLContainerImpl::VarCondEvaluator::initialize(
 		ExprFactoryContext &cxt, const Expression *expr,
@@ -2738,6 +2817,9 @@ void SQLContainerImpl::VarCondEvaluator::initialize(
 	expr_ = expr;
 }
 
+//
+// ComparisonEvaluator
+//
 
 template<typename Func, size_t V>
 void SQLContainerImpl::ComparisonEvaluator<Func, V>::initialize(
@@ -2753,6 +2835,9 @@ void SQLContainerImpl::ComparisonEvaluator<Func, V>::initialize(
 	expr_.initializeCustom(cxt, code);
 }
 
+//
+// EmptyCondEvaluator
+//
 
 void SQLContainerImpl::EmptyCondEvaluator::initialize(
 		ExprFactoryContext &cxt, const Expression *expr,
@@ -2762,6 +2847,9 @@ void SQLContainerImpl::EmptyCondEvaluator::initialize(
 	static_cast<void>(argIndex);
 }
 
+//
+// RowIdCondEvaluator
+//
 
 template<typename Base, BaseContainer::RowArrayType RAType>
 SQLContainerImpl::RowIdCondEvaluator<Base, RAType>::RowIdCondEvaluator() :
@@ -2808,6 +2896,9 @@ void SQLContainerImpl::RowIdCondEvaluator<Base, RAType>::initialize(
 	accessor_ = &accessor;
 }
 
+//
+// GeneralProjector
+//
 
 void SQLContainerImpl::GeneralProjector::initialize(
 		ProjectionFactoryContext &cxt, const Projection *proj) {
@@ -2821,6 +2912,9 @@ bool SQLContainerImpl::GeneralProjector::update(OpContext &cxt) {
 	return true;
 }
 
+//
+// CountProjector
+//
 
 bool SQLContainerImpl::CountProjector::update(OpContext &cxt) {
 	SQLValues::VarContext::Scope varScope(cxt.getVarContext());
@@ -2852,6 +2946,9 @@ void SQLContainerImpl::CountProjector::initialize(
 	column_ = tupleSet->getModifiableColumnList()[aggrIndex];
 }
 
+//
+// CursorRef
+//
 
 SQLContainerImpl::CursorRef::CursorRef() :
 		cursor_(NULL),
@@ -2896,6 +2993,9 @@ void SQLContainerImpl::CursorRef::addContextRef(ExprContext **ref) {
 	resolveCursor().addContextRef(ref);
 }
 
+//
+// ScannerHandlerBase::HandlerVariantUtils
+//
 
 size_t
 SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils::toInputSourceNumber(
@@ -2981,6 +3081,9 @@ getFilterProjectionElements(const Projection &src) {
 	return std::make_pair(filterExpr, chainProj);
 }
 
+//
+// ScannerHandlerBase::VariantTraits
+//
 
 size_t SQLContainerImpl::ScannerHandlerBase::VariantTraits::resolveVariant(
 		FactoryContext &cxt, const Projection &proj) {
@@ -3099,6 +3202,9 @@ size_t SQLContainerImpl::ScannerHandlerBase::VariantTraits::resolveVariant(
 			condNumBase + condNum;
 }
 
+//
+// ScannerHandlerBase::VariantAt
+//
 
 template<size_t V>
 SQLContainerImpl::ScannerHandlerBase::VariantAt<V>::VariantAt(
@@ -3144,6 +3250,9 @@ inline bool SQLContainerImpl::ScannerHandlerBase::VariantAt<V>::update(
 	return true;
 }
 
+//
+// ScannerHandlerFactory
+//
 
 const SQLContainerImpl::ScannerHandlerFactory
 &SQLContainerImpl::ScannerHandlerFactory::FACTORY_INSTANCE =
@@ -3234,6 +3343,9 @@ SQLContainerImpl::ScannerHandlerFactory::ScannerHandlerFactory() :
 		factoryFunc_(NULL) {
 }
 
+//
+// BaseRegistrar
+//
 
 SQLContainerImpl::BaseRegistrar::BaseRegistrar(
 		const BaseRegistrar &subRegistrar) throw() :
@@ -3271,6 +3383,9 @@ void SQLContainerImpl::BaseRegistrar::addScannerVariants() const {
 			SQLExprs::VariantsRegistrarBase<ScannerVariantTraits>::add<0, S, Begin, End>());
 }
 
+//
+// BaseRegistrar::ScannerVariantTraits
+//
 
 template<typename V>
 SQLContainerImpl::BaseRegistrar::ScannerVariantTraits::ObjectType&
@@ -3282,6 +3397,9 @@ SQLContainerImpl::BaseRegistrar::ScannerVariantTraits::create(
 	return *cxt.second;
 }
 
+//
+// DefaultRegistrar
+//
 
 const SQLContainerImpl::BaseRegistrar
 SQLContainerImpl::DefaultRegistrar::REGISTRAR_INSTANCE((DefaultRegistrar()));
@@ -3302,7 +3420,9 @@ void SQLContainerImpl::DefaultRegistrar::operator()() const {
 	addScannerVariants<ScannerHandlerBase>();
 }
 
-
+//
+// SearchResult
+//
 
 SQLContainerImpl::SearchResult::SearchResult(util::StackAllocator &alloc) :
 		normalEntry_(alloc),
@@ -3363,6 +3483,9 @@ SQLContainerImpl::SearchResult::mvccRa() {
 	return mvccEntry_.getOIdList(true);
 }
 
+//
+// SearchResult::Entry
+//
 
 SQLContainerImpl::SearchResult::Entry::Entry(util::StackAllocator &alloc) :
 		rowOIdList_(alloc),
@@ -3397,7 +3520,44 @@ inline void SQLContainerImpl::SearchResult::Entry::swap(Entry &another) {
 	rowArrayOIdList_.swap(another.rowArrayOIdList_);
 }
 
+//
+// ExtendedSuspendLimitter
+//
 
+SQLContainerImpl::ExtendedSuspendLimitter::ExtendedSuspendLimitter(
+		util::Stopwatch &watch, uint32_t partialExecMaxMillis,
+		const std::pair<uint64_t, uint64_t> &partialExecSizeRange) :
+		watch_(watch),
+		partialExecMaxMillis_(partialExecMaxMillis),
+		partialExecSizeRange_(partialExecSizeRange) {
+}
+
+SQLContainerImpl::ExtendedSuspendLimitter::~ExtendedSuspendLimitter() {
+}
+
+bool SQLContainerImpl::ExtendedSuspendLimitter::isLimitReachable(
+		ResultSize &nextLimit) {
+	const uint64_t max = partialExecSizeRange_.second * 10;
+
+	const uint64_t baseStep = std::min(std::min(
+			partialExecSizeRange_.first, partialExecSizeRange_.second), max);
+	const uint64_t step =
+			std::min(std::max(nextLimit + baseStep, nextLimit), max) - nextLimit;
+	if (step <= 0) {
+		return true;
+	}
+
+	if (watch_.elapsedMillis() >= partialExecMaxMillis_) {
+		return true;
+	}
+
+	nextLimit += step;
+	return false;
+}
+
+//
+// IndexConditionUpdator
+//
 
 SQLContainerImpl::IndexConditionUpdator::IndexConditionUpdator(
 		TransactionContext &txn, SQLValues::VarContext &varCxt) :
@@ -3424,13 +3584,9 @@ SQLContainerImpl::IndexConditionUpdator::prepare(
 			assert(false);
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 		}
-		if (byReader_.get() == NULL) {
-			byReader_ = ALLOC_UNIQUE(alloc_, ByReader, txn_);
-		}
-		byReader_->assign(
-				container, valuesHolder, selector, *condList, *columnList,
-				*reader, pos, nextPos);
-		return byReader_.get();
+		return &ByReader::create(
+				txn_, container, valuesHolder, selector, *condList,
+				*columnList, *reader, pos, nextPos, byReader_);
 	}
 
 	if (ByValue::isAcceptable(*condList, pos)) {
@@ -3448,6 +3604,9 @@ size_t SQLContainerImpl::IndexConditionUpdator::getSubPosition() {
 	return subPos_;
 }
 
+//
+// IndexConditionUpdator::ByValue
+//
 
 SQLContainerImpl::IndexConditionUpdator::ByValue::ByValue(
 		TransactionContext &txn, size_t &subPos) :
@@ -3530,7 +3689,9 @@ void SQLContainerImpl::IndexConditionUpdator::ByValue::assign(
 
 void SQLContainerImpl::IndexConditionUpdator::ByValue::update(
 		BtreeSearchContext &sc) {
-	assert(subPos_ < endPos_);
+	if (subPos_ >= endPos_) {
+		return;
+	}
 	assert(subPos_ + columnTypeList_.size() <= endPos_);
 
 	valuePool_.clear();
@@ -3541,15 +3702,14 @@ void SQLContainerImpl::IndexConditionUpdator::ByValue::update(
 	SQLExprs::IndexConditionList::const_iterator it = condList_->begin() + subPos_;
 	SQLExprs::IndexConditionList::const_iterator end = it + columnTypeList_.size();
 	for (; it != end; ++it) {
-		Value &value = ContainerValueUtils::toContainerValue(
-				valuePool_, it->valuePair_.first);
-		termCondList_.push_back(TermCondition(
+		termCondList_.push_back(CursorImpl::makeTermCondition(
 				*typeIt, *typeIt,
-				DSExpression::EQ, it->column_, value.data(), value.size()));
+				DSExpression::EQ, it->column_, NULL, 0));
 		++typeIt;
 	}
 
 	sc.setKeyConditions(&termCondList_[0], termCondList_.size());
+	updateKeySet();
 }
 
 void SQLContainerImpl::IndexConditionUpdator::ByValue::next() {
@@ -3559,24 +3719,33 @@ void SQLContainerImpl::IndexConditionUpdator::ByValue::next() {
 	if (subPos_ >= endPos_) {
 		assert(subPos_ <= endPos_);
 		close();
+		return;
+	}
+
+	updateKeySet();
+}
+
+inline void SQLContainerImpl::IndexConditionUpdator::ByValue::updateKeySet() {
+	assert(subPos_ + columnTypeList_.size() <= endPos_);
+	valuePool_.clear();
+
+	BtreeSearchContext *sc = getActiveSearchContext();
+	assert(sc != NULL);
+
+	size_t keyPos = 0;
+	SQLExprs::IndexConditionList::const_iterator it = condList_->begin() + subPos_;
+	SQLExprs::IndexConditionList::const_iterator end = it + columnTypeList_.size();
+	for (; it != end; ++it) {
+		Value &value = ContainerValueUtils::toContainerValue(
+				valuePool_, it->valuePair_.first);
+		sc->setKeyConditionValue(keyPos, &value);
+		++keyPos;
 	}
 }
 
-
-SQLContainerImpl::IndexConditionUpdator::ByReader::ByReader(
-		TransactionContext &txn) :
-		txn_(txn),
-		alloc_(txn.getDefaultAllocator()),
-		selector_(NULL),
-		valuesHolder_(NULL),
-		subCondList_(alloc_),
-		localSubCondList_(alloc_),
-		columnList_(alloc_),
-		columnTypeList_(alloc_),
-		termCondList_(alloc_),
-		valuePool_(alloc_),
-		reader_(NULL) {
-}
+//
+// IndexConditionUpdator::ByReader
+//
 
 SQLContainerImpl::IndexConditionUpdator::ByReader::~ByReader() {
 }
@@ -3599,140 +3768,511 @@ bool SQLContainerImpl::IndexConditionUpdator::ByReader::isAcceptable(
 	return drivingSome;
 }
 
-void SQLContainerImpl::IndexConditionUpdator::ByReader::assign(
-		BaseContainer &container, SQLValues::ValueSetHolder &valuesHolder,
+SQLContainerImpl::BtreeConditionUpdator&
+SQLContainerImpl::IndexConditionUpdator::ByReader::create(
+		TransactionContext &txn, BaseContainer &container,
+		SQLValues::ValueSetHolder &valuesHolder,
 		const SQLExprs::IndexSelector *selector,
 		const SQLExprs::IndexConditionList &condList,
 		const util::Vector<SQLValues::TupleColumn> &columnList,
-		TupleListReader &reader, size_t pos, size_t &nextPos) {
+		TupleListReader &reader, size_t pos, size_t &nextPos,
+		util::AllocUniquePtr<ByReader> &updator) {
 	assert(isAcceptable(condList, pos));
 	assert(selector != NULL);
 
-	valuesHolder.reset();
+	Data data(txn, valuesHolder, selector, reader);
+	if (updator.get() != NULL) {
+		swapElements(updator->data_, data);
+		clearElements(data);
+		updator.reset();
+	}
+
+	bool somePromotable;
+	const size_t endPos = setUpEntries(
+			container, condList, columnList, pos, data.columnTypeList_,
+			data.entryList_, somePromotable);
+
+	generateTypedUpdator(
+			somePromotable, isComposite(data.entryList_),
+			getKeyType(data.columnTypeList_.front()), data, updator);
+
+	if (!updator->updateKeySet()) {
+		updator->close();
+	}
+	updator->data_.bindable_ = true;
+
+	nextPos = endPos;
+	return *updator;
+}
+
+void SQLContainerImpl::IndexConditionUpdator::ByReader::update(
+		BtreeSearchContext &sc) {
+	const bool withValues = false;
+	applyKeyConditions(sc, withValues, NULL);
+
+	if (!updateKeySet()) {
+		close();
+	}
+}
+
+SQLContainerImpl::IndexConditionUpdator::ByReader::ByReader(Data &src) :
+		data_(src.txn_, src.valuesHolder_, &src.selector_, src.reader_) {
+	swapElements(src, data_);
+}
+
+template<typename SomePromo, typename Compo, typename T>
+inline void SQLContainerImpl::IndexConditionUpdator::ByReader::nextAt() {
+	TupleListReader &reader = data_.reader_;
+	assert(reader.exists());
+
+	reader.next();
+	if (!updateKeySetAt<SomePromo, Compo, T>()) {
+		close();
+	}
+}
+
+void SQLContainerImpl::IndexConditionUpdator::ByReader::generateTypedUpdator(
+		bool somePromotable, bool composite, TupleColumnType frontKeyType,
+		Data &data, util::AllocUniquePtr<ByReader> &updator) {
+	typedef util::TrueType True;
+	typedef util::FalseType False;
+
+	SQLValues::TypeSwitcher switcher(frontKeyType);
+	if (somePromotable) {
+		if (composite) {
+			generateTypedUpdatorAt<True, True, void>(data, updator);
+		}
+		else {
+			generateTypedUpdatorAt<True, False, void>(data, updator);
+		}
+	}
+	else {
+		if (composite) {
+			Generator<True> generator;
+			switcher(generator, data, updator);
+		}
+		else {
+			Generator<False> generator;
+			switcher(generator, data, updator);
+		}
+	}
+}
+
+template<typename SomePromo, typename Compo, typename T>
+void SQLContainerImpl::IndexConditionUpdator::ByReader::generateTypedUpdatorAt(
+		Data &data, util::AllocUniquePtr<ByReader> &updator) {
+	typedef Typed<SomePromo, Compo, T> TypedUpdator;
+	updator = util::AllocUniquePtr<ByReader>::of(
+			ALLOC_NEW(data.alloc_) TypedUpdator(data), data.alloc_);
+}
+
+SQLContainerImpl::IndexConditionUpdator::ByReader::KeyUpdatorFunc
+SQLContainerImpl::IndexConditionUpdator::ByReader::generateKeyUpdator(
+		bool promotable, TupleColumnType keyType) {
+	typedef util::TrueType True;
+	typedef util::FalseType False;
+
+	SQLValues::TypeSwitcher switcher(keyType);
+	if (promotable) {
+		SubGenerator<True> generator;
+		return switcher(generator);
+	}
+	else {
+		SubGenerator<False> generator;
+		return switcher(generator);
+	}
+}
+
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::updateKeySet() {
+	typedef util::TrueType SomePromo;
+	if (isComposite(data_.entryList_)) {
+		return updateKeySetAt<SomePromo, util::TrueType, void>();
+	}
+	else {
+		return updateKeySetAt<SomePromo, util::FalseType, void>();
+	}
+}
+
+template<typename SomePromo, typename Compo, typename T>
+inline bool SQLContainerImpl::IndexConditionUpdator::ByReader::updateKeySetAt() {
+	TupleListReader &reader = data_.reader_;
+
+	for (;;) {
+		if (!reader.exists()) {
+			return false;
+		}
+
+		const bool updated = updateCurrentKeySet<SomePromo, Compo, T>();
+
+		if (SomePromo::VALUE && !updated) {
+			reader.next();
+			continue;
+		}
+
+		return true;
+	}
+}
+
+template<typename SomePromo, typename Compo, typename T>
+inline
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::updateCurrentKeySet() {
+	UTIL_STATIC_ASSERT((!SomePromo::VALUE == !util::IsSame<T, void>::VALUE));
+
+	Entry &entry = data_.entryList_.front();
+
+	if (SomePromo::VALUE) {
+		data_.valuesHolder_.reset();
+		if (!entry.keyUpdatorFunc_(*this, entry)) {
+			return false;
+		}
+	}
+	else {
+		updateKey<util::FalseType, T>(entry, SomePromo());
+	}
+
+	if (Compo::VALUE) {
+		updateFollowingKeySet<SomePromo>();
+	}
+
+	return true;
+}
+
+template<typename SomePromo>
+void
+SQLContainerImpl::IndexConditionUpdator::ByReader::updateFollowingKeySet() {
+	const util::Vector<Entry>::iterator begin = data_.entryList_.begin();
+	util::Vector<Entry>::iterator it = begin;
+
+	++it;
+	assert(it != data_.entryList_.end());
+	do {
+		const bool updated = it->keyUpdatorFunc_(*this, *it);
+		if (SomePromo::VALUE && !updated) {
+			break;
+		}
+	}
+	while (++it != data_.entryList_.end());
+
+	if (SomePromo::VALUE && data_.bindable_) {
+		BtreeSearchContext *sc = getActiveSearchContext();
+		assert(sc != NULL);
+
+		const bool withValues = true;
+		const size_t keyCount = static_cast<size_t>(it - begin);
+		applyKeyConditions(*sc, withValues, &keyCount);
+	}
+}
+
+template<typename Promo, typename T>
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::executeKeyUpdator(
+		ByReader &updator, Entry &entry) {
+	return updator.updateKey<Promo, T>(entry, util::FalseType());
+}
+
+template<typename, typename T>
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::updateKey(
+		Entry&, const util::TrueType&) {
+	UTIL_STATIC_ASSERT((util::IsSame<T, void>::VALUE));
+	assert(false);
+	return false;
+}
+
+template<typename Promo, typename T>
+inline bool SQLContainerImpl::IndexConditionUpdator::ByReader::updateKey(
+		Entry &entry, const util::FalseType&) {
+	UTIL_STATIC_ASSERT((!util::IsSame<T, void>::VALUE));
+
+	if (!readKey<T>(entry, Promo())) {
+		return false;
+	}
+
+	if (!SQLValues::TypeUtils::Traits<T::COLUMN_TYPE>::FOR_NORMAL_FIXED &&
+			data_.bindable_) {
+		BtreeSearchContext *sc = getActiveSearchContext();
+		assert(sc != NULL);
+
+		TupleValue &key = getKeyRef(entry);
+		sc->setKeyConditionValueData(
+				entry.keyPos_,
+				SQLValues::ValueUtils::getData(key),
+				static_cast<uint32_t>(
+						SQLValues::ValueUtils::getDataSize(key)));
+	}
+
+	return true;
+}
+
+template<typename>
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::readKey(
+		Entry &entry, const util::TrueType&) {
+	TupleListReader &reader = data_.reader_;
+	assert(reader.exists());
+
+	const SQLExprs::IndexCondition &subCond = entry.subCond_;
+	if (!findInputColumnPos(subCond, NULL)) {
+		return true;
+	}
+
+	SQLExprs::IndexCondition &localSubCond = entry.localSubCond_;
+
+	const TupleValue &baseValue = SQLValues::ValueUtils::readCurrentAny(
+			reader, entry.inColumn_);
+	assert(!SQLValues::ValueUtils::isNull(baseValue));
+
+	localSubCond = subCond;
+	return data_.selector_.bindCondition(
+			localSubCond, baseValue, TupleValue(), data_.valuesHolder_);
+}
+
+template<typename T>
+inline bool SQLContainerImpl::IndexConditionUpdator::ByReader::readKey(
+		Entry &entry, const util::FalseType&) {
+	TupleListReader &reader = data_.reader_;
+	assert(reader.exists());
+
+	getKeyRef(entry) = SQLValues::ValueUtils::toAnyByValue<T::COLUMN_TYPE>(
+			SQLValues::ValueUtils::readCurrentValue<T>(
+					reader, entry.inColumn_));
+	return true;
+}
+
+void SQLContainerImpl::IndexConditionUpdator::ByReader::applyKeyConditions(
+		BtreeSearchContext &sc, bool withValues, const size_t *keyCount) {
+	util::Vector<Entry> &entryList = data_.entryList_;
+	const size_t targetKeyCount =
+			(keyCount == NULL ? entryList.size() : *keyCount);
+	assert(targetKeyCount <= entryList.size());
+
+	const util::Vector<ContainerColumnType> &columnTypeList =
+			data_.columnTypeList_;
+	assert(entryList.size() <= columnTypeList.size());
+
+	util::Vector<TermCondition> &termCondList = data_.termCondList_;
+	termCondList.clear();
+
+	util::Vector<ContainerColumnType>::const_iterator typeIt =
+			columnTypeList.begin();
+
+	util::Vector<Entry>::iterator it = entryList.begin();
+	util::Vector<Entry>::iterator end = it + targetKeyCount;
+	for (; it != end; ++it) {
+		uint32_t keySize;
+		const void *keyData = prepareKeyData(withValues, *it, keySize);
+
+		termCondList.push_back(CursorImpl::makeTermCondition(
+				*typeIt, *typeIt,
+				DSExpression::EQ, it->subCond_.column_, keyData, keySize));
+		++typeIt;
+	}
+
+	sc.setKeyConditions(&termCondList[0], targetKeyCount);
+}
+
+const void* SQLContainerImpl::IndexConditionUpdator::ByReader::prepareKeyData(
+		bool withValues, Entry &entry, uint32_t &keySize) {
+	keySize = 0;
+
+	const TupleColumnType type =
+			SQLValues::TypeUtils::toNonNullable(entry.keyType_);
+	if (!withValues && !SQLValues::TypeUtils::isNormalFixed(type)) {
+		return NULL;
+	}
+
+	TupleValue &key = getKeyRef(entry);
+
+	if (!withValues) {
+		SQLValues::ValueContext valueCxt(
+				SQLValues::ValueContext::ofAllocator(data_.alloc_));
+		key = SQLValues::ValueUtils::createEmptyValue(valueCxt, type);
+	}
+
+	keySize = static_cast<uint32_t>(SQLValues::ValueUtils::getDataSize(key));
+	return SQLValues::ValueUtils::getData(key);
+}
+
+void SQLContainerImpl::IndexConditionUpdator::ByReader::swapElements(
+		Data &src, Data &dest) {
+	src.entryList_.swap(dest.entryList_);
+	src.columnTypeList_.swap(dest.columnTypeList_);
+	src.termCondList_.swap(dest.termCondList_);
+}
+
+void SQLContainerImpl::IndexConditionUpdator::ByReader::clearElements(
+		Data &data) {
+	data.entryList_.clear();
+	data.columnTypeList_.clear();
+	data.termCondList_.clear();
+}
+
+size_t SQLContainerImpl::IndexConditionUpdator::ByReader::setUpEntries(
+		const BaseContainer &container,
+		const SQLExprs::IndexConditionList &condList,
+		const util::Vector<SQLValues::TupleColumn> &columnList,
+		size_t pos, util::Vector<ContainerColumnType> &columnTypeList,
+		util::Vector<Entry> &entryList, bool &somePromotable) {
+	somePromotable = false;
 
 	const size_t distance =
 			SQLExprs::IndexSelector::nextCompositeConditionDistance(
 					condList.begin() + pos, condList.end());
 	const size_t endPos = pos + distance;
 
-	const uint32_t emptyColumn = SQLExprs::IndexCondition::EMPTY_IN_COLUMN;
-	subCondList_.clear();
-	columnList_.clear();
-	for (size_t i = 0; i < distance; i++) {
-		const SQLExprs::IndexCondition &cond = condList[pos + i];
+	CursorImpl::setUpConditionColumnTypeList(
+			container,
+			condList.begin() + pos,
+			condList.begin() + endPos,
+			columnTypeList);
 
-		if (cond.opType_ != SQLType::OP_EQ && !cond.isBinded()) {
-			if (i == 0) {
-				assert(false);
-				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-			}
+	for (size_t i = 0; i < distance; i++) {
+		bool promotable;
+		if (!tryAppendEntry(
+				condList[pos + i], columnList, columnTypeList, entryList,
+				promotable)) {
 			break;
 		}
-
-		subCondList_.push_back(cond);
-
-		const std::pair<uint32_t, uint32_t> &pair = cond.inColumnPair_;
-		if (pair.first != emptyColumn) {
-			columnList_.push_back(columnList[pair.first]);
-		}
-		assert(pair.second == emptyColumn);
+		somePromotable |= promotable;
 	}
-	localSubCondList_ = subCondList_;
-
-	CursorImpl::setUpConditionColumnTypeList(
-			container, subCondList_.begin(), subCondList_.end(),
-			columnTypeList_);
-
-	selector_ = selector;
-	reader_ = &reader;
-	valuesHolder_ = &valuesHolder;
-
-	reset();
-	if (!readValues()) {
-		close();
-	}
-
-	nextPos = endPos;
+	assert(!entryList.empty());
+	return endPos;
 }
 
-void SQLContainerImpl::IndexConditionUpdator::ByReader::update(
-		BtreeSearchContext &sc) {
-	assert(reader_ != NULL && reader_->exists());
-	sc.setKeyConditions(&termCondList_[0], termCondList_.size());
-}
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::tryAppendEntry(
+		const SQLExprs::IndexCondition &cond,
+		const util::Vector<SQLValues::TupleColumn> &columnList,
+		const util::Vector<ContainerColumnType> &columnTypeList,
+		util::Vector<Entry> &entryList, bool &promotable) {
+	promotable = false;
 
-void SQLContainerImpl::IndexConditionUpdator::ByReader::next() {
-	assert(reader_ != NULL && reader_->exists());
-	reader_->next();
-	if (!readValues()) {
-		close();
+	const size_t keyPos = entryList.size();
+	if (!isAssignableKey(keyPos, cond)) {
+		return false;
 	}
-}
 
-bool SQLContainerImpl::IndexConditionUpdator::ByReader::readValues() {
-	assert(reader_ != NULL);
+	assert(keyPos < columnTypeList.size());
+	const TupleColumnType keyType = getKeyType(columnTypeList[keyPos]);
+	const SQLValues::TupleColumn &inColumn = getInputColumn(cond, columnList);
 
-	while (reader_->exists()) {
-		if (readValuesDetail()) {
-			return true;
-		}
-		reader_->next();
-	}
-	return false;
-}
+	promotable = isPromotable(keyType, inColumn);
+	KeyUpdatorFunc keyUpdatorFunc = generateKeyUpdator(promotable, keyType);
 
-bool SQLContainerImpl::IndexConditionUpdator::ByReader::readValuesDetail() {
-	assert(reader_ != NULL);
-	assert(reader_->exists());
-
-	valuesHolder_->reset();
-	valuePool_.clear();
-	termCondList_.clear();
-
-	const uint32_t emptyColumn = SQLExprs::IndexCondition::EMPTY_IN_COLUMN;
-
-	util::Vector<SQLValues::TupleColumn>::const_iterator columnIt =
-			columnList_.begin();
-	SQLExprs::IndexConditionList::iterator destIt = localSubCondList_.begin();
-	util::Vector<ContainerColumnType>::iterator typeIt = columnTypeList_.begin();
-
-	SQLExprs::IndexConditionList::iterator it = subCondList_.begin();
-	for (; it != subCondList_.end(); ++it) {
-		const std::pair<uint32_t, uint32_t> &pair = it->inColumnPair_;
-		assert(pair.second == emptyColumn);
-
-		if (pair.first != emptyColumn) {
-			const TupleValue baseValue =
-					SQLValues::ValueUtils::readCurrentAny(*reader_, *columnIt);
-			assert(!SQLValues::ValueUtils::isNull(baseValue));
-
-			*destIt = *it;
-			if (!selector_->bindCondition(
-					*destIt, baseValue, TupleValue(), *valuesHolder_)) {
-				break;
-			}
-
-		}
-
-		Value &value = ContainerValueUtils::toContainerValue(
-				valuePool_, destIt->valuePair_.first);
-		termCondList_.push_back(TermCondition(
-				*typeIt, *typeIt,
-				DSExpression::EQ, it->column_, value.data(), value.size()));
-
-		++columnIt;
-		++destIt;
-		++typeIt;
-	}
+	Entry entry(keyPos, keyType, cond, inColumn, keyUpdatorFunc);
+	entryList.push_back(entry);
 
 	return true;
 }
 
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::isAssignableKey(
+		size_t keyPos, const SQLExprs::IndexCondition &cond) {
+	if (cond.opType_ != SQLType::OP_EQ || (cond.isBinded() && keyPos == 0)) {
+		if (keyPos == 0) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		return false;
+	}
+	return true;
+}
+
+TupleColumnType SQLContainerImpl::IndexConditionUpdator::ByReader::getKeyType(
+		ContainerColumnType src) {
+	return ContainerValueUtils::toTupleColumnType(src, false);
+}
+
+inline TupleValue&
+SQLContainerImpl::IndexConditionUpdator::ByReader::getKeyRef(Entry &entry) {
+	return entry.localSubCond_.valuePair_.first;
+}
+
+SQLValues::TupleColumn
+SQLContainerImpl::IndexConditionUpdator::ByReader::getInputColumn(
+		const SQLExprs::IndexCondition &cond,
+		const util::Vector<SQLValues::TupleColumn> &columnList) {
+	uint32_t columnPos;
+	if (!findInputColumnPos(cond, &columnPos)) {
+		return SQLValues::TupleColumn();
+	}
+
+	assert(columnPos < columnList.size());
+	return columnList[columnPos];
+}
+
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::findInputColumnPos(
+		const SQLExprs::IndexCondition &cond, uint32_t *columnPos) {
+	if (columnPos == NULL) {
+		uint32_t localColumnPos;
+		return findInputColumnPos(cond, &localColumnPos);
+	}
+
+	const uint32_t emptyColumn = SQLExprs::IndexCondition::EMPTY_IN_COLUMN;
+	*columnPos = emptyColumn;
+
+	const std::pair<uint32_t, uint32_t> &pair = cond.inColumnPair_;
+	assert(pair.second == emptyColumn);
+
+	if (pair.first == emptyColumn) {
+		return false;
+	}
+
+	*columnPos = pair.first;
+	return true;
+}
+
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::isPromotable(
+		TupleColumnType keyType, const SQLValues::TupleColumn &inColumn) {
+	return (keyType !=
+			SQLValues::TypeUtils::toNonNullable(inColumn.type_));
+}
+
+bool SQLContainerImpl::IndexConditionUpdator::ByReader::isComposite(
+		const util::Vector<Entry> &entryList) {
+	return (entryList.size() > 1);
+}
+
+//
+// IndexConditionUpdator::ByReader::Entry
+//
+
+SQLContainerImpl::IndexConditionUpdator::ByReader::Entry::Entry(
+		size_t keyPos, TupleColumnType keyType,
+		const SQLExprs::IndexCondition &subCond,
+		const SQLValues::TupleColumn &inColumn, KeyUpdatorFunc func) :
+		keyPos_(keyPos),
+		keyType_(keyType),
+		subCond_(subCond),
+		localSubCond_(subCond),
+		inColumn_(inColumn),
+		keyUpdatorFunc_(func) {
+}
+
+//
+// IndexConditionUpdator::ByReader::Data
+//
+
+SQLContainerImpl::IndexConditionUpdator::ByReader::Data::Data(
+		TransactionContext &txn, SQLValues::ValueSetHolder &valuesHolder,
+		const SQLExprs::IndexSelector *selector, TupleListReader &reader) :
+		txn_(txn),
+		alloc_(txn.getDefaultAllocator()),
+		valuesHolder_(valuesHolder),
+		selector_(*selector),
+		entryList_(alloc_),
+		columnTypeList_(alloc_),
+		termCondList_(alloc_),
+		reader_(reader),
+		bindable_(false) {
+	assert(selector != NULL);
+}
+
+//
+// IndexSearchContext
+//
 
 SQLContainerImpl::IndexSearchContext::IndexSearchContext(
 		TransactionContext &txn, SQLValues::VarContext &varCxt,
 		SQLOps::OpAllocatorManager &allocManager,
-		util::StackAllocator::BaseAllocator &baseAlloc) :
+		util::StackAllocator::BaseAllocator &baseAlloc,
+		util::Stopwatch &watch, const uint32_t *partialExecMaxMillis,
+		const std::pair<uint64_t, uint64_t> &partialExecSizeRange) :
 		alloc_(txn.getDefaultAllocator()),
 		settingAllocRef_(allocManager, baseAlloc),
 		condList_(NULL),
@@ -3744,6 +4284,14 @@ SQLContainerImpl::IndexSearchContext::IndexSearchContext(
 		indexConditionUpdator_(txn, varCxt),
 		result_(alloc_) {
 	tree_.setPool(&scPool_);
+
+	if (partialExecMaxMillis != NULL) {
+		suspendLimitter_ = UTIL_MAKE_LOCAL_UNIQUE(
+				suspendLimitter_, ExtendedSuspendLimitter,
+				watch, *partialExecMaxMillis, partialExecSizeRange);
+		tree_.getSuspendLimitter() =
+				BaseIndex::SuspendLimitter(suspendLimitter_.get());
+	}
 }
 
 void SQLContainerImpl::IndexSearchContext::clear() {
@@ -3795,6 +4343,9 @@ SQLContainerImpl::IndexSearchContext::result() {
 	return result_;
 }
 
+//
+// CursorScope
+//
 
 SQLContainerImpl::CursorScope::CursorScope(
 		ExtOpContext &cxt, const TupleColumnList &inColumnList,
@@ -3845,11 +4396,14 @@ SQLContainerImpl::IndexSearchContext&
 SQLContainerImpl::CursorScope::prepareIndexSearchContext(
 		SQLValues::VarContext &varCxt, const IndexScanInfo *info,
 		SQLOps::OpAllocatorManager &allocManager,
-		util::StackAllocator::BaseAllocator &baseAlloc) {
+		util::StackAllocator::BaseAllocator &baseAlloc,
+		const uint32_t *partialExecMaxMillis,
+		const std::pair<uint64_t, uint64_t> &partialExecSizeRange) {
 	if (findIndexSearchContext() == NULL) {
 		indexSearchContext_ = UTIL_MAKE_LOCAL_UNIQUE(
 				indexSearchContext_, IndexSearchContext,
-				txn_, varCxt, allocManager, baseAlloc);
+				txn_, varCxt, allocManager, baseAlloc, watch_,
+				partialExecMaxMillis, partialExecSizeRange);
 	}
 	indexSearchContext_->setInfo(info);
 	return *indexSearchContext_;
@@ -4094,6 +4648,9 @@ ResultSetId SQLContainerImpl::CursorScope::findResultSetId(
 	return resultSet->getId();
 }
 
+//
+// LocalCursorScope
+//
 
 SQLContainerImpl::LocalCursorScope::LocalCursorScope(
 		OpContext &cxt, CursorAccessorImpl &accessor) :
@@ -4125,12 +4682,18 @@ void SQLContainerImpl::LocalCursorScope::closeWithError(
 	data_.accessor_.handleSearchError(e);
 }
 
+//
+// LocalCursorScope::Data
+//
 
 SQLContainerImpl::LocalCursorScope::Data::Data(CursorAccessorImpl &accessor) :
 		accessor_(accessor),
 		closed_(false) {
 }
 
+//
+// ContainerNameFormatter
+//
 
 SQLContainerImpl::ContainerNameFormatter::ContainerNameFormatter(
 		TransactionContext &txn, BaseContainer &container,
@@ -4165,6 +4728,9 @@ std::ostream& operator<<(
 	return formatter.format(os);
 }
 
+//
+// MetaScanHandler
+//
 
 SQLContainerImpl::MetaScanHandler::MetaScanHandler(
 		OpContext &cxt, CursorImpl &cursor, const Projection &proj) :
@@ -4196,6 +4762,9 @@ void SQLContainerImpl::MetaScanHandler::operator()(
 	}
 }
 
+//
+// TupleUpdateRowIdHandler
+//
 
 util::ObjectPool<
 		SQLContainerImpl::TupleUpdateRowIdHandler::Shared, util::Mutex>
@@ -4426,6 +4995,9 @@ void SQLContainerImpl::TupleUpdateRowIdHandler::copyRowIdStore(
 	}
 }
 
+//
+// TupleUpdateRowIdHandler::Shared
+//
 
 SQLContainerImpl::TupleUpdateRowIdHandler::Shared::Shared(
 		const OpContext::Source &cxtSrc, RowId maxRowId) :
@@ -4438,7 +5010,9 @@ SQLContainerImpl::TupleUpdateRowIdHandler::Shared::Shared(
 		initialUpdatesAccepted_(false) {
 }
 
-
+//
+// BitUtils::DenseValues
+//
 
 template<typename V>
 inline V SQLContainerImpl::BitUtils::DenseValues<V>::toHighPart(
@@ -4480,6 +5054,9 @@ inline bool SQLContainerImpl::BitUtils::DenseValues<V>::nextValue(
 	return true;
 }
 
+//
+// BitUtils::TupleColumns
+//
 
 template<typename V>
 inline typename SQLContainerImpl::BitUtils::template TupleColumns<V>::KeyType
@@ -4544,6 +5121,9 @@ TupleList::Column SQLContainerImpl::BitUtils::TupleColumns<V>::resolveColumn(
 	return columnList[(forKey ? 0 : 1)];
 }
 
+//
+// BitUtils::TupleColumns::Constants
+//
 
 template<typename V>
 const TupleList::Column
@@ -4563,6 +5143,9 @@ SQLContainerImpl::BitUtils::TupleColumns<V>::Constants::COLUMN_TYPES[
 	ValueTag::COLUMN_TYPE
 };
 
+//
+// OIdTable
+//
 
 SQLContainerImpl::OIdTable::OIdTable(const Source &source) :
 		allocManager_(source.getAlloactorManager()),
@@ -4571,6 +5154,7 @@ SQLContainerImpl::OIdTable::OIdTable(const Source &source) :
 		cxtSrc_(source.getContextSource()),
 		stageSizeLimit_(source.isStageSizeLimit()),
 		large_(source.isLarge()),
+		suspendable_(true),
 		groupMap_(varAlloc_),
 		freeSlotList_(varAlloc_),
 		updatesAcceptable_(false) {
@@ -4722,6 +5306,10 @@ void SQLContainerImpl::OIdTable::restartCursor() {
 	}
 }
 
+void SQLContainerImpl::OIdTable::setSuspendable(bool suspendable) {
+	suspendable_ = suspendable;
+}
+
 bool SQLContainerImpl::OIdTable::getModificationProfile(
 		IndexProfiler::ModificationType modification, bool onMvcc,
 		int64_t &count) const {
@@ -4733,6 +5321,9 @@ bool SQLContainerImpl::OIdTable::getModificationProfile(
 	return (count > 0);
 }
 
+//
+// OIdTable - Status Operations
+//
 
 void SQLContainerImpl::OIdTable::checkAdditionWorking() {
 	if (cursor_.get() != NULL || mergingGroupId_.get() != NULL) {
@@ -4755,6 +5346,9 @@ void SQLContainerImpl::OIdTable::checkUpdatesAcceptable() {
 	}
 }
 
+//
+// OIdTable - Group Operations
+//
 
 SQLContainerImpl::OIdTable::Group* SQLContainerImpl::OIdTable::findGroup(
 		GroupId groupId) {
@@ -4827,6 +5421,9 @@ SQLContainerImpl::OIdTable::validateGroupId(GroupId groupId, bool withRoot) {
 	return groupId;
 }
 
+//
+// OIdTable - Read/Write Operations
+//
 
 SQLContainerImpl::OIdTable::Slot
 SQLContainerImpl::OIdTable::resultToSlot(
@@ -4997,12 +5594,16 @@ bool SQLContainerImpl::OIdTable::checkRemovedSub(
 
 bool SQLContainerImpl::OIdTable::isLimitReached(
 		const SearchResult &result, uint64_t limit, uint32_t rowArraySize) {
+	if (!suspendable_) {
+		return false;
+	}
+
 	const uint64_t estimatedRowCount =
 			(getSearchResultOIdList(TYPE_RA_NORMAL, result).size() +
-			getSearchResultOIdList(TYPE_RA_MVCC, result).size()) +
+			getSearchResultOIdList(TYPE_RA_MVCC, result).size()) *
+					rowArraySize +
 			(getSearchResultOIdList(TYPE_ROW_NORMAL, result).size() +
-			getSearchResultOIdList(TYPE_ROW_MVCC, result).size()) *
-					rowArraySize;
+			getSearchResultOIdList(TYPE_ROW_MVCC, result).size());
 	return (estimatedRowCount >= std::max<uint64_t>(limit, 1));
 }
 
@@ -5015,12 +5616,12 @@ void SQLContainerImpl::OIdTable::entryToResult(
 	}
 }
 
-SQLContainerImpl::OIdTable::Entry
+inline SQLContainerImpl::OIdTable::Entry
 SQLContainerImpl::OIdTable::readEntry(TupleListReader &reader) {
 	return Entry(readKey(reader), readPositionBits(reader));
 }
 
-void SQLContainerImpl::OIdTable::writeEntry(
+inline void SQLContainerImpl::OIdTable::writeEntry(
 		TupleListWriter &writer, const Entry &entry) {
 	writer.next();
 	WritableTuple tuple = writer.get();
@@ -5031,16 +5632,20 @@ void SQLContainerImpl::OIdTable::writeEntry(
 			tuple, static_cast<BitTupleColumns::ValueType>(entry.second));
 }
 
-uint64_t SQLContainerImpl::OIdTable::readKey(TupleListReader &reader) {
+inline uint64_t SQLContainerImpl::OIdTable::readKey(TupleListReader &reader) {
 	assert(reader.exists());
 	return static_cast<uint64_t>(BitTupleColumns::readCurrentKey(reader));
 }
 
-uint64_t SQLContainerImpl::OIdTable::readPositionBits(TupleListReader &reader) {
+inline uint64_t SQLContainerImpl::OIdTable::readPositionBits(
+		TupleListReader &reader) {
 	assert(reader.exists());
 	return static_cast<uint64_t>(BitTupleColumns::readCurrentValue(reader));
 }
 
+//
+// OIdTable - Merge Operations
+//
 
 bool SQLContainerImpl::OIdTable::mergeGroup(
 		OpContext &cxt, GroupId groupId, uint64_t &limit) {
@@ -5154,6 +5759,10 @@ SQLContainerImpl::OIdTable::updateMergingStage(
 bool SQLContainerImpl::OIdTable::mergeStageSlot(
 		OpContext &cxt, GroupMode mode, SlotList &slotList, Slot &dest,
 		uint64_t *limit) {
+	if (limit != NULL && !suspendable_) {
+		return mergeStageSlot(cxt, mode, slotList, dest, NULL);
+	}
+
 	typedef util::AllocVector<MergeElement> MergeElementList;
 	typedef util::StdAllocator<void, void> Alloc;
 	typedef SQLAlgorithmUtils::HeapQueue<
@@ -5212,6 +5821,9 @@ bool SQLContainerImpl::OIdTable::mergeStageSlot(
 	return finished;
 }
 
+//
+// OIdTable - Slot Operations
+//
 
 SQLContainerImpl::OIdTable::Slot*
 SQLContainerImpl::OIdTable::getSingleSlot(Group &group) {
@@ -5269,6 +5881,9 @@ void SQLContainerImpl::OIdTable::releaseSlot(OpContext &cxt, Slot &slot) {
 	slot = Slot::invalidSlot();
 }
 
+//
+// OIdTable - Hot slot Operations
+//
 
 SQLContainerImpl::OIdTable::HotSlot*
 SQLContainerImpl::OIdTable::findHotSlot(GroupId groupId) {
@@ -5309,6 +5924,9 @@ SQLContainerImpl::OIdTable::prepareHotData() {
 	return *hotData_;
 }
 
+//
+// OIdTable - Map Operations
+//
 
 SQLContainerImpl::OIdTable::EntryMap* SQLContainerImpl::OIdTable::findEntryMap(
 		EntryType type, HotSlot &slot) {
@@ -5439,6 +6057,9 @@ uint64_t SQLContainerImpl::OIdTable::popEntries(
 	return count * (isRowArrayEntryType(type) ? rowArraySize : 1);
 }
 
+//
+// OIdTable - Search result Operations
+//
 
 SQLContainerImpl::OIdTable::OIdList*
 SQLContainerImpl::OIdTable::findSingleSearchResultOIdList(
@@ -5493,6 +6114,9 @@ bool SQLContainerImpl::OIdTable::isRowArrayEntryType(EntryType type) {
 	return (type == TYPE_RA_NORMAL || type == TYPE_RA_MVCC);
 }
 
+//
+// OIdTable::Source
+//
 
 SQLContainerImpl::OIdTable::Source::Source(const OpContext::Source &cxtSrc) :
 		allocManager_(NULL),
@@ -5581,6 +6205,9 @@ bool SQLContainerImpl::OIdTable::Source::isLarge() const {
 	return large_;
 }
 
+//
+// OIdTable::MergeContext
+//
 
 SQLContainerImpl::OIdTable::MergeContext::MergeContext(
 		TupleListWriter &writer, GroupMode mode, const uint64_t *limit) :
@@ -5592,6 +6219,9 @@ SQLContainerImpl::OIdTable::MergeContext::MergeContext(
 				std::numeric_limits<uint64_t>::max()) {
 }
 
+//
+// OIdTable::MergeElement
+//
 
 SQLContainerImpl::OIdTable::MergeElement::MergeElement(
 		TupleListReader &reader) :
@@ -5599,6 +6229,9 @@ SQLContainerImpl::OIdTable::MergeElement::MergeElement(
 	assert(reader_.exists());
 }
 
+//
+// OIdTable::MergeElementRef
+//
 SQLContainerImpl::OIdTable::MergeElementRef::MergeElementRef(
 		MergeElement &elem) :
 		reader_(&elem.reader_) {
@@ -5618,6 +6251,9 @@ inline bool SQLContainerImpl::OIdTable::MergeElementRef::next() const {
 	return reader_->exists();
 }
 
+//
+// OIdTable::MergeElementGreater
+//
 
 inline bool SQLContainerImpl::OIdTable::MergeElementGreater::operator()(
 		const Element &elem1, const Element &elem2) const {
@@ -5648,13 +6284,16 @@ SQLContainerImpl::OIdTable::MergeElementGreater::getWithOptions() const {
 	return &execute<Op>;
 }
 
-template<typename Op>
+template<typename Op> inline
 typename Op::RetType SQLContainerImpl::OIdTable::MergeElementGreater::execute(
 		Op &op) {
 	typedef typename Op::template TypeAt<void> TypedOp;
 	return TypedOp(op)();
 }
 
+//
+// OIdTable::MergeAction
+//
 
 template<SQLContainerImpl::OIdTable::GroupMode M>
 SQLContainerImpl::OIdTable::MergeAction<M>::MergeAction(MergeContext &cxt) :
@@ -5668,10 +6307,6 @@ inline bool SQLContainerImpl::OIdTable::MergeAction<M>::operator()(
 
 	assert(ref.positionBits() != 0);
 	Coders::mergePositionBits<M>(ref.positionBits(), cxt_.positionBits_);
-
-	if (--cxt_.limit_ <= 0 && cxt_.limited_) {
-		return false;
-	}
 
 	return true;
 }
@@ -5707,6 +6342,9 @@ inline bool SQLContainerImpl::OIdTable::MergeAction<M>::operator()(
 	return true;
 }
 
+//
+// OIdTable::Group
+//
 
 SQLContainerImpl::OIdTable::Group::Group(
 		SQLValues::VarAllocator &varAlloc, GroupMode mode) :
@@ -5716,6 +6354,9 @@ SQLContainerImpl::OIdTable::Group::Group(
 		mode_(mode) {
 }
 
+//
+// OIdTable::Slot
+//
 
 SQLContainerImpl::OIdTable::Slot SQLContainerImpl::OIdTable::Slot::createSlot(
 		OpContext &cxt, const SQLValues::ColumnTypeList &typeList) {
@@ -5770,6 +6411,9 @@ SQLContainerImpl::OIdTable::Slot::Slot(uint32_t tupleListIndex) :
 		tupleListIndex_(tupleListIndex) {
 }
 
+//
+// OIdTable::HotSlot
+//
 
 SQLContainerImpl::OIdTable::HotSlot::HotSlot(util::StackAllocator &alloc) :
 		alloc_(alloc) {
@@ -5782,6 +6426,9 @@ SQLContainerImpl::OIdTable::HotSlot::mapAt(EntryType type) {
 	return mapList_[pos];
 }
 
+//
+// OIdTable::HotData
+//
 
 SQLContainerImpl::OIdTable::HotData::HotData(
 		SQLOps::OpAllocatorManager &allocManager,
@@ -5791,12 +6438,18 @@ SQLContainerImpl::OIdTable::HotData::HotData(
 		hotSlots_(alloc_) {
 }
 
+//
+// OIdTable::Cursor
+//
 
 SQLContainerImpl::OIdTable::Cursor::Cursor() :
 		started_(false),
 		finished_(false) {
 }
 
+//
+// OIdTable::Coders
+//
 
 inline SQLContainerImpl::OIdTable::Entry
 SQLContainerImpl::OIdTable::Coders::oIdToEntry(EntryType type, OId oId) {
@@ -5832,9 +6485,9 @@ inline uint64_t SQLContainerImpl::OIdTable::Coders::chunkBitsOfKey(
 
 inline uint64_t SQLContainerImpl::OIdTable::Coders::chunkMaskOfKey(
 		bool large) {
-	return (~(static_cast<uint64_t>(1) << (large ?
+	return ((~static_cast<uint64_t>(0)) << (large ?
 			CoderConstants::UNIT_LARGE_CHUNK_SHIFT_BIT :
-			CoderConstants::UNIT_SMALL_CHUNK_SHIFT_BIT)));
+			CoderConstants::UNIT_SMALL_CHUNK_SHIFT_BIT));
 }
 
 inline uint64_t SQLContainerImpl::OIdTable::Coders::raBitsOfKey(uint64_t key) {
@@ -5890,69 +6543,59 @@ inline void SQLContainerImpl::OIdTable::Coders::mergePositionBits(
 	dest = (M == MODE_UNION ? (dest | src) : (dest & src));
 }
 
+//
+// RowIdFilter
+//
 
 SQLContainerImpl::RowIdFilter::RowIdFilter(
+		const OpContext::Source &cxtSrc,
 		SQLOps::OpAllocatorManager &allocManager,
-		util::StackAllocator::BaseAllocator &baseAlloc, RowId maxRowId) :
+		util::StackAllocator::BaseAllocator &baseAlloc, RowId maxRowId,
+		int64_t memoryLimit) :
+		cxtSrc_(cxtSrc),
 		allocManager_(allocManager),
 		allocRef_(allocManager_, baseAlloc),
 		alloc_(allocRef_.get()),
 		maxRowId_(maxRowId),
-		rowIdBits_(alloc_),
-		readOnly_(false) {
+		rowIdBits_(NULL),
+		readOnly_(false),
+		duplicatable_(false),
+		cursorStarted_(false),
+		memLimit_(memoryLimit),
+		currentBitsPos_(-1) {
+	initializeBits();
 }
 
 inline bool SQLContainerImpl::RowIdFilter::accept(RowId rowId) {
+	assert(rowIdBits_ != NULL);
 	if (rowId > maxRowId_) {
 		return false;
 	}
 
 	if (readOnly_) {
-		return (rowIdBits_.find(rowId) == rowIdBits_.end());
+		return (rowIdBits_->find(rowId) == rowIdBits_->end());
 	}
 	else {
-		return rowIdBits_.insert(rowId).second;
+		return rowIdBits_->insert(rowId).second;
 	}
 }
 
-void SQLContainerImpl::RowIdFilter::load(
-		OpContext::Source &cxtSrc, uint32_t input) {
-	OpContext cxt(cxtSrc);
-	load(cxt.getLocalReader(input));
-}
-
-uint32_t SQLContainerImpl::RowIdFilter::save(OpContext::Source &cxtSrc) {
-	OpContext cxt(cxtSrc);
-
-	SQLValues::ColumnTypeList typeList(cxt.getAllocator());
-	BitTupleColumns::getColumnTypeList(typeList);
-
-	const uint32_t output = cxt.createLocal(&typeList);
-	cxt.createLocalTupleList(output);
-	save(cxt.getWriter(output));
-	cxt.closeLocalWriter(output);
-	cxt.releaseWriterLatch(output);
-	return output;
-}
-
-void SQLContainerImpl::RowIdFilter::load(TupleListReader &reader) {
-	BitSet::OutputCursor cursor(rowIdBits_);
-	for (; reader.exists(); reader.next()) {
-		cursor.next(BitSet::CodedEntry(
-				BitTupleColumns::readCurrentKey(reader),
-				BitTupleColumns::readCurrentValue(reader)));
+bool SQLContainerImpl::RowIdFilter::tryAdjust(RowIdFilter *filter) {
+	if (filter == NULL || !filter->isAllocationLimitReached()) {
+		return false;
 	}
+
+	filter->adjust();
+	return filter->isDuplicatable();
 }
 
-void SQLContainerImpl::RowIdFilter::save(TupleListWriter &writer) {
-	BitSet::InputCursor cursor(rowIdBits_);
-	for (BitSet::CodedEntry entry; cursor.next(entry);) {
-		writer.next();
+void SQLContainerImpl::RowIdFilter::adjust() {
+	OpContext cxt(cxtSrc_);
+	adjustDetail(cxt);
+}
 
-		WritableTuple tuple = writer.get();
-		BitTupleColumns::writeKey(tuple, entry.first);
-		BitTupleColumns::writeValue(tuple, entry.second);
-	}
+bool SQLContainerImpl::RowIdFilter::isDuplicatable() {
+	return duplicatable_;
 }
 
 void SQLContainerImpl::RowIdFilter::setReadOnly() {
@@ -5963,11 +6606,143 @@ bool SQLContainerImpl::RowIdFilter::isReadOnly() {
 	return readOnly_;
 }
 
-uint64_t SQLContainerImpl::RowIdFilter::getTotalAllocationSize() {
-	return alloc_.getTotalSize();
+SQLOps::TupleListReader& SQLContainerImpl::RowIdFilter::getBitsEntryReader(
+		util::LocalUniquePtr<OpContext> &localCxt) {
+	localCxt = UTIL_MAKE_LOCAL_UNIQUE(localCxt, OpContext, cxtSrc_);
+	if (!cursorStarted_) {
+		adjustDetail(*localCxt);
+		localCxt->closeLocalWriter(*tupleListIndex_);
+		localCxt->releaseWriterLatch(*tupleListIndex_);
+		cursorStarted_ = true;
+	}
+	return localCxt->getLocalReader(*tupleListIndex_);
 }
 
+bool SQLContainerImpl::RowIdFilter::hasCurrentRowId() {
+	assert(cursorStarted_);
+	return (currentBitsPos_ >= 0);
+}
 
+RowId SQLContainerImpl::RowIdFilter::getCurrentRowId() {
+	assert(hasCurrentRowId());
+	return static_cast<RowId>(currentBitsEntry_.first) |
+			static_cast<RowId>(currentBitsPos_);
+}
+
+void SQLContainerImpl::RowIdFilter::prepareCurrentRowId(
+		TupleListReader &reader, bool forNext) {
+	assert(cursorStarted_);
+
+	if (forNext) {
+		if (++currentBitsPos_ >= BITS_ENTRY_POS_COUNT) {
+			currentBitsPos_ = -1;
+		}
+	}
+
+	for (;;) {
+		if (currentBitsPos_ < 0) {
+			if (!reader.exists()) {
+				return;
+			}
+			readBitsEntry(reader, currentBitsEntry_);
+			currentBitsPos_ = 0;
+		}
+
+		do {
+			if ((static_cast<RowId>(currentBitsEntry_.second) &
+					(static_cast<RowId>(1) <<
+							static_cast<RowId>(currentBitsPos_))) != 0) {
+				return;
+			}
+		}
+		while (++currentBitsPos_ < BITS_ENTRY_POS_COUNT);
+		currentBitsPos_ = -1;
+	}
+}
+
+void SQLContainerImpl::RowIdFilter::adjustDetail(OpContext &cxt) {
+	if (tupleListIndex_.get() == NULL) {
+		SQLValues::ColumnTypeList typeList(cxt.getAllocator());
+		BitTupleColumns::getColumnTypeList(typeList);
+
+		tupleListIndex_ = UTIL_MAKE_LOCAL_UNIQUE(
+				tupleListIndex_, uint32_t, cxt.createLocal(&typeList));
+		cxt.createLocalTupleList(*tupleListIndex_);
+	}
+	writeBits(cxt.getWriter(*tupleListIndex_));
+	initializeBits();
+	duplicatable_ = true;
+}
+
+void SQLContainerImpl::RowIdFilter::initializeBits() {
+	rowIdBits_ = NULL;
+
+	allocScope_ = UTIL_MAKE_LOCAL_UNIQUE(
+			allocScope_, util::StackAllocator::Scope, alloc_);
+	rowIdBits_ = ALLOC_NEW(alloc_) BitSet(alloc_);
+}
+
+void SQLContainerImpl::RowIdFilter::readBitsEntry(
+		TupleListReader &reader, BitSet::CodedEntry &entry) {
+	assert(reader.exists());
+	entry = BitSet::CodedEntry(
+			BitTupleColumns::readCurrentKey(reader),
+			BitTupleColumns::readCurrentValue(reader));
+	reader.next();
+}
+
+void SQLContainerImpl::RowIdFilter::writeBits(TupleListWriter &writer) {
+	assert(rowIdBits_ != NULL);
+	BitSet::InputCursor cursor(*rowIdBits_);
+	for (BitSet::CodedEntry entry; cursor.next(entry);) {
+		writer.next();
+
+		WritableTuple tuple = writer.get();
+		BitTupleColumns::writeKey(tuple, entry.first);
+		BitTupleColumns::writeValue(tuple, entry.second);
+	}
+}
+
+bool SQLContainerImpl::RowIdFilter::isAllocationLimitReached() {
+	if (memLimit_ < 0 || getAllocationUsageSize() <=
+			static_cast<uint64_t>(memLimit_)) {
+		return false;
+	}
+
+	return true;
+}
+
+uint64_t SQLContainerImpl::RowIdFilter::getAllocationUsageSize() {
+	return alloc_.getTotalSize() - alloc_.getFreeSize();
+}
+
+//
+// RowIdFilter::RowIdCursor
+//
+
+SQLContainerImpl::RowIdFilter::RowIdCursor::RowIdCursor(RowIdFilter &filter) :
+		filter_(filter),
+		reader_(filter_.getBitsEntryReader(localCxt_)) {
+	const bool forNext = false;
+	filter_.prepareCurrentRowId(reader_, forNext);
+}
+
+inline bool SQLContainerImpl::RowIdFilter::RowIdCursor::RowIdCursor::exists() {
+	return filter_.hasCurrentRowId();
+}
+
+inline RowId SQLContainerImpl::RowIdFilter::RowIdCursor::RowIdCursor::get() {
+	return filter_.getCurrentRowId();
+}
+
+inline void SQLContainerImpl::RowIdFilter::RowIdCursor::RowIdCursor::next() {
+	const bool forNext = true;
+	filter_.prepareCurrentRowId(reader_, forNext);
+}
+
+//
+// ScanSimulatorUtils
+//
 
 void SQLContainerImpl::ScanSimulatorUtils::trySimulateUpdates(
 		OpContext &cxt, CursorAccessorImpl &accessor) {
@@ -6072,6 +6847,9 @@ void SQLContainerImpl::ScanSimulatorUtils::acceptUpdates(
 	}
 }
 
+//
+// ContainerValueUtils
+//
 
 Value& SQLContainerImpl::ContainerValueUtils::toContainerValue(
 		Value::Pool &valuePool, const TupleValue &src) {
@@ -6329,6 +7107,9 @@ bool SQLContainerImpl::ContainerValueUtils::toContainerColumnType(
 	return true;
 }
 
+//
+// TQLTool
+//
 
 SQLContainerImpl::SyntaxExpr
 SQLContainerImpl::TQLTool::genPredExpr(
@@ -6561,4 +7342,3 @@ SQLContainerImpl::TQLTool::genExprList(
 
 	return dest;
 }
-

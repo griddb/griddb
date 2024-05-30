@@ -42,9 +42,12 @@
  * @return 0 if succeeded.
  * @note returns void?
  */
-int32_t RtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
-	ColumnId columnId, AllocateStrategy &metaAllocateStrategy,
-	bool isUnique) {
+int32_t RtreeMap::initialize(
+		TransactionContext &txn, ColumnType columnType,
+		ColumnId columnId, AllocateStrategy &metaAllocateStrategy,
+		bool isUnique) {
+	UNUSED_VARIABLE(metaAllocateStrategy);
+
 	if (columnType != COLUMN_TYPE_GEOMETRY) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_CANNOT_MAKE_INDEX,
 			"Cannot use RtreeMap with non-geometry column");

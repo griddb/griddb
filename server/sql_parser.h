@@ -202,6 +202,9 @@ public:
 	static void countLineAndColumn(
 			const char* srcSqlStr, const Expr* expr, size_t &line, size_t &column);
 
+	static bool isEmptyToken(const SQLToken &token);
+	static SQLToken makeEmptyToken();
+
 	static Expr* makeConst(SQLAllocator& alloc, const TupleValue &value);
 
 	static TupleValue makeNanoTimestampValue(

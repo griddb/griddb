@@ -202,9 +202,6 @@ public:
 	virtual ssize_t read(void *buf, size_t blen, off_t offset);
 	virtual ssize_t write(const void *buf, size_t blen, off_t offset);
 
-	virtual void read(IOOperation &operation);
-	virtual void write(IOOperation &operation);
-
 	virtual off_t tell();
 
 	bool getReuseAddress(void) const;

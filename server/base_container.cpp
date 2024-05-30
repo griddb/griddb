@@ -377,7 +377,6 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 	}
 }
 
-
 template <typename R, typename T>
 void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType, 
 	typename T::SearchContext &sc, util::XArray<OId> &normalRowList, 
@@ -387,7 +386,9 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 
 	{
 		ResultSize limitBackup = sc.getLimit();
-		if (outputOrder != ORDER_UNDEFINED) {
+		const bool mvccFull =
+				(outputOrder != ORDER_UNDEFINED || ignoreTxnCheck);
+		if (mvccFull) {
 			sc.setLimit(MAX_RESULT_SIZE);
 		}
 		bool isCheckOnly = sc.getResumeStatus() != BaseIndex::SearchContext::NOT_RESUME;
@@ -395,44 +396,63 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 
 		sc.setLimit(limitBackup);
 
-		if (outputOrder == ORDER_UNDEFINED && mvccRowList.size() >= sc.getLimit()) {
+		if (!mvccFull && mvccRowList.size() >= sc.getLimit()) {
 			mvccRowList.resize(sc.getLimit());
 			return;
 		}
 	}
 
-	{
+	util::XArray<OId> allNormalOIdList(txn.getDefaultAllocator());
+	for (;;) {
 		ResultSize limitBackup = sc.getLimit();
 		if (sc.getRestConditionNum() > 0 || !isExclusive()) {
 			sc.setLimit(MAX_RESULT_SIZE);
-		} else {
-			sc.setLimit(sc.getLimit() - mvccRowList.size());
 		}
+		else if (!ignoreTxnCheck) {
+			const ResultSize curLimit = (limitBackup -
+					std::min<ResultSize>(limitBackup, mvccRowList.size()));
+			sc.setLimit(curLimit);
+		}
+
 		bool withUncommitted = false;
 		const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
 		IndexData &indexData = sc.prepareIndexData(txn.getDefaultAllocator());
 		getIndexData(txn, columnIds, mapType, withUncommitted, indexData);
 		ValueMap valueMap(txn, this, indexData);
-		valueMap.search<T>(txn, sc, normalRowList, outputOrder);
+		for (;;) {
+			valueMap.search<T>(txn, sc, normalRowList, outputOrder);
+
+			if (!sc.isSuspended()) {
+				break;
+			}
+
+			ResultSize nextLimit = sc.getSuspendLimit();
+			if (sc.getSuspendLimitter().isLimitReachable(nextLimit)) {
+				break;
+			}
+			sc.setSuspendLimit(nextLimit);
+			sc.setSuspended(false);
+		}
 		sc.setLimit(limitBackup);
 
-		ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
-		util::XArray<OId>::iterator itr;
-		if (sc.getRestConditionNum() > 0 || (!isExclusive() && !ignoreTxnCheck)) {
-			util::XArray<OId> oIdList(txn.getDefaultAllocator());
-			oIdList.swap(normalRowList);
-
+		const bool txnSensitive =
+				(outputOrder != ORDER_UNDEFINED || !ignoreTxnCheck);
+		if (sc.getRestConditionNum() > 0 || (!isExclusive() && txnSensitive)) {
 			util::Vector<TermCondition> condList(txn.getDefaultAllocator());
 			sc.getConditionList(condList, BaseIndex::SearchContext::COND_OTHER);
 			RowArray rowArray(txn, reinterpret_cast<R *>(this));
-			for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
+
+			ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
+			util::XArray<OId>::iterator itr;
+			for (itr = normalRowList.begin(); itr != normalRowList.end(); itr++) {
 				rowArray.load(
 					txn, *itr, reinterpret_cast<R *>(this), OBJECT_READ_ONLY);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 
-				if (!ignoreTxnCheck && txn.getId() != row.getTxnId() && !row.isFirstUpdate() &&
-					txn.getManager().isActiveTransaction(
-						txn.getPartitionId(), row.getTxnId())) {
+				if (txnSensitive &&
+						txn.getId() != row.getTxnId() && !row.isFirstUpdate() &&
+						txn.getManager().isActiveTransaction(
+								txn.getPartitionId(), row.getTxnId())) {
 					continue;
 				}
 				bool isMatch = true;
@@ -444,12 +464,24 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 					}
 				}
 				if (isMatch) {
-					normalRowList.push_back(rowArray.getOId());
-					if (normalRowList.size() + mvccRowList.size() == sc.getLimit()) {
+					allNormalOIdList.push_back(rowArray.getOId());
+					if (allNormalOIdList.size() +
+							(ignoreTxnCheck ? 0 : mvccRowList.size()) >=
+							sc.getLimit()) {
 						break;
 					}
 				}
 			}
+			if (outputOrder == ORDER_UNDEFINED || !ignoreTxnCheck ||
+					sc.getSuspendKey() == NULL ||
+					allNormalOIdList.size() >= sc.getLimit()) {
+				normalRowList.assign(allNormalOIdList.begin(), allNormalOIdList.end());
+				break;
+			}
+			normalRowList.clear();
+		}
+		else {
+			break;
 		}
 	}
 }
@@ -460,8 +492,8 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, util::XArray<OId> &normalRowList,
 	util::XArray<OId> &mvccRowList) {
-	bool ignoreTxnCheck = true;
-	OutputOrder outputOrder = ORDER_UNDEFINED;
+	const bool ignoreTxnCheck = true;
+	const OutputOrder outputOrder = sc.getOutputOrder();
 
 	MapType mapType = MAP_TYPE_BTREE;
 	switch (getContainerType()) {
@@ -599,13 +631,13 @@ uint32_t BaseContainer::getRowKeyFixedDataSize(util::StackAllocator &alloc) cons
 	funcInfo.initialize(columnIds, columnSchema_);
 
 	ColumnSchema *rowKeySchema = funcInfo.getColumnSchema();
-	uint32_t rowFixedDataSize =
-		ValueProcessor::calcNullsByteSize(rowKeySchema->getColumnNum()) +
-		rowKeySchema->getRowFixedColumnSize();
+	size_t rowFixedDataSize =
+			ValueProcessor::calcNullsByteSize(rowKeySchema->getColumnNum()) +
+			rowKeySchema->getRowFixedColumnSize();
 	if (rowKeySchema->getVariableColumnNum()) {
 		rowFixedDataSize += sizeof(OId);
 	}
-	return rowFixedDataSize;
+	return static_cast<uint32_t>(rowFixedDataSize);
 }
 
 void BaseContainer::getFields(TransactionContext &txn, 
@@ -724,7 +756,6 @@ void BaseContainer::validateIndexInfo(const IndexInfo &info) const {
 	}
 
 	const ContainerType type = getContainerType();
-	bool isSupport = true;
 	for (size_t i = 0; i < info.columnIds_.size(); i++) {
 		const ColumnId columnId = info.columnIds_[i];
 		const ColumnType columnType = getColumnInfo(columnId).getColumnType();
@@ -923,16 +954,16 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 			if (getAttribute() != CONTAINER_ATTR_SINGLE_SYSTEM &&
 				messageSchema->getContainerAttribute() != CONTAINER_ATTR_SINGLE_SYSTEM) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-					"Specified container already exists. "
-						<< "Partitioned and not partitioned container"
-						<< " are not mutually convertible");
+					"Specified container already exists. " <<
+					"Partitioned and not partitioned container" <<
+					" are not mutually convertible");
 			} else {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-					"Specified container already exists. "
-						<< "Attribute is unexpectedly different. : new = ("
-						<< messageSchema->getContainerAttribute()
-						<< "), current = ("
-						<< getAttribute() << ")");
+					"Specified container already exists. " <<
+					"Attribute is unexpectedly different. : new = (" <<
+					static_cast<int32_t>(messageSchema->getContainerAttribute()) <<
+					"), current = (" <<
+					static_cast<int32_t>(getAttribute()) << ")");
 			}
 		}
 	}
@@ -987,7 +1018,6 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 	for (uint32_t i = 0; i < columnNum; i++) {
 		const util::String &newColumnName = messageSchema->getColumnName(i);
 		const ColumnType columnType = messageSchema->getColumnFullType(i);
-		bool isNotNull = messageSchema->getIsNotNull(i);
 
 		bool isMatch = false;
 		util::Map<const char *, ColumnId, CompareCharI>::iterator columnItr;
@@ -1114,31 +1144,41 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 	}
 
 	checkContainerOption(messageSchema, copyColumnMap, isCompletelySameSchema);
-
+	bool changeSchemaStatus = false;
 	if (isCompletelySameSchema && !isNullableChange && !isVersionChange) {
 		schemaState = DataStoreV4::SAME_SCHEMA;
-	} else if (isCompletelySameSchema && !isNullableChange && isVersionChange) {
+	}
+	else if (isCompletelySameSchema && !isNullableChange && isVersionChange) {
 		schemaState = DataStoreV4::ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE;
-	} else if (isCompletelySameSchema) {
+	}
+	else if (isCompletelySameSchema) {
 		schemaState = DataStoreV4::PROPERLY_DIFFERENCE;
-	} else if (matchCount == getColumnNum() && posMatchCount == matchCount) {
+		changeSchemaStatus = true;
+	}
+	else if (matchCount == getColumnNum() && posMatchCount == matchCount) {
 		schemaState = DataStoreV4::COLUMNS_ADD;
+		changeSchemaStatus = true;
+	}
+	else {
+		if (renameOperation) {
+			schemaState = DataStoreV4::COLUMNS_RENAME;
+			changeSchemaStatus = true;
+		}
+		else {
+			schemaState = DataStoreV4::COLUMNS_DIFFERENCE;
+		}
+	}
+	if (changeSchemaStatus) {
 		uint32_t columnNum, varColumnNum, rowFixedColumnSize;
 		if (isFirstColumnAdd()) {
 			columnNum = getColumnNum();
 			varColumnNum = getVariableColumnNum();
 			rowFixedColumnSize = getRowFixedColumnSize();
-		} else {
+		}
+		else {
 			getInitialSchemaStatus(columnNum, varColumnNum, rowFixedColumnSize);
 		}
 		messageSchema->setFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
-	} else {
-		if (renameOperation) {
-			schemaState = DataStoreV4::COLUMNS_RENAME;
-		}
-		else {
-			schemaState = DataStoreV4::COLUMNS_DIFFERENCE;
-		}
 	}
 }
 
@@ -1150,16 +1190,16 @@ void BaseContainer::validateForRename(TransactionContext &txn,
 			if (getAttribute() != CONTAINER_ATTR_SINGLE_SYSTEM &&
 				messageSchema->getContainerAttribute() != CONTAINER_ATTR_SINGLE_SYSTEM) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-					"Specified container already exists. "
-						<< "Partitioned and not partitioned container"
-						<< " are not mutually convertible");
+					"Specified container already exists. " <<
+					"Partitioned and not partitioned container" <<
+					" are not mutually convertible");
 			} else {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-					"Specified container already exists. "
-						<< "Attribute is unexpectedly different. : new = ("
-						<< messageSchema->getContainerAttribute()
-						<< "), current = ("
-						<< getAttribute() << ")");
+					"Specified container already exists. " <<
+					"Attribute is unexpectedly different. : new = (" <<
+					static_cast<int32_t>(messageSchema->getContainerAttribute()) <<
+					"), current = (" <<
+					static_cast<int32_t>(getAttribute()) << ")");
 			}
 		}
 	}
@@ -1192,10 +1232,7 @@ void BaseContainer::validateForRename(TransactionContext &txn,
 	for (uint32_t i = 0; i < columnNum; i++) {
 		const util::String &newColumnName = messageSchema->getColumnName(i);
 		const ColumnType columnType = messageSchema->getColumnFullType(i);
-		bool isArray = messageSchema->getIsArray(i);
-		bool isNotNull = messageSchema->getIsNotNull(i);
 
-		bool isMatch = false;
 		util::Map<const char *, ColumnId, CompareCharI>::iterator columnItr;
 		columnItr = columnNameMap.find(newColumnName.c_str());
 		if (columnItr != columnNameMap.end()) {
@@ -1643,7 +1680,10 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 }
 
 
-void BaseContainer::changeProperty(TransactionContext& txn, OId columnSchemaOId) {
+void BaseContainer::changeProperty(
+		TransactionContext& txn, OId columnSchemaOId) {
+	UNUSED_VARIABLE(txn);
+
 	setDirty();
 	baseContainerImage_->columnSchemaOId_ = columnSchemaOId;
 	setVersionId(getVersionId() + 1);  
@@ -2281,7 +2321,9 @@ void BaseContainer::convertRowArraySchema(TransactionContext &txn, RowArray &row
 
 uint16_t BaseContainer::calcRowArrayNumBySize(uint32_t binarySize, uint32_t nullbitsSize) {
 	if (binarySize > RowArray::calcHeaderSize(nullbitsSize)) {
-		return (binarySize - RowArray::calcHeaderSize(nullbitsSize)) / rowImageSize_;
+		return static_cast<uint16_t>(
+				(binarySize - RowArray::calcHeaderSize(nullbitsSize)) /
+				rowImageSize_);
 	} else {
 		return 0;
 	}
@@ -2310,12 +2352,14 @@ uint16_t BaseContainer::calcRowArrayNumByConfig(TransactionContext &txn, uint32_
 			GS_THROW_USER_ERROR(GS_ERROR_CM_FAILED, "can not calc row array size ");
 		}
 		if (estimateRowAreaSize >= rowImageSize_) {
-			estimateRowNum = estimateRowAreaSize / rowImageSize_;
+			estimateRowNum = static_cast<uint16_t>(
+					estimateRowAreaSize / rowImageSize_);
 			if (estimateRowNum > ROW_ARRAY_LIMIT_SIZE) {
 				uint32_t requestObjectSize = rowArrayHeaderSize + rowImageSize_ * ROW_ARRAY_MAX_ESTIMATE_SIZE;
 				estimateRowAreaSize =
 					getObjectManager()->estimateAllocateSize(requestObjectSize) - rowArrayHeaderSize;
-				estimateRowNum = estimateRowAreaSize / rowImageSize_;
+				estimateRowNum = static_cast<uint16_t>(
+						estimateRowAreaSize / rowImageSize_);
 			}
 			break;
 		}

@@ -64,7 +64,7 @@ struct TermCondition {
 	TermCondition(
 			ColumnType columnType, ColumnType valueType,
 			DSExpression::Operation opType, uint32_t columnId,
-			const void *value, uint32_t valueSize) :
+			const void *value, uint32_t valueSize, bool opExtra = false) :
 			opType_(opType),
 			valueType_(valueType),
 			columnId_(columnId),
@@ -75,7 +75,8 @@ struct TermCondition {
 			operator_ = NULL;
 		}
 		else {
-			operator_ = ComparatorTable::getOperator(opType, columnType, valueType);
+			operator_ = ComparatorTable::getOperator(
+					opType, columnType, valueType, opExtra);
 		}
 	}
 	bool isIncluded() const {
@@ -151,24 +152,29 @@ private:
 */
 class BaseIndex : public BaseObject {
 public:
-	BaseIndex(TransactionContext &txn, ObjectManagerV4 &objectManager,
-		AllocateStrategy &strategy, BaseContainer *container,
-		TreeFuncInfo *funcInfo,
-		MapType mapType)
-		: BaseObject(objectManager, strategy),
-		  allocateStrategy_(strategy),
-		  container_(container),
-		  funcInfo_(funcInfo),
-		  mapType_(mapType) {}
-	BaseIndex(TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
-		AllocateStrategy &strategy, BaseContainer *container,
-		TreeFuncInfo *funcInfo,
-		MapType mapType)
-		: BaseObject(objectManager, strategy, oId),
-		  allocateStrategy_(strategy),
-		  container_(container),
-		  funcInfo_(funcInfo),
-		  mapType_(mapType) {
+	BaseIndex(
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			AllocateStrategy &strategy, BaseContainer *container,
+			TreeFuncInfo *funcInfo,
+			MapType mapType) :
+			BaseObject(objectManager, strategy),
+			allocateStrategy_(strategy),
+			container_(container),
+			funcInfo_(funcInfo),
+			mapType_(mapType) {
+		UNUSED_VARIABLE(txn);
+	}
+
+	BaseIndex(
+			TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
+			AllocateStrategy &strategy, BaseContainer *container,
+			TreeFuncInfo *funcInfo,
+			MapType mapType) :
+			BaseObject(objectManager, strategy, oId),
+			allocateStrategy_(strategy),
+			container_(container),
+			funcInfo_(funcInfo),
+			mapType_(mapType) {
 		if (funcInfo_ == NULL) {
 			util::StackAllocator &alloc = txn.getDefaultAllocator();
 			util::Vector<ColumnId> columnIds(alloc);
@@ -190,6 +196,26 @@ public:
 
 public:
 	virtual ~BaseIndex() {}
+
+	class CustomSuspendLimitter {
+	public:
+		virtual ~CustomSuspendLimitter();
+		virtual bool isLimitReachable(ResultSize &nextLimit) = 0;
+	};
+
+	class SuspendLimitter {
+	public:
+		explicit SuspendLimitter(CustomSuspendLimitter *custom = NULL) :
+				custom_(custom) {
+		}
+
+		bool isLimitReachable(ResultSize &nextLimit) {
+			return (custom_ == NULL || custom_->isLimitReachable(nextLimit));
+		}
+
+	private:
+		CustomSuspendLimitter *custom_;
+	};
 
 	struct SearchContextPool {
 		SearchContextPool(
@@ -245,7 +271,8 @@ public:
 				isNullSuspended_(false),
 				suspendRowId_(UNDEF_ROWID),
 				columnIdList_(alloc),
-				pool_(NULL) {
+				pool_(NULL),
+				outputOrder_(ORDER_UNDEFINED) {
 			columnIdList_.push_back(columnId);
 		}
 
@@ -266,7 +293,8 @@ public:
 				isNullSuspended_(false),
 				suspendRowId_(UNDEF_ROWID),
 				columnIdList_(alloc),
-				pool_(NULL) {
+				pool_(NULL),
+				outputOrder_(ORDER_UNDEFINED) {
 			columnIdList_.assign(columnIds.begin(), columnIds.end());
 		}
 
@@ -286,7 +314,8 @@ public:
 				isNullSuspended_(false),
 				suspendRowId_(UNDEF_ROWID),
 				columnIdList_(alloc),
-				pool_(NULL) {
+				pool_(NULL),
+				outputOrder_(ORDER_UNDEFINED) {
 			columnIdList_.push_back(cond.columnId_);
 			keyList_.push_back(0);
 			conditionList_.push_back(cond);
@@ -309,7 +338,8 @@ public:
 				isNullSuspended_(false),
 				suspendRowId_(UNDEF_ROWID),
 				columnIdList_(alloc),
-				pool_(NULL) {
+				pool_(NULL),
+				outputOrder_(ORDER_UNDEFINED) {
 			assert(startCond.columnId_ == endCond.columnId_);
 			columnIdList_.push_back(startCond.columnId_);
 			keyList_.push_back(0);
@@ -334,6 +364,7 @@ public:
 			suspendRowId_ = UNDEF_ROWID;
 			columnIdList_.clear();
 			SearchContextPool::clear(pool_);
+			outputOrder_ = ORDER_UNDEFINED;
 		}
 
 		util::StackAllocator& getSettingAllocator() {
@@ -341,21 +372,25 @@ public:
 			return pool_->settingAlloc_;
 		}
 
-		uint32_t getConditionNum() const {
+		size_t getConditionNum() const {
 			return conditionList_.size();
 		}
-		uint32_t getRestConditionNum() const {
-			return static_cast<uint32_t>(conditionList_.size() - keyList_.size());
+		size_t getRestConditionNum() const {
+			return conditionList_.size() - keyList_.size();
 		}
-		TermCondition &getCondition(uint32_t no) {
+		TermCondition &getCondition(size_t no) {
 			assert(no < getConditionNum());
 			return conditionList_[no];
 		}
 		void addCondition(TransactionContext &txn, TermCondition &term, bool isKey = false);
 		void setKeyConditions(const TermCondition *termList, size_t termCount);
 
+		void setKeyConditionValue(size_t keyPos, const Value *valueRef);
+		void setKeyConditionValueData(
+				size_t keyPos, const void *data, uint32_t size);
+
 		void copy(util::StackAllocator &alloc, SearchContext &dest);
-		uint32_t getKeyColumnNum() const {
+		size_t getKeyColumnNum() const {
 			return columnIdList_.size();
 		}
 		const util::Vector<ColumnId> &getColumnIds() const {
@@ -405,7 +440,11 @@ public:
 		}
 		template <typename K, typename V>
 		void setSuspendPoint(
-			TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy& strategy, TreeFuncInfo *, const K &suspendKey, const V &suspendValue) {
+				TransactionContext &txn, ObjectManagerV4 &,
+				AllocateStrategy& strategy, TreeFuncInfo *,
+				const K &suspendKey, const V &suspendValue) {
+			UNUSED_VARIABLE(strategy);
+
 			UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
 			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
 			UTIL_STATIC_ASSERT((!util::IsSame<K, CompositeInfoObject>::VALUE));
@@ -498,6 +537,18 @@ public:
 			return pool_;
 		}
 
+		SuspendLimitter& getSuspendLimitter() {
+			return suspendLimitter_;
+		}
+
+		void setOutputOrder(OutputOrder outputOrder) {
+			outputOrder_ = outputOrder;
+		}
+
+		OutputOrder getOutputOrder() {
+			return outputOrder_;
+		}
+
 		virtual std::string dump();
 	protected:
 		enum ConditionStatus {
@@ -524,6 +575,8 @@ public:
 		RowId suspendRowId_;
 		util::Vector<ColumnId> columnIdList_; 
 		SearchContextPool *pool_;
+		SuspendLimitter suspendLimitter_;
+		OutputOrder outputOrder_;
 	};
 
 	TreeFuncInfo *getFuncInfo() {
@@ -810,6 +863,24 @@ inline void BaseIndex::SearchContext::setKeyConditions(
 		keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
 		conditionList_.push_back(termList[i]);
 	}
+}
+
+inline void BaseIndex::SearchContext::setKeyConditionValue(
+		size_t keyPos, const Value *valueRef) {
+	assert(valueRef != NULL);
+
+	setKeyConditionValueData(keyPos, valueRef->data(), valueRef->size());
+	assert(conditionList_[keyPos].valueType_ == valueRef->getType());
+}
+
+inline void BaseIndex::SearchContext::setKeyConditionValueData(
+		size_t keyPos, const void *data, uint32_t size) {
+	assert(keyPos < keyList_.size());
+	assert(keyPos == keyList_[keyPos]);
+
+	TermCondition &term = conditionList_[keyPos];
+	term.value_ = data;
+	term.valueSize_ = size;
 }
 
 template<typename T>

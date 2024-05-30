@@ -85,7 +85,7 @@ void ArrayProcessor::getField(TransactionContext &, ObjectManagerV4 &, AllocateS
 		const ColumnType elemType =
 				messageRowStore->getColumnInfoList()[columnId]
 				.getArrayElementType();
-		const uint32_t elemSize = FixedSizeOfColumnType[elemType];
+		const uint16_t elemSize = FixedSizeOfColumnType[elemType];
 
 		const uint32_t num = arrayObject.getArrayLength();
 		const uint32_t totalSize =

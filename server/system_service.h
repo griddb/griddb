@@ -60,6 +60,14 @@ namespace picojson {
 class value;
 }
 
+struct RestContext {
+	RestContext(picojson::value& result) : result_(result), errorNo_(WEBAPI_NORMAL) {}
+	picojson::value& result_;
+	WebAPIErrorType errorNo_;
+	std::string reason_;
+	void setError(int32_t errorNo, const char* reason);
+};
+
 /*!
 	@brief Handles thread error for service
 */
@@ -215,7 +223,6 @@ public:
 			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
 
 	bool setGoalPartitions(util::StackAllocator &alloc,
-		const ServiceTypeInfo& addressType,
 		const picojson::value *request, picojson::value &result);
 
 	void getGoalPartitions(
@@ -292,7 +299,7 @@ public:
 	};
 
 	struct Tester;
-	struct FailureSimulator;
+
 
 private:
 	static const uint32_t WORKER_THREAD_NUM = 1;
@@ -321,7 +328,9 @@ private:
 		void waitForShutdown();
 
 	private:
-		void start();
+		virtual void start(
+				util::ThreadRunner *runner = NULL,
+				const util::ThreadAttribute *attr = NULL);
 
 		volatile bool runnable_;
 		const bool enabled_;

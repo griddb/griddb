@@ -388,7 +388,7 @@ public:
 			ColumnType type, bool withAny) {
 		int8_t ordinal;
 		if (!findPrimitiveColumnTypeOrdinal(type, withAny, ordinal)) {
-			assert(false);
+			return errorForPrimitiveColumnTypeOrdinal();
 		}
 		return ordinal;
 	}
@@ -852,7 +852,7 @@ public:
 		for (size_t i = 0; i < size; i++) {
 			c = *(p + i);
 			if ((c >= 'a') && (c <= 'z')) {
-				*(out + i) = c - 32;
+				*(out + i) = static_cast<char8_t>(c - 32);
 			}
 			else {
 				*(out + i) = c;
@@ -868,7 +868,7 @@ public:
 		for (size_t i = 0; i < size; i++) {
 			c = *(p + i);
 			if ((c >= 'A') && (c <= 'Z')) {
-				*(out + i) = c + 32;
+				*(out + i) = static_cast<char8_t>(c + 32);
 			}
 			else {
 				*(out + i) = c;
@@ -896,6 +896,9 @@ public:
 
 	static std::string dumpMemory(
 		const std::string &name, const uint8_t *addr, uint64_t size);
+
+private:
+	static int8_t errorForPrimitiveColumnTypeOrdinal();
 };
 
 template<typename T>

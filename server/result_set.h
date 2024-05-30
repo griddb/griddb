@@ -954,7 +954,8 @@ inline void ResultSet::addUpdatedId(
 			}
 		}
 		else if (updateIdType_ == UPDATE_ID_OBJECT) {
-			assert(id != UNDEF_OID && id != UNDEF_CHUNKID);
+			assert(id != UNDEF_OID &&
+					id != static_cast<uint64_t>(UNDEF_CHUNKID));
 
 			util::XArray<uint64_t> &idList = (updateObjectIdList_ == NULL ?
 					*getUpdateObjectIdList() : *updateObjectIdList_);

@@ -69,7 +69,7 @@ public:
 		return false;
 	}
 
-	bool operator==(BoolExpr &e) const {
+	bool operator==(const BoolExpr &e) const {
 		if (opeType_ != e.opeType_) return false;
 		if (opeType_ == UNARY) {
 			return *unary_ == *e.unary_;
@@ -85,7 +85,7 @@ public:
 		return true;
 	}
 
-	bool operator!=(BoolExpr &e) {
+	bool operator!=(const BoolExpr &e) const {
 		return !(*this == e);
 	}
 
@@ -367,6 +367,16 @@ protected:
 #endif
 	}
 
+private:
+	bool operator==(const Expr &e) const {
+		return Expr::operator==(e);
+	}
+
+	bool operator!=(const Expr &e) const {
+		return Expr::operator!=(e);
+	}
+
+protected:
 	BoolTerms operands_;
 	Expr *unary_;
 	Operation opeType_;

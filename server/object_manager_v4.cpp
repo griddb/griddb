@@ -50,7 +50,7 @@ ObjectManagerV4::ObjectManagerV4(
 		chunkHeaderSize_(ChunkBuddy::CHUNK_HEADER_FULL_SIZE),
 		minPower_(util::nextPowerBitsOf2(sizeof(HeaderBlock))),
 		maxPower_(util::nextPowerBitsOf2(1 << CHUNK_EXP_SIZE_)),
-		tableSize_(sizeof(uint32_t) * (maxPower_ + 1)),
+		tableSize_(static_cast<int32_t>(sizeof(uint32_t) * (maxPower_ + 1))),
 		freeListOffset_(ChunkBuddy::CHUNK_HEADER_FULL_SIZE - tableSize_),
 		maxV4GroupId_(3),
 		swapOutCounter_(0),
@@ -71,7 +71,7 @@ void ObjectManagerV4::free(ChunkAccessor &chunkaccessor, DSGroupId groupId, OId 
 	try {
 		int64_t chunkId = getChunkId(oId);
 		if (isV4OId(oId)) {
-			chunkId = getV5ChunkId(groupId, chunkId);
+			chunkId = getV5ChunkId(groupId, static_cast<ChunkId>(chunkId));
 		}
 		MeshedChunkTable::Group& group = *chunkManager_->putGroup(groupId);
 		chunkManager_->getChunk(group, chunkId, chunkaccessor);
@@ -80,7 +80,8 @@ void ObjectManagerV4::free(ChunkAccessor &chunkaccessor, DSGroupId groupId, OId 
 
 		int32_t offset = getOffset(oId);
 
-		uint32_t objectSize = chunk->getObjectSize(offset, OBJECT_HEADER_SIZE);
+		uint32_t objectSize = static_cast<uint32_t>(chunk->getObjectSize(
+				offset, OBJECT_HEADER_SIZE));
 		chunk->removeObject(offset);
 
 		chunkaccessor.setVacancy(chunk->getMaxFreeExpSize());
@@ -165,7 +166,7 @@ void ObjectManagerV4::drop() {
 void ObjectManagerV4::initializeV5StartChunkIdList(
 		int64_t maxV4GroupId, const std::deque<int64_t>& chunkIdList) {
 	if (chunkIdList.size() > 0) {
-		assert(chunkIdList.size() == maxV4GroupId + 1);
+		assert(static_cast<ptrdiff_t>(chunkIdList.size()) == maxV4GroupId + 1);
 		v5StartChunkIdList_.assign(chunkIdList.begin(), chunkIdList.end());
 		maxV4GroupId_ = maxV4GroupId;
 	}
@@ -223,7 +224,7 @@ int64_t ObjectManagerV4::searchChunk(
 
 			chunk->init();
 			chunkId = chunkAccessor.getChunkId();
-			initV4ChunkHeader(*chunk, groupId, chunkId);
+			initV4ChunkHeader(*chunk, groupId, static_cast<ChunkId>(chunkId));
 			cursor->set(chunkId);
 		}
 	}
@@ -263,17 +264,20 @@ double ObjectManagerV4::getStoreMemoryAgingSwapRate() {
 OId GroupObjectAccessor::allocate(DSObjectSize requestSize, ObjectType objectType) {
 
 	uint32_t powerSize = objMgr_->getObjectExpSize(requestSize);
-	int64_t chunkId = objMgr_->searchChunk(*group_, powerSize, chunkAccessor_);
+	int64_t chunkId = objMgr_->searchChunk(
+			*group_, static_cast<uint8_t>(powerSize), chunkAccessor_);
 
 	ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor_.getChunk());
-	int32_t offset = chunk->allocateObject(nullptr, powerSize, objectType);
+	int32_t offset = chunk->allocateObject(
+			nullptr, static_cast<uint8_t>(powerSize), objectType);
 
 	chunkAccessor_.setVacancy(chunk->getMaxFreeExpSize());
 	chunkAccessor_.unpin(true);
 	objMgr_->stats_.table_(ObjectManagerStats::OBJECT_STAT_ALLOCATE_SIZE).add(
 			(UINT32_C(1) << powerSize) - ObjectManagerV4::OBJECT_HEADER_SIZE);
 
-	OId oId = objMgr_->getOId(group_->getId(), chunkId, offset);
+	OId oId = objMgr_->getOId(
+			group_->getId(), static_cast<ChunkId>(chunkId), offset);
 	return oId;
 }
 
@@ -286,23 +290,26 @@ OId GroupObjectAccessor::allocateNeighbor(
 	uint32_t powerSize = objMgr_->getObjectExpSize(requestSize);
 	int64_t chunkId = objMgr_->getChunkId(neighborOId);
 	if (objMgr_->isV4OId(neighborOId)) {
-		chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+		chunkId = objMgr_->getV5ChunkId(
+				group_->getId(), static_cast<ChunkId>(chunkId));
 	}
 	int32_t availablespace = group_->getVacancy(chunkId);
-	if (availablespace < powerSize) {
+	if (static_cast<uint32_t>(availablespace) < powerSize) {
 		return allocate(requestSize, objectType);
 	}
 	objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
 	objMgr_->chunkManager_->update(*group_, chunkAccessor_);
 	ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor_.getChunk());
-	int32_t offset = chunk->allocateObject(nullptr, powerSize, objectType);
+	int32_t offset = chunk->allocateObject(
+			nullptr, static_cast<uint8_t>(powerSize), objectType);
 
 	chunkAccessor_.setVacancy(chunk->getMaxFreeExpSize());
 	chunkAccessor_.unpin(true);
 	objMgr_->stats_.table_(ObjectManagerStats::OBJECT_STAT_ALLOCATE_SIZE).add(
 			(UINT32_C(1) << powerSize) - ObjectManagerV4::OBJECT_HEADER_SIZE);
 
-	OId oId = objMgr_->getOId(group_->getId(), chunkId, offset);
+	OId oId = objMgr_->getOId(
+			group_->getId(), static_cast<ChunkId>(chunkId), offset);
 	return oId;
 }
 
@@ -314,7 +321,8 @@ void GroupObjectAccessor::free(OId oId) {
 	try {
 		int64_t chunkId = objMgr_->getChunkId(oId);
 		if (objMgr_->isV4OId(oId)) {
-			chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+			chunkId = objMgr_->getV5ChunkId(
+					group_->getId(), static_cast<ChunkId>(chunkId));
 		}
 		objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
 		objMgr_->chunkManager_->update(*group_, chunkAccessor_);
@@ -322,7 +330,8 @@ void GroupObjectAccessor::free(OId oId) {
 
 		int32_t offset = objMgr_->getOffset(oId);
 
-		uint32_t objectSize = chunk->getObjectSize(offset, ObjectManagerV4::OBJECT_HEADER_SIZE);
+		uint32_t objectSize = static_cast<uint32_t>(chunk->getObjectSize(
+				offset, ObjectManagerV4::OBJECT_HEADER_SIZE));
 		chunk->removeObject(offset);
 
 		chunkAccessor_.setVacancy(chunk->getMaxFreeExpSize());

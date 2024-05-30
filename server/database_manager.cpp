@@ -244,10 +244,10 @@ void DatabaseManager:: putExecutionConsraint(DatabaseId dbId, int32_t mode, uint
 		}
 	}
 	if (mode != ExecutionConstraint::MODE_CLEAR) {
-		if (delayStartInterval > limitDelayTime_) {
+		if (delayStartInterval > static_cast<uint32_t>(limitDelayTime_)) {
 			delayStartInterval = limitDelayTime_;
 		}
-		if (delayExecutionInterval > limitDelayTime_) {
+		if (delayExecutionInterval > static_cast<uint32_t>(limitDelayTime_)) {
 			delayExecutionInterval = limitDelayTime_;
 		}
 		constraintMap_.insert(std::make_pair(dbId, ALLOC_VAR_SIZE_NEW(varAlloc_)
@@ -294,11 +294,6 @@ bool DatabaseManager::getExecutionConstraint(
 	return false;
 }
 
-picojson::array& setJsonArray(picojson::value& value) {
-	value = picojson::value(picojson::array_type, false);
-	return value.get<picojson::array>();
-}
-
 void DatabaseManager::ExecutionConstraint::convert(DatabaseId dbId, picojson::object& dbConstraint) {
 	util::NormalOStringStream oss;
 	dbConstraint["dbId"] = picojson::value(static_cast<double>(dbId));
@@ -335,7 +330,7 @@ void DatabaseManager::ExecutionConstraint::convert(DatabaseId dbId, picojson::ob
 void DatabaseManager::getExecutionConstraintList(DatabaseId dbId, picojson::value& result) {
 	if (!useRequestConstraint_) return;
 	util::LockGuard<util::Mutex> guard(constraintLock_);
-	picojson::array& constraintList = setJsonArray(result);
+	picojson::array& constraintList = picojsonUtil::setJsonArray(result);
 	if (dbId != UNDEF_DBID) {
 		decltype(constraintMap_)::iterator it = constraintMap_.find(dbId);
 		if (it != constraintMap_.end()) {
@@ -374,7 +369,6 @@ void Database::DabaseEntry::dump(util::NormalOStringStream &oss, bool prev) {
 	oss << "[GroupIdList] : ";
 	CommonUtility::dumpValueSet(oss, groupIdList_);
 	oss << std::endl;
-	ChunkGroupStats* statTable = prev ? &prevStats_ : &stats_;
 	oss << (prev ? "[PREV]" : "[CURRENT]");
 	dump(oss, prev ? prevStats_ : stats_);
 }

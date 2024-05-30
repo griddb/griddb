@@ -3001,6 +3001,55 @@ int32_t SQLValues::ValueUtils::compareString(
 			rest, sizeDiff, PredType());
 }
 
+int32_t SQLValues::ValueUtils::getTypeBoundaryDirectionAsLong(
+		const TupleValue &value, TupleColumnType boundaryType, bool lower) {
+	const TupleColumnType boundaryCategory =
+			getBoundaryCategoryAsLong(boundaryType);
+	if (boundaryCategory != TupleTypes::TYPE_LONG &&
+			boundaryCategory != TupleTypes::TYPE_NANO_TIMESTAMP) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	int64_t boundary;
+	switch (boundaryType) {
+	case TupleTypes::TYPE_BYTE:
+		boundary = (lower ?
+				std::numeric_limits<int8_t>::min() :
+				std::numeric_limits<int8_t>::max());
+		break;
+	case TupleTypes::TYPE_SHORT:
+		boundary = (lower ?
+				std::numeric_limits<int16_t>::min() :
+				std::numeric_limits<int16_t>::max());
+		break;
+	case TupleTypes::TYPE_INTEGER:
+		boundary = (lower ?
+				std::numeric_limits<int32_t>::min() :
+				std::numeric_limits<int32_t>::max());
+		break;
+	default:
+		boundary = (lower ?
+				std::numeric_limits<int64_t>::min() :
+				std::numeric_limits<int64_t>::max());
+		break;
+	}
+
+	const int64_t baseValue = toLong(value);
+	const int32_t comp = compareIntegral(baseValue, boundary);
+
+	if (comp == 0) {
+		const int32_t dir = getBoundaryDirectionAsLong(value, 1);
+		if (dir == 0) {
+			return 0;
+		}
+		return 1;
+	}
+	else {
+		return (comp < 0 ? -1 : 1);
+	}
+}
+
 bool SQLValues::ValueUtils::isUpperBoundaryAsLong(
 		const TupleValue &value, int64_t unit) {
 	const int32_t direction = getBoundaryDirectionAsLong(value, unit);

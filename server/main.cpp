@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 5;
+const int32_t GS_MINOR_VERSION = 6;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 40191;
+const int32_t GS_BUILD_NO = 40337;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -193,7 +193,6 @@ int main(int argc, char **argv) {
 		bool fileVersionDump = false;				  
 		bool releaseUnusedFileBlocks = false;		  
 		bool longArchive = false;					  
-		const char8_t *bibFile = NULL;				  
 		u8string longArchiveLogDir;					  
 
 		if (argc >= 3) {
@@ -403,9 +402,9 @@ int main(int argc, char **argv) {
 						ALLOCATOR_GROUP_MAIN, "globalExecutorService"),
 				varSizeAlloc);
 
-		PartitionTable pt(config);
+		PartitionTable pt(config, configDir);
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
-		ClusterManager clsMgr(config, &pt, clsVersionId);
+		ClusterManager clsMgr(config, &pt, clsVersionId, configDir);
 
 		SyncManager syncMgr(config, &pt);
 
@@ -432,9 +431,8 @@ int main(int argc, char **argv) {
 
 		PartitionList partitionList(config, &txnMgr, resultSetPool);
 		RecoveryManager recoveryMgr(config, releaseUnusedFileBlocks);
-		bool isIncrementalBackup = false;
 		if (existBackupInfoFile) {
-			isIncrementalBackup = recoveryMgr.readBackupInfoFile();
+			recoveryMgr.readBackupInfoFile();
 		}
 		DataStoreConfig dsConfig(config);
 
@@ -518,6 +516,14 @@ int main(int argc, char **argv) {
 		newSqlSvc.initialize(mgrSet);
 		executionManager.initialize(mgrSet);
 		jobManager.initialize(mgrSet);
+
+
+		UNUSED_VARIABLE(dbDump);
+		UNUSED_VARIABLE(dbDumpDir);
+		UNUSED_VARIABLE(logDump);
+		UNUSED_VARIABLE(logDumpPgId);
+		UNUSED_VARIABLE(logDumpCpId);
+		UNUSED_VARIABLE(fileVersionDump);
 
 
 		try {
@@ -736,6 +742,8 @@ void createPidFile(const std::string &fileName, util::PIdFile &pidFile) {
 }
 
 void cleanupPidFile(const std::string &fileName, util::PIdFile &pidFile) {
+	UNUSED_VARIABLE(fileName);
+
 	try {
 		pidFile.close();
 	}
@@ -774,6 +782,10 @@ static void forceShutdown(ClusterService &clsSvc,
 
 #ifdef MAIN_CAPTURE_SIGNAL
 void signal_handler(int sig, siginfo_t *siginfo, void *param) {
+	UNUSED_VARIABLE(sig);
+	UNUSED_VARIABLE(siginfo);
+	UNUSED_VARIABLE(param);
+
 	int nptrs;
 	const int FRAME_DEPTH = 50;
 	void *buffer[FRAME_DEPTH];
@@ -867,6 +879,7 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, AUDIT_CONNECT, INFO);
 	MAIN_TRACE_DECLARE(config, AUDIT_DDL, CRITICAL);
 	MAIN_TRACE_DECLARE(config, AUDIT_DCL, CRITICAL);
+	MAIN_TRACE_DECLARE(config, REDO_MANAGER, WARNING);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)

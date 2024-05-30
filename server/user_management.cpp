@@ -239,10 +239,7 @@ void DbUserHandler::makeSchema(util::XArray<uint8_t> &containerSchema, const DUC
 
 	{
 		char affinityStr[AFFINITY_STRING_MAX_LENGTH + 1];
-		memcpy(
-			affinityStr, DEFAULT_AFFINITY_STRING, AFFINITY_STRING_MAX_LENGTH);
-		affinityStr[AFFINITY_STRING_MAX_LENGTH] =
-			'\0';  
+		memset(affinityStr, 0, AFFINITY_STRING_MAX_LENGTH + 1); 
 		int32_t affinityStrLen =
 			static_cast<int32_t>(strlen(reinterpret_cast<char *>(affinityStr)));
 		containerSchema.push_back(
@@ -419,12 +416,14 @@ void DbUserHandler::putRow(
 		EventContext &ec, Event &ev, const Request &request,
 		const char8_t *containerName, DUColumnValue *cvList,
 		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+	UNUSED_VARIABLE(ev);
 
 	util::StackAllocator &alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	const uint64_t numRow = 1;
+	UNUSED_VARIABLE(numRow); 
 
 	TransactionContext &txn = transactionManager_->put(
 			alloc, request.fixed_.pId_,
@@ -1124,6 +1123,8 @@ void DbUserHandler::checkModifiable(bool modifiable, bool value) {
 void DbUserHandler::initializeMetaContainer(
 		EventContext &ec, Event &ev, const Request &request,
 		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+	UNUSED_VARIABLE(ev);
+
 	TEST_PRINT("initializeMetaContainer() S\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -1314,6 +1315,7 @@ void PutUserHandler::putUserRow(
 		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
 	TEST_PRINT("putUserRow() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
+	UNUSED_VARIABLE(alloc); 
 
 	DUColumnValue cvList[3] = { 
 		{COLUMN_TYPE_STRING, userInfo.userName_.c_str(), 0},
@@ -1467,6 +1469,8 @@ void DropUserHandler::removeUserRowInDB(
 		EventContext &ec, Event &ev, const Request &request,
 		const char8_t *userName,
 		util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+	UNUSED_VARIABLE(ev);
+
 	TEST_PRINT("removeUserRowInDB() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
 
@@ -1485,6 +1489,8 @@ void DropUserHandler::removeUserRow(
 		EventContext &ec, Event &ev, const Request &request,
 		const char8_t *userName,
 		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+	UNUSED_VARIABLE(ev);
+
 	TEST_PRINT("removeUserRow() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
 
@@ -1658,6 +1664,7 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 		util::String userName = inMes.userName_;
 		bool withFilter = inMes.withFilter_;
 		int8_t property = inMes.property_;  
+		UNUSED_VARIABLE(property); 
 
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\twithFilter=%d\n", withFilter);
@@ -1882,6 +1889,8 @@ void DropDatabaseHandler::removeDatabaseRow(
 		EventContext &ec, Event &ev,
 		const Request &request, const char8_t *dbName, bool isAdmin,
 		util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+	UNUSED_VARIABLE(ev);
+
 	TEST_PRINT("removeDatabaseRow() S\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -2102,6 +2111,7 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 		util::String& dbName = inMes.dbName_;
 		bool withFilter = inMes.withFilter_;
 		int8_t property = inMes.property_;  
+		UNUSED_VARIABLE(property); 
 
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\twithFilter=%d\n", withFilter);
@@ -2269,6 +2279,8 @@ void DropPrivilegeHandler::removeDatabaseRow(
 		EventContext &ec, Event &ev, const Request &request, 
 		DatabaseInfo &dbInfo,
 		util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+	UNUSED_VARIABLE(ev);
+
 	TEST_PRINT("removeDatabaseRow() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
 

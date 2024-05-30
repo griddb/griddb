@@ -136,9 +136,10 @@ ReplicationContext &ReplicationContext::operator=(
 }
 
 void ReplicationContext::setContainerStatus(
-	LargeContainerStatusType &status,
-	NodeAffinityNumber &affinityNumber,
-	IndexInfo &indexInfo) const {
+		LargeContainerStatusType &status,
+		NodeAffinityNumber &affinityNumber,
+		IndexInfo &indexInfo) const {
+	UNUSED_VARIABLE(indexInfo);
 
 	status = execStatus_;
 	affinityNumber = affinityNumber_;
@@ -355,7 +356,6 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 		  CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL)),
 	  reauthConfig_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),
-
 	  userCacheSize_(config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_SIZE)),
 	  userCacheUpdateInterval_(config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL)),
 	  ldapUrl_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_URL)),
@@ -431,7 +431,6 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 				(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + TIMER_MERGIN_SEC) *
 					1000,
 				TIMER_INTERVAL_MILLISEC);
-
 			replAllocator_[pgId] =
 				UTIL_NEW util::VariableSizeAllocator<>(util::AllocatorInfo(
 					ALLOCATOR_GROUP_TXN_STATE, "replicationVar"));
@@ -467,6 +466,8 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 		const char8_t* s8 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BASE_DN);
 		const char8_t* s9 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_SEARCH_ATTRIBUTE);
 		const char8_t* s10 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_MEMBER_OF_ATTRIBUTE);
+		UNUSED_VARIABLE(s3);
+		UNUSED_VARIABLE(s10);
 		
 		if (isLDAPAuthentication_) {
 			if ((strcmp(s4, "") != 0) || (strcmp(s5, "") != 0)) {
@@ -856,10 +857,13 @@ void TransactionManager::getRequestTimeoutContextId(util::StackAllocator &alloc,
 	@brief Gets list of keepalive timed out context ID (clientID) in a
    specified partition
 */
-void TransactionManager::getKeepaliveTimeoutContextId(util::StackAllocator &alloc,
-	PartitionGroupId pgId, EventMonotonicTime emNow,
-	const util::XArray<bool> &checkPartitionFlagList,
-	util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds) {
+void TransactionManager::getKeepaliveTimeoutContextId(
+		util::StackAllocator &alloc,
+		PartitionGroupId pgId, EventMonotonicTime emNow,
+		const util::XArray<bool> &checkPartitionFlagList,
+		util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds) {
+	UNUSED_VARIABLE(alloc);
+
 	const PartitionId beginPId = pgConfig_.getGroupBeginPartitionId(pgId);
 
 	try {
@@ -911,8 +915,11 @@ void TransactionManager::getKeepaliveTimeoutContextId(util::StackAllocator &allo
 	@brief Gets list of no expire context ID (clientID) in a
    specified partition
 */
-void TransactionManager::getNoExpireTransactionContextId(util::StackAllocator &alloc,
-	PartitionId pId, util::XArray<ClientId> &clientIds) {
+void TransactionManager::getNoExpireTransactionContextId(
+		util::StackAllocator &alloc, PartitionId pId,
+		util::XArray<ClientId> &clientIds) {
+	UNUSED_VARIABLE(alloc);
+
 	const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 
 	try {
@@ -1148,7 +1155,9 @@ TransactionManager::GetMode TransactionManager::getContextGetModeForRecovery(
 */
 TransactionManager::TransactionMode
 TransactionManager::getTransactionModeForRecovery(
-	bool withBegin, bool isAutoCommit) const {
+		bool withBegin, bool isAutoCommit) const {
+	UNUSED_VARIABLE(withBegin);
+
 	assert(!(withBegin && isAutoCommit));
 	if (isAutoCommit) {
 		return AUTO_COMMIT;
@@ -1842,6 +1851,7 @@ void TransactionManager::removeAllReplicationContext() {
 		replContextPartition_[pId] = NULL;
 	}
 }
+
 void TransactionManager::removeAllAuthenticationContext() {
 	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
 		delete authContextPartition_[pId];
@@ -1909,7 +1919,6 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(0)
 		.setDefault(0);
-
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_CONNECTION_LIMIT, INT32)
 		.setMin(3)
 		.setMax(65536)

@@ -1131,8 +1131,7 @@ EventEngine::EventSocket* EventEngine::SocketPool::allocate(bool onSecondary) {
 
 	const int64_t baseLimit = ee_.config_->connectionCountLimit_;
 	if (baseLimit >= 0) {
-		const uint64_t current = base_.base().getTotalElementCount() -
-				base_.base().getFreeElementCount();
+		const uint64_t current = getCurrentUsage(base_);
 		const uint64_t limit = static_cast<uint64_t>(baseLimit) +
 				(ee_.config_->multicastAddress_.isEmpty() ? 0 : 1);
 
@@ -1228,6 +1227,11 @@ SocketFactory& EventEngine::SocketPool::getFactory(
 		}
 	}
 	return *factory;
+}
+
+uint64_t EventEngine::SocketPool::getCurrentUsage(
+		util::ObjectPool<EventSocket> &base) {
+	return (base.getTotalElementCount() - base.getFreeElementCount());
 }
 
 

@@ -32,6 +32,9 @@
 #include "util/net.h"
 
 class EventEngine;
+class CheckpointService;
+struct ManagerSet;
+struct RestContext;
 
 typedef std::set<AddressInfo> NodeAddressSet;
 typedef NodeAddressSet::iterator NodeAddressSetItr;
@@ -115,8 +118,41 @@ public:
 		NOT_FOLLOWER
 	};
 
+	struct StandbyInfo {
+		StandbyInfo(const ConfigTable& configTable, const char* confDir);
+		~StandbyInfo();
+
+		void initialize(ManagerSet& mgrSet);
+		void getMode(picojson::value& result);
+
+		bool isStandby() {
+			return isStandby_;
+		}
+
+		bool isEnable() {
+			return enableMode_;
+		}
+
+		const char* getStandbyModeName(bool isStandby) {
+			if (isStandby) {
+				return "STANDBY";
+			}
+			else {
+				return "NOT STANDBY";
+			}
+		}
+		
+		bool changeStatus(bool isStandby, RestContext& restCxt);
+		util::Mutex lock_;
+		bool enableMode_;
+		bool isStandby_;
+		const char* configDir_;
+		std::string standbyFileName_;
+		PartitionTable *pt_;
+	};
+
 	ClusterManager(const ConfigTable& configTable,
-		PartitionTable* partitionTable, ClusterVersionId versionId = 0);
+		PartitionTable* partitionTable, ClusterVersionId versionId, const char* confDir);
 	~ClusterManager();
 
 	ClusterConfig& getConfig() {
@@ -127,9 +163,14 @@ public:
 		return extraConfig_;
 	}
 
+	StandbyInfo &getStandbyInfo() {
+		return standbyInfo_;
+	}
+
 	StatTable::StatUpdator& getStatUpdator() {
 		return statUpdator_;
 	}
+
 
 	void checkNodeStatus();
 
@@ -160,7 +201,7 @@ public:
 
 	uint8_t uuid_[16];
 
-	void initialize(ClusterService* clsSvc, EventEngine* ee);
+	void initialize(ManagerSet& mgrSet);
 	typedef int64_t EventMonotonicTime;
 	EventMonotonicTime getMonotonicTime();
 
@@ -1434,6 +1475,7 @@ public:
 		const StatTable& stat);
 
 private:
+	
 
 	void getSafetyLeaveNodeList(util::StackAllocator& alloc,
 		NodeIdList& candList, int32_t removeNodeNum = 1);
@@ -1467,6 +1509,7 @@ private:
 		else {
 			clusterInfo_.quorum_ = (reserveNodeNum / 2) + 1;
 		}
+		pt_->setReserveNum(reserveNodeNum);
 	}
 
 	int32_t getQuorum() {
@@ -1924,6 +1967,8 @@ private:
 	ClusterService* clsSvc_;
 	Config config_;
 	int64_t expectedCheckTime_;
+	StandbyInfo standbyInfo_;
+	CheckpointService* cpSvc_;
 };
 
 template <class T>

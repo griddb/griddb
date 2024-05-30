@@ -64,8 +64,8 @@ std::string Chunk::getSignature(int32_t level) const {
 		}
 		return oss.str();
 	} else {
-		return std::to_string(
-			UtilBytes::getCheckSum(data_, dataSize_, Chunk::HEADER_SIZE));
+		return std::to_string(static_cast<uint32_t>(
+				UtilBytes::getCheckSum(data_, dataSize_, Chunk::HEADER_SIZE)));
 	}
 }
 
@@ -119,9 +119,11 @@ ChunkSLT& ChunkSLT::init() {
 
 int32_t ChunkSLT::allocateObject(uint8_t* record, int32_t recordLength) {
 	int32_t lastOffset = Chunk::getInt(OFFSET_LAST_POSITION);
-	int32_t spaceNeeded = recordLength + (sizeof(int32_t)*2);
+	int32_t spaceNeeded =
+			static_cast<int32_t>(recordLength + (sizeof(int32_t)*2));
 	int32_t slotCount = Chunk::getInt(OFFSET_NUM_SLOTS);
 	assert(spaceNeeded <= getAvailableSpace());
+	UNUSED_VARIABLE(spaceNeeded);
 	if (getInt(OFFSET_UNUSED_NUM_SLOTS) > 0) {
 		for (int32_t slotId = 0; slotId < slotCount; slotId++) {
 			if (getSlotLength(slotId) < 0) {
@@ -147,10 +149,12 @@ int32_t ChunkSLT::allocateObject(uint8_t* record, int32_t recordLength) {
 	return slotCount;
 }
 void ChunkSLT::tryAllocateObject(int32_t slotId, uint8_t* record, int32_t recordLength) {
-	int32_t lastOffset = getInt(OFFSET_LAST_POSITION);
-	int32_t spaceNeeded = recordLength + (sizeof(int32_t)*2);
+	int32_t lastOffset = static_cast<int32_t>(getInt(OFFSET_LAST_POSITION));
+	int32_t spaceNeeded =
+			static_cast<int32_t>(recordLength + (sizeof(int32_t)*2));
 	int32_t slotCount = getInt(OFFSET_NUM_SLOTS);
 	assert(spaceNeeded <= getAvailableSpace());
+	UNUSED_VARIABLE(spaceNeeded);
 	if (slotId < slotCount) {
 		assert(getSlotLength(slotId) < 0); 
 		setSlotLength(slotId, recordLength);
@@ -261,10 +265,11 @@ std::string ChunkSLT::toString() const {
 
 
 void ChunkBuddy::resetParameters(int32_t chunkSize) {
-	CHUNK_EXP_SIZE_ = util::ilog2(chunkSize);
-	minPower_ = util::nextPowerBitsOf2(sizeof(V4ObjectHeader));
+	CHUNK_EXP_SIZE_ = static_cast<int8_t>(util::ilog2(chunkSize));
+	minPower_ = static_cast<uint8_t>(
+			util::nextPowerBitsOf2(sizeof(V4ObjectHeader)));
 	maxPower_ = CHUNK_EXP_SIZE_;
-	tableSize_ = sizeof(uint32_t) * (maxPower_ + 1);
+	tableSize_ = static_cast<int32_t>(sizeof(uint32_t) * (maxPower_ + 1));
 	freeListOffset_ = CHUNK_HEADER_FULL_SIZE - tableSize_;  
 }
 
@@ -287,12 +292,16 @@ ChunkBuddy& ChunkBuddy::init() {
 	V4ObjectHeader *header = getV4ObjectHeader(data_, 0);
 	header->setUsed(false, maxPower_);  
 	header->next_ = header->prev_ = 0;  
-	uint8_t k = util::nextPowerBitsOf2(CHUNK_HEADER_FULL_SIZE);
+	uint8_t k = static_cast<int8_t>(
+			util::nextPowerBitsOf2(CHUNK_HEADER_FULL_SIZE));
 	allocateObject(data_, k, OBJECT_TYPE_CHUNK_HEADER);
 	return *this;
 }
 
-int32_t ChunkBuddy::allocateObject(uint8_t* record, uint8_t requestExpSize, ObjectType type) {
+int32_t ChunkBuddy::allocateObject(
+		uint8_t* record, uint8_t requestExpSize, ObjectType type) {
+	UNUSED_VARIABLE(record);
+
 	assert(requestExpSize < maxPower_);
 	uint8_t expSize = std::max(minPower_, requestExpSize);
 	uint32_t *freeList = getFreeList();
@@ -354,8 +363,9 @@ int32_t ChunkBuddy::allocateObject(uint8_t* record, uint8_t requestExpSize, Obje
 	header->setUsed(true, kmin, type);
 
 	while (kmin < k--) {
-		V4ObjectHeader *buddy =
-			getV4ObjectHeader(reinterpret_cast<uint8_t *>(header), (1ULL << k));
+		V4ObjectHeader *buddy = getV4ObjectHeader(
+				reinterpret_cast<uint8_t *>(header),
+				static_cast<int32_t>(1ULL << k));
 		buddy->setUsed(false, k);
 
 		freeList[k] =
@@ -380,7 +390,10 @@ int32_t ChunkBuddy::allocateObject(uint8_t* record, uint8_t requestExpSize, Obje
 	return static_cast<uint32_t>(objectAddr - chunkTop);
 }
 
-int32_t ChunkBuddy::tryAllocateObject(uint8_t* record, uint8_t requestExpSize, ObjectType type, int32_t offset) {
+int32_t ChunkBuddy::tryAllocateObject(
+		uint8_t* record, uint8_t requestExpSize, ObjectType type, int32_t offset) {
+	UNUSED_VARIABLE(record);
+
 	assert(requestExpSize < maxPower_);
 	uint8_t expSize = std::max(minPower_, requestExpSize);
 	uint32_t *freeList = getFreeList();
@@ -408,10 +421,13 @@ int32_t ChunkBuddy::tryAllocateObject(uint8_t* record, uint8_t requestExpSize, O
 		if (freeList[k] != UINT32_MAX) {
 			list = getV4ObjectHeader(chunkTop, freeList[k]);
 			assert(list->isValid());
+
 			uint8_t *objectAddr = reinterpret_cast<uint8_t *>(list) + hSize_;
 			assert(objectAddr > chunkTop);
+
 			uint32_t allocated =  static_cast<uint32_t>(objectAddr - chunkTop);
-			assert(allocated == offset);
+			assert(allocated == static_cast<uint32_t>(offset));
+			UNUSED_VARIABLE(allocated);
 			break;
 		}
 	}
@@ -448,8 +464,9 @@ int32_t ChunkBuddy::tryAllocateObject(uint8_t* record, uint8_t requestExpSize, O
 	addOccupiedSize(INT32_C(1) << expSize);
 
 	while (kmin < k--) {
-		V4ObjectHeader *buddy =
-			getV4ObjectHeader(reinterpret_cast<uint8_t *>(header), (1ULL << k));
+		V4ObjectHeader *buddy = getV4ObjectHeader(
+				reinterpret_cast<uint8_t *>(header),
+				static_cast<int32_t>(1ULL << k));
 		buddy->setUsed(false, k);
 
 		freeList[k] =
@@ -475,7 +492,8 @@ int32_t ChunkBuddy::tryAllocateObject(uint8_t* record, uint8_t requestExpSize, O
 
 void ChunkBuddy::overwriteObject(int32_t offset, const uint8_t* record, uint8_t expSize) {
 	uint8_t* addr = data_ + offset;
-	int8_t allocatedExpSize = getObjectSize(offset, V4ObjectHeader::OBJECT_HEADER_SIZE);
+	const int8_t allocatedExpSize = static_cast<int8_t>(
+			getObjectSize(offset, V4ObjectHeader::OBJECT_HEADER_SIZE));
 	if(allocatedExpSize != expSize) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Invalid record size");
 	} else {
@@ -512,12 +530,11 @@ void ChunkBuddy::removeObject(int32_t offset) {
 #endif
 
 	uint8_t k = header->getPower();
-	uint8_t freedBlockSize = k;
 	subtractOccupiedSize(INT32_C(1) << k);
 
 
 
-	int32_t mask = 1L << k;
+	int32_t mask = static_cast<int32_t>(1L << k);
 	V4ObjectHeader *buddy = getV4ObjectHeader(chunkTop, (headerOffset ^ mask));
 	for (;;) {
 		assert(buddy->isValid());

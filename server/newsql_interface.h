@@ -69,13 +69,13 @@ int gsCursorNext(SQLCursor *pCur, int *pRes);
 
 int gsCursorLast(SQLCursor *pCur, int *pRes);
 
-int gsCursorPosition(SQLCursor *pCur, int64_t *pos);
+int gsCursorPosition(SQLCursor *pCur, i64 *pos);
+	
+int gsCursorPosition2(SQLCursor *pCur, int *blockNo, i64 *pos);
 
-int gsCursorPosition2(SQLCursor *pCur, int *blockNo, int64_t *pos);
+int gsCursorMove(SQLCursor *pCur, i64 *pos, int *pRes);
 
-int gsCursorMove(SQLCursor *pCur, int64_t *pos, int *pRes);
-
-int gsCursorMove2(SQLCursor *pCur, int blockNo, int64_t *pos, int *pRes);
+int gsCursorMove2(SQLCursor *pCur, int blockNo, i64 *pos, int *pRes);
 
 int gsColumnType(SQLStatement *pSqlStatement, int iTable, int iCol);
 
@@ -91,7 +91,7 @@ int gsGetConnectionEnv(SQLStatement *pSqlStatement, int type);
 
 
 
-int gsGetValueString(SQLCursor *pCur, int iCol, const char **value, size_t *size);
+int gsGetValueString(SQLCursor *pCur, int iCol, char **value, size_t *size);
 
 int gsGetValueBool(SQLCursor *pCur, int iCol, int8_t *value);
 
@@ -112,7 +112,7 @@ int gsGetValueTimestamp(SQLCursor *pCur, int iCol, int64_t *value);
 int gsGetValueBlob(SQLCursor *pCur, int iCol, struct GSBlobTag *value);
 
 
-int gsGetValueStringNull(SQLCursor *pCur, int iCol, const char **value, size_t *size, int *pRes);
+int gsGetValueStringNull(SQLCursor *pCur, int iCol, char **value, size_t *size, int *pRes);
 
 int gsGetValueBoolNull(SQLCursor *pCur, int iCol, int8_t *value, int *pRes);
 

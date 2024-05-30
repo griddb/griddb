@@ -140,7 +140,7 @@ uint32_t BlobCursor::getPrefixDataSize(ObjectManagerV4 &objectManager, uint64_t 
 uint32_t BlobCursor::getMaxArrayNum(ObjectManagerV4 &objectManager) {
 	uint32_t headerSize = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t);
 	uint32_t allocateSize = objectManager.getRecommendedLimitObjectSize() - headerSize;
-	return allocateSize / sizeof(BlobArrayElement);
+	return static_cast<uint32_t>(allocateSize / sizeof(BlobArrayElement));
 }
 
 uint32_t BlobCursor::calcDepth(ObjectManagerV4 &objectManager, uint64_t totalSize, uint32_t elemNum, uint32_t &topArrayNum) {
@@ -508,9 +508,11 @@ int32_t BlobProcessor::compare(TransactionContext &txn,
 /*!
 	@brief Set field value to message
 */
-void BlobProcessor::getField(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
-	MessageRowStore *messageRowStore) {
+void BlobProcessor::getField(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
+		MessageRowStore *messageRowStore) {
+	UNUSED_VARIABLE(txn);
 
 	if (objectValue->data() == NULL) {
 		messageRowStore->setVarDataHeaderField(columnId, 0);
@@ -536,9 +538,11 @@ void BlobProcessor::getField(TransactionContext &txn,
 /*!
 	@brief Clone field value
 */
-void BlobProcessor::clone(TransactionContext &txn, ObjectManagerV4 &objectManager,
-	ColumnType, const uint8_t *srcObjectField, uint8_t *destObjectField,
-	AllocateStrategy &allocateStrategy, OId neighborOId) {
+void BlobProcessor::clone(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		ColumnType, const uint8_t *srcObjectField, uint8_t *destObjectField,
+		AllocateStrategy &allocateStrategy, OId neighborOId) {
+	UNUSED_VARIABLE(txn);
 
 	BlobCursor srcBlobCursor(objectManager, allocateStrategy, const_cast<uint8_t *>(srcObjectField));
 	BlobCursor destBlobCursor(objectManager, allocateStrategy, destObjectField, neighborOId);
@@ -558,8 +562,11 @@ void BlobProcessor::clone(TransactionContext &txn, ObjectManagerV4 &objectManage
 /*!
 	@brief Remove field value
 */
-void BlobProcessor::remove(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType, uint8_t *objectField) {
+void BlobProcessor::remove(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, ColumnType, uint8_t *objectField) {
+	UNUSED_VARIABLE(txn);
+
 	BlobCursor blobCursor(objectManager, strategy, objectField);
 	blobCursor.finalize();
 }
@@ -567,10 +574,13 @@ void BlobProcessor::remove(TransactionContext &txn,
 /*!
 	@brief Set field value
 */
-void BlobProcessor::setField(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, const uint8_t *srcAddr, uint32_t srcSize,
-	uint8_t *destAddr, uint32_t &destSize,
-	AllocateStrategy &allocateStrategy, OId neighborOId) {
+void BlobProcessor::setField(
+		TransactionContext &txn,
+		ObjectManagerV4 &objectManager, const uint8_t *srcAddr, uint32_t srcSize,
+		uint8_t *destAddr, uint32_t &destSize,
+		AllocateStrategy &allocateStrategy, OId neighborOId) {
+	UNUSED_VARIABLE(txn);
+
 
 	const uint8_t *currentAddr = srcAddr + 
 		ValueProcessor::getEncodedVarSize(srcSize);  

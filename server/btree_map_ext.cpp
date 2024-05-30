@@ -46,7 +46,7 @@ int32_t BtreeMap::searchBulk(
 		switchToBasicType(getKeyType(), searchFunc);
 	}
 
-	if (sc.isSuspended()) {
+	if (!sc.isSuspended()) {
 		ResultSize suspendLimit = std::max<ResultSize>(sc.getSuspendLimit(), 1);
 		suspendLimit -= std::min<ResultSize>(suspendLimit, idList.size());
 		if (suspendLimit < MINIMUM_SUSPEND_SIZE) {
@@ -80,13 +80,14 @@ int32_t BtreeMap::findBulk(
 	TermConditionRewriter<P, K, V, R> rewriter(txn, sc);
 	TermConditionUpdator *condUpdator = sc.getTermConditionUpdator();
 
-	const ResultSize suspendLimit = std::max<ResultSize>(sc.getSuspendLimit(), 1);
+	assert(condUpdator != NULL);
+	condUpdator->bind(sc);
+
 	bool initializedForNext = false;
 	const bool suspendedLast = (sc.getSuspendKey() != NULL);
 
-	assert(condUpdator != NULL);
 	while (condUpdator->exists()) {
-		rewriter.rewrite(*condUpdator);
+		rewriter.rewrite();
 
 		if (!initializedForNext) {
 			settingAllocScope = UTIL_MAKE_LOCAL_UNIQUE(
@@ -109,6 +110,8 @@ int32_t BtreeMap::findBulk(
 			break;
 		}
 	}
+
+	condUpdator->unbind();
 
 	if (idList.empty()) {
 		return GS_FAIL;
@@ -157,7 +160,6 @@ bool BtreeMap::findNext(
 		TransactionContext &txn, SearchContext &sc, util::XArray<R> &idList,
 		Setting &setting, BNode<K, V> &node, int32_t &loc) {
 	typedef typename MapKeyTraits<K>::TYPE T;
-	const bool keyComposite = util::IsSame<T, CompositeInfoObject>::VALUE;
 
 	TermCondition *startCond = setting.getStartKeyCondition();
 	TermCondition *endCond = setting.getEndKeyCondition();
@@ -520,6 +522,7 @@ bool BtreeMap::findTopNodeNext(
 		int32_t &loc, CmpFunctor<P, K, V, C> &cmp, Setting &setting) {
 	assert(!isEmpty());
 
+	const bool isUniqueKey = isUnique();
 	do {
 		if (node.getBaseAddr() == NULL) {
 			break;
@@ -527,45 +530,59 @@ bool BtreeMap::findTopNodeNext(
 
 		assert(loc >= 0);
 
-		const int32_t size = node.numkeyValues();
-		if (cmp(
-				txn, *getObjectManager(), allocateStrategy_, val,
-				node.getKeyValue(size - 1), setting) > 0) {
+		for (;;) {
+			const int32_t size = node.numkeyValues();
 
-			break;
-		}
+			if (
+					cmp(
+							txn, *getObjectManager(), allocateStrategy_, val,
+							node.getKeyValue(size - 1), setting) > 0 ||
+					cmp(
+							txn, *getObjectManager(), allocateStrategy_, val,
+							node.getKeyValue(0), setting) < 0) {
+				if (node.isRoot()) {
+					break;
+				}
 
-		const bool isUniqueKey = isUnique();
-		const int32_t initialLoc = loc;
-		assert(0 <= initialLoc && initialLoc < size);
-
-		int32_t l = 0;
-		int32_t r = size - initialLoc;
-		while (l < r) {
-			const int32_t i = (l + r) >> 1;
-			const int32_t currentCmpResult = cmp(
-					txn, *getObjectManager(), allocateStrategy_, val,
-					node.getKeyValue(initialLoc + i), setting);
-			if (currentCmpResult > 0) { 
-				l = i + 1;
+				node.load(node.getParentOId(), false);
+				loc = 0;
+				continue;
 			}
-			else if (isUniqueKey && currentCmpResult == 0) {
-				loc = initialLoc + i;
+
+
+			const int32_t initialLoc = loc;
+			assert(0 <= initialLoc && initialLoc < size);
+
+			int32_t l = 0;
+			int32_t r = size - initialLoc;
+			while (l < r) {
+				const int32_t i = (l + r) >> 1;
+				const int32_t currentCmpResult = cmp(
+						txn, *getObjectManager(), allocateStrategy_, val,
+						node.getKeyValue(initialLoc + i), setting);
+				if (currentCmpResult > 0) { 
+					l = i + 1;
+				}
+				else if (isUniqueKey && currentCmpResult == 0) {
+					loc = initialLoc + i;
+					return true; 
+				}
+				else {
+					r = i; 
+				}
+			}
+			assert(r == l);
+
+			if (!isUniqueKey && cmp(txn, *getObjectManager(),
+					allocateStrategy_, val,
+					node.getKeyValue(initialLoc + l), setting) == 0) {
+				loc = initialLoc + l;
 				return true; 
 			}
-			else {
-				r = i; 
-			}
-		}
-		assert(r == l);
-		l += initialLoc;
-		if (cmp(txn, *getObjectManager(),
-				allocateStrategy_, val, node.getKeyValue(l), setting) != 0) {
-			break;
-		}
+			loc = 0;
+			return false;
 
-		loc = l;
-		return true; 
+		}
 	}
 	while (false);
 
@@ -609,9 +626,7 @@ StringObject, StringKey, OId, OId>::~TermConditionRewriter() {
 }
 
 void BtreeMap::TermConditionRewriter<
-StringObject, StringKey, OId, OId>::rewrite(TermConditionUpdator &condUpdator) {
-	condUpdator.update(sc_);
-
+StringObject, StringKey, OId, OId>::rewrite() {
 	for (size_t i = 0; i < ENTRY_COUNT; i++) {
 		Entry &entry = entryList_[i];
 

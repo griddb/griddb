@@ -416,6 +416,70 @@ const ValueOperatorTable ComparatorTable::geTable_ = {
 		&Timestamps::op<GeOp, Nano, Micro>,
 		&Timestamps::op<GeOp, Nano, Nano>}};
 
+const ValueOperatorList ComparatorTable::extraLtList_ = {
+	&ltStringString,
+	&ltBoolBool,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+
+const ValueOperatorList ComparatorTable::extraGtList_ = {
+	&gtStringString,
+	&gtBoolBool,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+
+const ValueOperatorList ComparatorTable::extraLeList_ = {
+	&leStringString,
+	&leBoolBool,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+
+const ValueOperatorList ComparatorTable::extraGeList_ = {
+	&geStringString,
+	&geBoolBool,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+
 const Operator ComparatorTable::isNull_ = &isNullAnyType;
 const Operator ComparatorTable::isNotNull_ = &isNotNullAnyType;
 
@@ -425,14 +489,16 @@ bool geomOperation(TransactionContext& txn, uint8_t const* p,
 const Operator ComparatorTable::geomOp_ = &geomOperation;
 
 Operator ComparatorTable::getOperator(
-		DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
-	Operator op = findOperator(opType, type1, type2);
+		DSExpression::Operation opType, ColumnType type1, ColumnType type2,
+		bool extra) {
+	Operator op = findOperator(opType, type1, type2, extra);
 	assert(op != NULL);
 	return op;
 }
 
 Operator ComparatorTable::findOperator(
-		DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
+		DSExpression::Operation opType, ColumnType type1, ColumnType type2,
+		bool extra) {
 	const ValueOperatorTable *table;
 	switch (opType) {
 	case DSExpression::NE:
@@ -460,9 +526,47 @@ Operator ComparatorTable::findOperator(
 	case DSExpression::GEOM_OP:
 		return geomOp_;
 	default:
+		table = NULL;
+		break;
+	}
+
+	Operator op = NULL;
+	if (table != NULL) {
+		op = findOperator(*table, type1, type2);
+	}
+
+	if (extra && op == NULL) {
+		return findExtraOperator(opType, type1, type2);
+	}
+
+	return op;
+}
+
+Operator ComparatorTable::findExtraOperator(
+		DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
+	if (type1 != type2) {
 		return NULL;
 	}
-	return findOperator(*table, type1, type2);
+
+	const ValueOperatorList *list;
+	switch (opType) {
+	case DSExpression::LT:
+		list = &extraLtList_;
+		break;
+	case DSExpression::LE:
+		list = &extraLeList_;
+		break;
+	case DSExpression::GT:
+		list = &extraGtList_;
+		break;
+	case DSExpression::GE:
+		list = &extraGeList_;
+		break;
+	default:
+		return NULL;
+	}
+
+	return (*list)[toOperatorIndex(type1)];
 }
 
 const ValueCalculatorTable CalculatorTable::addTable_ = {

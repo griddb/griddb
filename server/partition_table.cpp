@@ -27,6 +27,8 @@
 #include "container_key.h"
 #include <numeric>
 
+#include "sql_processor.h"
+
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 
 NodeAddress::NodeAddress(const char8_t* addr, uint16_t port) {
@@ -92,12 +94,13 @@ void AddressInfo::setNodeAddress(ServiceType type, NodeAddress& address) {
 	}
 }
 
-PartitionTable::PartitionTable(const ConfigTable& configTable) :
+PartitionTable::PartitionTable(const ConfigTable& configTable, const char* configDir) :
 	fixedSizeAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_CS, "partitionTableFixed"), 1 << 18),
 	globalStackAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_CS, "partitionTableStack"), &fixedSizeAlloc_),
 	nodeNum_(0),
 	masterNodeId_(UNDEF_NODEID),
 	partitionLockList_(NULL),
+	goal_(NULL, NULL),
 	currentRuleNo_(PARTITION_RULE_UNDEF),
 	config_(configTable, MAX_NODE_NUM),
 	prevMaxNodeId_(0),
@@ -115,10 +118,20 @@ PartitionTable::PartitionTable(const ConfigTable& configTable) :
 	currentRevisionNo_(1),
 	prevDropRevisionNo_(0),
 	isGoalPartition_(false),
-	hasPublicAddress_(false)
+	hasPublicAddress_(false),
+	goalAssignmentRule_(configTable.get<int32_t>(CONFIG_TABLE_CS_GOAL_ASSIGNMENT_RULE)),
+	stableGoal_(configTable, configDir),
+	reserveNum_(1),
+	currentGoalAssignmentRule_(-1)
 {
 
 	try {
+		if (goalAssignmentRule_ != PARTITION_ASSIGNMENT_RULE_DEFAULT
+			&& enableRackZoneAwareness_) {
+			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, 
+				"Rackzone awareness and partition assignement rule (NOT 'DEfAULT') can not be defined at the same time");
+		}
+
 		uint32_t partitionNum = config_.partitionNum_;
 		partitionLockList_ = ALLOC_NEW(globalStackAlloc_) util::RWLock[partitionNum];
 		partitions_ = ALLOC_NEW(globalStackAlloc_) Partition[partitionNum];
@@ -146,6 +159,7 @@ PartitionTable::PartitionTable(const ConfigTable& configTable) :
 		partitionDigit_ = digit;
 		lsnDigit_ = 10;
 		goal_.init(this);
+		stableGoal_.init(this);
 
 		PartitionRole initRole;
 		newsqlPartitionList_.resize(getPartitionNum(), initRole);
@@ -195,50 +209,50 @@ PartitionTable::~PartitionTable() {
 	}
 }
 
-NodeId PartitionTable::getOwner(PartitionId pId, TableType type) {
+NodeId PartitionTable::getOwner(PartitionId pId) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	return partitions_[pId].roles_[type].getOwner();
+	return partitions_[pId].roles_[PT_CURRENT_OB].getOwner();
 }
 
-bool PartitionTable::isOwner(PartitionId pId, NodeId targetNodeId, TableType type) {
+bool PartitionTable::isOwner(PartitionId pId, NodeId targetNodeId) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	return (partitions_[pId].roles_[type].isOwner(targetNodeId));
+	return (partitions_[pId].roles_[PT_CURRENT_OB].isOwner(targetNodeId));
 }
 
-bool PartitionTable::isOwnerOrBackup(PartitionId pId, NodeId targetNodeId, TableType type) {
+bool PartitionTable::isOwnerOrBackup(PartitionId pId, NodeId targetNodeId) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	return (partitions_[pId].roles_[type].isOwner(targetNodeId) ||
-		partitions_[pId].roles_[type].isBackup(targetNodeId));
+	return (partitions_[pId].roles_[PT_CURRENT_OB].isOwner(targetNodeId) ||
+		partitions_[pId].roles_[PT_CURRENT_OB].isBackup(targetNodeId));
 }
 
-void PartitionTable::getBackup(PartitionId pId, util::XArray<NodeId>& backups, TableType type) {
+void PartitionTable::getBackup(PartitionId pId, util::XArray<NodeId>& backups) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	partitions_[pId].roles_[type].getBackups(backups);
+	partitions_[pId].roles_[PT_CURRENT_OB].getBackups(backups);
 }
 
-void PartitionTable::getCatchup(PartitionId pId, util::XArray<NodeId>& catchups, TableType type) {
+void PartitionTable::getCatchup(PartitionId pId, util::XArray<NodeId>& catchups) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	partitions_[pId].roles_[type].getCatchups(catchups);
+	partitions_[pId].roles_[PT_CURRENT_OB].getCatchups(catchups);
 }
 
 NodeId PartitionTable::getCatchup(PartitionId pId) {
@@ -256,22 +270,22 @@ NodeId PartitionTable::getCatchup(PartitionId pId) {
 	}
 }
 
-bool PartitionTable::isBackup(PartitionId pId, NodeId targetNodeId, TableType type) {
+bool PartitionTable::isBackup(PartitionId pId, NodeId targetNodeId) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	return (partitions_[pId].roles_[type].isBackup(targetNodeId));
+	return (partitions_[pId].roles_[PT_CURRENT_OB].isBackup(targetNodeId));
 }
 
-bool PartitionTable::isCatchup(PartitionId pId, NodeId targetNodeId, TableType type) {
+bool PartitionTable::isCatchup(PartitionId pId, NodeId targetNodeId) {
 
 	if (pId >= config_.partitionNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	return (partitions_[pId].roles_[type].isCatchup(targetNodeId));
+	return (partitions_[pId].roles_[PT_CURRENT_OB].isCatchup(targetNodeId));
 }
 
 bool PartitionTable::setNodeInfo(NodeId nodeId, ServiceType type, NodeAddress& address) {
@@ -282,6 +296,10 @@ bool PartitionTable::setNodeInfo(NodeId nodeId, ServiceType type, NodeAddress& a
 	if (nodeId >= nodeNum_) {
 		nodeNum_ = nodeId + 1;
 		resizeCurrenPartition(0);
+		if (type == CLUSTER_SERVICE) {
+			util::LockGuard<util::Mutex> lock(nodeInfoLock_);
+			nodeOrderingSet_.insert(std::make_pair(address.toString(), nodeId));
+		}
 	}
 	return nodes_[nodeId].nodeBaseInfo_[type].set(address);
 }
@@ -391,7 +409,7 @@ bool PartitionTable::checkClearRole(PartitionId pId) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	if (isBackup(pId) && getPartitionStatus(pId) == PT_ON) {
-		clear(pId, PartitionTable::PT_CURRENT_OB);
+		clear(pId);
 		setPartitionRoleStatus(pId, PT_NONE);
 		setPartitionStatus(pId, PT_OFF);
 		return true;
@@ -425,7 +443,6 @@ bool PartitionTable::checkConfigurationChange(util::StackAllocator& alloc,
 
 bool PartitionTable::check(PartitionContext& context) {
 
-	bool retFlag = false;
 	try {
 		util::StackAllocator& alloc = context.getAllocator();
 		if (context.currentTime_ < nextApplyRuleLimitTime_) {
@@ -581,7 +598,7 @@ void PartitionTable::PartitionRole::encodeAddress(PartitionTable* pt, PartitionR
 
 	pId_ = role.getPartitionId();
 	revision_ = role.getRevision();
-	type_ = role.getTableType();
+	type_ = PT_CURRENT_OB;
 
 	NodeId ownerNodeId = role.getOwner();
 	if (ownerNodeId != UNDEF_NODEID) {
@@ -663,33 +680,30 @@ void PartitionTable::getServiceAddress(NodeId nodeId, picojson::value& result,
 	}
 }
 
-void PartitionTable::updateNewSQLPartition(
-	std::vector<PartitionRole>& newsqlPartitionList) {
-
-	util::LockGuard<util::Mutex> lock(newsqlLock_);
-	if (newsqlPartitionList.size() != getPartitionNum()) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_PT_INTERNAL, "");
+void PartitionTable::getServiceAddress(NodeId nodeId, picojson::object& result,
+	const ServiceTypeInfo& addressType) {
+	try {
+		picojson::value resultValue;
+		getServiceAddress(
+			nodeId, resultValue, static_cast<ServiceType>(addressType.first),
+			addressType.second);
+		const picojson::object& resultObj = resultValue.get<picojson::object>();
+		result.insert(resultObj.begin(), resultObj.end());
 	}
-	for (PartitionId pId = 0;
-		pId < newsqlPartitionList.size(); pId++) {
-		if ((newsqlPartitionList[pId].getRevisionNo()
-			== PartitionRevision::INITIAL_CLUSTER_REVISION
-			|| newsqlPartitionList[pId].getRevisionNo()
-		> newsqlPartitionList[pId].getRevisionNo())) {
-			newsqlPartitionList_[pId] = newsqlPartitionList[pId];
-		}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
-void PartitionTable::updateNewSQLPartition(SubPartitionTable& newsqlPartition) {
+
+void PartitionTable::updateNewSQLPartition(SubPartitionTable& newsqlPartition, bool force) {
 
 	util::LockGuard<util::Mutex> lock(newsqlLock_);
 	for (int32_t pos = 0; pos < newsqlPartition.size(); pos++) {
 		SubPartition sub = newsqlPartition.getSubPartition(pos);
 		if (sub.pId_ < getPartitionNum()) {
 			if ((sub.role_.getRevisionNo() == PartitionRevision::INITIAL_CLUSTER_REVISION
-				|| sub.role_.getRevisionNo() > newsqlPartitionList_[sub.pId_].getRevisionNo())) {
+				|| sub.role_.getRevisionNo() > newsqlPartitionList_[sub.pId_].getRevisionNo()) || force) {
 				newsqlPartitionList_[sub.pId_] = sub.role_;
 			}
 		}
@@ -727,8 +741,10 @@ void PartitionTable::getActiveNodeList(T1& activeNodeList, T2& downNodeSet, int6
 	}
 }
 
-void PartitionTable::changeClusterStatus(ClusterStatus status, NodeId masterNodeId,
-	int64_t baseTime, int64_t nextHeartbeatTimeout) {
+void PartitionTable::changeClusterStatus(
+		ClusterStatus status, NodeId masterNodeId,
+		int64_t baseTime, int64_t nextHeartbeatTimeout) {
+	UNUSED_VARIABLE(baseTime);
 
 	switch (status) {
 	case SUB_MASTER:
@@ -736,6 +752,7 @@ void PartitionTable::changeClusterStatus(ClusterStatus status, NodeId masterNode
 		setMaster(UNDEF_NODEID);
 		resetBlockQueue();
 		resizeCurrenPartition(0);
+		nextApplyRuleLimitTime_ = UNDEF_TTL;
 		break;
 	case MASTER:
 		setMaster(SELF_NODEID);
@@ -796,8 +813,8 @@ void PartitionTable::resetDownNode(NodeId targetNodeId) {
 			currentRole.set(currentOwner, tmpBackups, tmpCatchups);
 			setPartitionRole(pId, currentRole);
 		}
-		setPartitionStatus(pId, PT_OFF, targetNodeId);
 		setPartitionRoleStatus(pId, PT_NONE, targetNodeId);
+		setPartitionStatus(pId, PT_OFF, targetNodeId);
 	}
 }
 
@@ -857,8 +874,11 @@ bool PartitionTable::checkNextOwner(
 	}
 }
 
-bool PartitionTable::checkNextBackup(PartitionId pId, NodeId checkedNode, LogSequentialNumber checkedLsn,
-	LogSequentialNumber currentOwnerStartLsn, LogSequentialNumber currentOwnerLsn) {
+bool PartitionTable::checkNextBackup(
+		PartitionId pId, NodeId checkedNode, LogSequentialNumber checkedLsn,
+		LogSequentialNumber currentOwnerStartLsn, LogSequentialNumber currentOwnerLsn) {
+	UNUSED_VARIABLE(pId);
+	UNUSED_VARIABLE(checkedNode);
 
 	bool backupCond1 = !checkLimitOwnerBackupLsnGap(currentOwnerLsn, checkedLsn);
 	bool backupCond2 = (checkedLsn >= currentOwnerStartLsn);
@@ -1026,31 +1046,79 @@ bool PartitionTable::isUseRackZoneAwareness(util::StackAllocator& alloc) {
 	@param [in] context コンテキスト
 ** **/
 void PartitionTable::planGoal(PartitionContext& context) {
-
 	util::StackAllocator& alloc = context.getAllocator();
-	util::XArray<NodeId> nodeIdList(alloc);
-	getLiveNodeIdList(nodeIdList);
 	nextApplyRuleLimitTime_ = UNDEF_TTL;
 	currentRuleNo_ = PARTITION_RULE_UNDEF;
 	isGoalPartition_ = false;
+	util::Stopwatch  watch;
+	watch.reset();
+	watch.start();
+	int32_t traceLimitTime = 5 * 1000;
+	try {
+		preparePlanGoal();
+		util::Set<NodeAddress> liveNodeAddressSet(alloc);
+		getLiveNodeAddressSet(liveNodeAddressSet);
+		bool stableCluster =
+				(reserveNum_ == static_cast<ptrdiff_t>(liveNodeAddressSet.size()));
+		bool assignedGoal = false;
 
-	for (int32_t i = 0; i < getNodeNum(); i++) {
-		if (getHeartbeatTimeout(i) == UNDEF_TTL) {
-			resetDownNode(i);
+		picojson::value value;
+		if (stableGoal_.isEnable()) {
+			if (stableGoal_.load() && stableGoal_.validateFormat(value, true)) {
+				if (stableCluster) {
+					assignedGoal = setGoalPartitions(alloc, &value, PT_STABLE_GOAL, true);
+					if (assignedGoal) {
+						currentGoalAssignmentRule_ = PARTITION_ASSIGNMENT_RULE_STABLE_GOAL;
+						GS_TRACE_CLUSTER_INFO("Plan goal by stable goal (stable cluster)");
+					}
+				}
+				else if (stableGoal_.isSucceedOnError()) {
+					if (setGoalPartitions(alloc, &value, PT_STABLE_GOAL, false)) {
+						assignedGoal = assignSucceedStableGoal(alloc);
+						if (assignedGoal) {
+							currentGoalAssignmentRule_ = PARTITION_ASSIGNMENT_RULE_PARTIAL_STABLE_GOAL;
+							GS_TRACE_CLUSTER_INFO("Plan goal by partial stable goal  (not stable cluster)");
+						}
+					}
+				}
+			}
+		}
+		if (!assignedGoal) {
+			if (stableGoal_.isEnable()) {
+				GS_TRACE_CLUSTER_INFO("Not applicable stable goal");
+			}
+			util::Vector<PartitionRole> roleList(alloc);
+			switch (goalAssignmentRule_) {
+			case PARTITION_ASSIGNMENT_RULE_DEFAULT: {
+				assignDefaultGoal(alloc);
+				currentGoalAssignmentRule_ = PARTITION_ASSIGNMENT_RULE_DEFAULT;
+				break;
+			}
+			case PARTITION_ASSIGNMENT_RULE_ROUNDROBIN: {
+				assignRoundRobinGoal(alloc);
+				currentGoalAssignmentRule_ = PARTITION_ASSIGNMENT_RULE_ROUNDROBIN;
+				break;
+			}
+			default:
+				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "Specified partition assignment rule is not supported");
+			}
+			GS_TRACE_CLUSTER_INFO("Plan goal (rule=" << dumpGoalAssignmentRule(currentGoalAssignmentRule_) << ")");
+			if (stableGoal_.isEnableInitialGenerate() && stableCluster) {
+				updateStableGoal(alloc);
+				writeStableGoal(alloc);
+			}
+		}
+		GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
+		int32_t lap = watch.elapsedMillis();
+		if (lap > traceLimitTime) {
+			GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, "Plan goal time=" << lap);
 		}
 	}
-	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
-		clearCatchupRole(pId);
-	}
-
-	util::Vector<PartitionRole> roleList(alloc);
-	try {
-		assignGoalTable(alloc, nodeIdList, roleList);
-		modifyGoalTable(alloc, nodeIdList, roleList);
-		setGoal(this, roleList);
-		GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
-	}
 	catch (std::exception& e) {
+		int32_t lap = watch.elapsedMillis();
+		if (lap > traceLimitTime) {
+			GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, "Plan goal time=" << lap);
+		}
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
@@ -1063,15 +1131,18 @@ void PartitionTable::planGoal(PartitionContext& context) {
 	@param [in] nodeIdList ノードIDリスト
 	@param [in] roleList ゴールとなるロールリスト
 ** **/
-PartitionTable::GoalPlanner::GoalPlanner(PartitionTable* pt, util::StackAllocator& alloc,
-	util::XArray<NodeId>& nodeIdList, util::Vector<PartitionRole>& roleList) :
-	alloc_(alloc), pt_(pt), nodeIdList_(nodeIdList), roleList_(roleList),
-	partitionNum_(pt->getPartitionNum()), nodeNum_(nodeIdList.size()), backupNum_(pt->getReplicationNum()),
-	priorityPartitionLists_(nodeNum_, util::Vector<PartitionId>(alloc), alloc),
-	priorityPartitionBackupLists_(nodeNum_, util::Vector<PartitionId>(alloc), alloc),
-	priorityCountList_(partitionNum_, 0, alloc),
-	maxLsnList_(partitionNum_, 0, alloc), rackZoneIdList_(alloc), 
-	currentRackZoneAwareness_(false), orgRackZoneAwareness_(true) {
+PartitionTable::GoalPlanner::GoalPlanner(
+		PartitionTable* pt, util::StackAllocator& alloc,
+		util::XArray<NodeId>& nodeIdList, util::Vector<PartitionRole>& roleList) :
+		alloc_(alloc), pt_(pt), nodeIdList_(nodeIdList), roleList_(roleList),
+		partitionNum_(pt->getPartitionNum()),
+		nodeNum_(static_cast<int32_t>(nodeIdList.size())),
+		backupNum_(pt->getReplicationNum()),
+		priorityPartitionLists_(nodeNum_, util::Vector<PartitionId>(alloc), alloc),
+		priorityPartitionBackupLists_(nodeNum_, util::Vector<PartitionId>(alloc), alloc),
+		priorityCountList_(partitionNum_, 0, alloc),
+		maxLsnList_(partitionNum_, 0, alloc), rackZoneIdList_(alloc),
+		currentRackZoneAwareness_(false), orgRackZoneAwareness_(true) {
 
 	if (backupNum_ > nodeNum_ - 1) {
 		backupNum_ = nodeNum_ - 1;
@@ -1131,7 +1202,9 @@ void PartitionTable::GoalPlanner::setupPriorityPartition() {
 	@param [in] backupOnly バックアップ候補のみ。第二優先度の場合はこのフラグがtrue
 	@return bool ロールセットしたかどうか true/false
 ** **/
-bool PartitionTable::GoalPlanner::assignPartition(PartitionId pId, int32_t nodePos, bool backupOnly, int32_t priorityNo) {
+bool PartitionTable::GoalPlanner::assignPartition(
+		PartitionId pId, int32_t nodePos, bool backupOnly, int32_t priorityNo) {
+	UNUSED_VARIABLE(priorityNo);
 
 	bool assigned = true;
 	NodeId nodeId = nodeIdList_[nodePos];
@@ -1340,29 +1413,85 @@ void PartitionTable::assignGoalTable(util::StackAllocator& alloc,
 	}
 }
 
-void PartitionTable::assignOptimalGoal(util::StackAllocator& alloc) {
-
+void PartitionTable::assignDefaultGoal(util::StackAllocator& alloc) {
 	util::Vector<PartitionRole> roleList(alloc);
 	util::XArray<NodeId> nodeIdList(alloc);
 	getLiveNodeIdList(nodeIdList);
 
-	uint32_t nodeNum = nodeIdList.size();
+	assignGoalTable(alloc, nodeIdList, roleList);
+	modifyGoalTable(alloc, nodeIdList, roleList);
+	setGoal(this, roleList);
+}
+
+void PartitionTable::assignRoundRobinGoal(util::StackAllocator& alloc) {
+	util::Vector<PartitionRole> roleList(alloc);
+	util::XArray<NodeId> nodeIdList(alloc);
+	getOrderingLiveNodeIdList(nodeIdList);
+
+	uint32_t nodeNum = static_cast<uint32_t>(nodeIdList.size());
 	uint32_t backupNum = getReplicationNum();
 	if (backupNum > nodeNum - 1) {
 		backupNum = nodeNum - 1;
 	}
-	uint32_t nodePos = 0;
+	uint32_t ownerPos = 0;
 	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 		roleList.emplace_back(PartitionRole(pId, revision_, PT_CURRENT_OB));
+		if (nodeNum == 0) {
+			continue;
+		}
 		PartitionRole& role = roleList[pId];
-		role.setOwner(nodeIdList[nodePos++ % nodeNum]);
+		role.setOwner(nodeIdList[ownerPos % nodeNum]);
+		ownerPos++;
 		for (uint32_t pos = 0; pos < backupNum; pos++) {
-			role.getBackups().push_back(nodeIdList[(nodePos + pos) % nodeNum]);
+			role.getBackups().push_back(nodeIdList[(ownerPos + pos) % nodeNum]);
 		}
 		role.checkBackup();
+		role.encodeAddress(this, role);
+	}
+	setGoal(this, roleList);
+}
+
+bool PartitionTable::assignSucceedStableGoal(util::StackAllocator& alloc) {
+	util::Vector<PartitionRole> roleList(alloc);
+	util::XArray<NodeId> nodeIdList(alloc);
+	uint32_t nodeNum = static_cast<uint32_t>(nodeIdList.size());
+	uint32_t backupNum = getReplicationNum();
+	if (backupNum > nodeNum - 1) {
+		backupNum = nodeNum - 1;
+	}
+	stableGoal_.copy(roleList);
+	for (size_t pos1 = 0; pos1 < roleList.size(); pos1++) {
+		PartitionRole& role = roleList[pos1];
+		NodeId owner = role.getOwner();
+		if (owner == UNDEF_NODEID || (owner != UNDEF_NODEID &&  getHeartbeatTimeout(owner) == UNDEF_TTL)) {
+			NodeId newOwner = UNDEF_NODEID;
+			NodeIdList& backups = role.getBackups();
+			for (NodeIdList::iterator it = backups.begin(); it != backups.end(); it++) {
+				if (*it != UNDEF_NODEID && getHeartbeatTimeout(*it) != UNDEF_TTL) {
+					newOwner = *it;
+					backups.erase(it);
+					break;
+				}
+			}
+			role.setOwner(newOwner);
+		}
+		if (role.getOwner() == UNDEF_NODEID) {
+			return false;
+		}
+		NodeIdList& backups = role.getBackups();
+		NodeIdList::iterator it = backups.begin();
+		while (it != backups.end()) {
+			if (*it  == UNDEF_NODEID || (*it != UNDEF_NODEID && getHeartbeatTimeout(*it) == UNDEF_TTL)) {
+				it = backups.erase(it);
+			}
+			else {
+				++it;
+			}
+		}
 	}
 	setGoal(this, roleList);
 	GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
+	return true;
 }
 
 /** **
@@ -1448,7 +1577,7 @@ NodeId PartitionTable::ModifyPlanner::getSwappableNodeId(util::StackAllocator& a
 	if (maxOwnerCount_ == minCount) {
 		return UNDEF_NODEID;
 	}
-	swap = candList[random_.nextInt32(candList.size())];
+	swap = candList[random_.nextInt32(static_cast<int32_t>(candList.size()))];
 	ownerCountList_[swap]++;
 	ownerCountList_[owner]--;
 
@@ -1479,7 +1608,6 @@ void PartitionTable::modifyGoalTable(util::StackAllocator& alloc,
 				return;
 			}
 			PartitionRole& role = roleList[pIdList[pos]];
-			NodeId owner = role.getOwner();
 			NodeId swap = planner.getSwappableNodeId(alloc, role);
 			if (swap != UNDEF_NODEID) {
 				role.swapRole(swap);
@@ -1502,7 +1630,6 @@ bool PartitionTable::applyInitialRule(
 	SubPartitionTable& subPartitionTable
 		= context.subPartitionTable_;
 	subPartitionTable.clear();
-	bool isConfigurationChange = context.isConfigurationChange();
 	util::NormalOStringStream strstrm;
 	util::Random random(
 		static_cast<int64_t>(util::DateTime::now(false)
@@ -1523,8 +1650,6 @@ bool PartitionTable::applyInitialRule(
 				continue;
 			}
 			LogSequentialNumber goalLsn = getLSN(pId, goalOwner);
-			NodeId targetNodeId = UNDEF_NODEID;
-
 			if (goalLsn >= maxLsn && context.isLoadBalance_) {
 				NodeIdList& nextBackups = nextRole.getBackups();
 				NodeIdList& goalBackups = goalRole.getBackups();
@@ -1647,6 +1772,7 @@ bool PartitionTable::applyInitialRule(
 			if (backupNum < context.backupNum_
 				&& context.isLoadBalance_) {
 
+
 				NodeIdList checkRole = goalBackups;
 				NodeId ownerNodeId = currentRole.getOwner();
 				if (ownerNodeId != UNDEF_NODEID) {
@@ -1700,7 +1826,9 @@ void PartitionTable::getReplicaLossPIdList(
 	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
 	arrayShuffle<util::Vector<PartitionId>, PartitionId>(pIdList, random);
 	for (size_t pos = 0; pos < pIdList.size(); pos++) {
-		resolvePartitionIdList.emplace_back(ReplicaInfo(pIdList[pos], getBackupSize(alloc, pIdList[pos])));
+		resolvePartitionIdList.emplace_back(ReplicaInfo(
+				pIdList[pos],
+				static_cast<uint32_t>(getBackupSize(alloc, pIdList[pos]))));
 	}
 	std::sort(resolvePartitionIdList.begin(), resolvePartitionIdList.end(), cmpReplica);
 }
@@ -1726,19 +1854,8 @@ bool PartitionTable::applyAddRule(PartitionContext& context) {
 
 	SubPartitionTable& subPartitionTable = context.subPartitionTable_;
 	subPartitionTable.clear();
-	uint32_t partitionNum = getPartitionNum();
-	int32_t targetBackupNum;
-	int32_t replicationNum = getReplicationNum();
 	util::XArray<NodeId> liveNodeList(alloc);
 	getLiveNodeIdList(liveNodeList);
-	int32_t backupNum = 0;
-	size_t currentNodeNum = liveNodeList.size();
-	if (static_cast<size_t>(replicationNum) > currentNodeNum - 1) {
-		targetBackupNum = currentNodeNum - 1;
-	}
-	else {
-		targetBackupNum = replicationNum;
-	}
 	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
 
 	util::Vector<ReplicaInfo> resolvePartitionList(alloc);
@@ -1762,7 +1879,6 @@ bool PartitionTable::applyAddRule(PartitionContext& context) {
 			continue;
 		}
 		NodeIdList& currentBackups = currentRole.getBackups();
-		NodeIdList& nextBackups = nextRole.getBackups();
 		NodeIdList& goalBackups = goalRole.getBackups();
 		NodeIdList catchups;
 		if (!currentRole.isOwnerOrBackup(goalOwner)) {
@@ -1830,7 +1946,6 @@ bool PartitionTable::applyRemoveRule(
 	SubPartitionTable& subPartitionTable
 		= context.subPartitionTable_;
 	subPartitionTable.clear();
-	util::StackAllocator& alloc = context.getAllocator();
 	for (PartitionId pId = 0;
 		pId < getPartitionNum(); pId++) {
 		NodeId currentOwner = getOwner(pId);
@@ -1852,7 +1967,6 @@ bool PartitionTable::applyRemoveRule(
 			= currentRole.getBackups();
 		NodeIdList nextBackups;
 		NodeIdList nextCatchups;
-		bool assigned = false;
 		if (!currentRole.isOwnerOrBackup(goalOwner)) {
 			continue;
 		}
@@ -1919,7 +2033,6 @@ bool PartitionTable::applySwapRule(
 	SubPartitionTable& subPartitionTable
 		= context.subPartitionTable_;
 	subPartitionTable.clear();
-	util::StackAllocator& alloc = context.getAllocator();
 
 	for (PartitionId pId = 0;
 		pId < getPartitionNum(); pId++) {
@@ -2007,7 +2120,7 @@ void PartitionTable::planNext(PartitionContext& context) {
 	util::Vector<NodeId> activeNodeList(alloc);
 	getLiveNodeIdList(activeNodeList);
 	int32_t backupNum = getReplicationNum();
-	int32_t liveNum = activeNodeList.size();
+	int32_t liveNum = static_cast<int32_t>(activeNodeList.size());
 	nextApplyRuleLimitTime_ = context.currentRuleLimitTime_;
 	SubPartitionTable& subPartitionTable = context.subPartitionTable_;
 
@@ -2017,7 +2130,6 @@ void PartitionTable::planNext(PartitionContext& context) {
 	else {
 		context.backupNum_ = backupNum;
 	}
-	int32_t applyRuleNo = -1;
 	while (true) {
 		if (applyInitialRule(context)) {
 			currentRuleNo_ = PARTITION_RULE_INITIAL;
@@ -2096,8 +2208,9 @@ std::string DropPartitionNodeInfo::dump() {
 }
 
 void PartitionTable::clearPartitionRole(PartitionId pId) {
-
-	PartitionRole tmpRole(pId, revision_, PT_CURRENT_OB);
+	PartitionRole prevRole;
+	getPartitionRole(pId, prevRole);
+	PartitionRole tmpRole(pId, prevRole.getRevision(), PT_CURRENT_OB);
 	setPartitionRole(pId, tmpRole);
 }
 
@@ -2366,10 +2479,9 @@ void PartitionTable::set(SubPartition& subPartition) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	PartitionRole& role = subPartition.role_;
-	TableType type = role.getTableType();
 	util::LockGuard<util::WriteLock>
 	currentLock(partitionLockList_[pId]);
-	partitions_[pId].roles_[type] = role;
+	partitions_[pId].roles_[PT_CURRENT_OB] = role;
 }
 
 std::ostream& operator<<(std::ostream& ss, PartitionRole& partitionRole) {
@@ -2449,8 +2561,10 @@ std::string PartitionTable::dumpNodes() {
 }
 
 void PartitionTable::genPartitionColumnStr(
-	util::NormalOStringStream& ss, std::string& roleName, PartitionId pId, NodeId nodeId,
-	int32_t lsnDigit, int32_t nodeIdDigit, TableType type) {
+		util::NormalOStringStream& ss, std::string& roleName, PartitionId pId, NodeId nodeId,
+		int32_t lsnDigit, int32_t nodeIdDigit, TableType type) {
+	UNUSED_VARIABLE(lsnDigit);
+
 	ss << roleName << "(";
 	ss << "#" << std::setw(nodeIdDigit) << nodeId;
 	ss << ", ";
@@ -2473,8 +2587,6 @@ std::string PartitionTable::dumpPartitionsNew(util::StackAllocator& alloc, Table
 	ownerCountList.assign(static_cast<size_t>(nodeNum_), 0);
 	std::string terminateCode = "\n ";
 	uint32_t partitionNum = config_.partitionNum_;
-	int32_t replicationNum = config_.replicationNum_;
-	size_t pos = 0;
 
 	PartitionId pId;
 	LogSequentialNumber maxLSN = 0;
@@ -2514,12 +2626,18 @@ std::string PartitionTable::dumpPartitionsNew(util::StackAllocator& alloc, Table
 	case PT_CURRENT_GOAL:
 		partitionType = "GOAL_TABLE";
 		break;
+	case PT_STABLE_GOAL:
+		partitionType = "STABLE_GOAL_TABLE";
+		break;
 	default:
 		break;
 	}
-	ss << "[" << partitionType << "]" << " "
+	ss << "[" << partitionType << "] "
 		<< CommonUtility::getTimeStr(util::DateTime::now(TRIM_MILLISECONDS).getUnixTime())
 		<< std::endl;
+	if (type == PT_CURRENT_GOAL) {
+		ss << dumpGoalAssignmentRule(currentGoalAssignmentRule_) << std::endl;
+	}
 
 	for (NodeId nodeId = 0; nodeId < getNodeNum(); nodeId++) {
 		ss << "#" << std::setw(nodeIdDigit) << nodeId << ", " << dumpNodeAddress(nodeId);
@@ -2533,7 +2651,8 @@ std::string PartitionTable::dumpPartitionsNew(util::StackAllocator& alloc, Table
 	util::Map<PartitionId, PartitionRole*> roleMap(alloc);
 	if (subTable) {
 		for (size_t pos = 0; pos < static_cast<size_t>(subTable->size()); pos++) {
-			SubPartition& sub = subTable->getSubPartition(pos);
+			SubPartition& sub =
+					subTable->getSubPartition(static_cast<int32_t>(pos));
 			partitionIdList.push_back(sub.pId_);
 		}
 		if (partitionIdList.size() > 0) {
@@ -2561,8 +2680,6 @@ std::string PartitionTable::dumpPartitionsNew(util::StackAllocator& alloc, Table
 				continue;
 			}
 		}
-		int32_t psum = 0;
-		int32_t currentPos = 0;
 		ss << "[P" << std::setfill('0') << std::setw(partitionDigit_) << pId;
 		ss << "(" << std::setw(revisionDigit) << role.getRevisionNo() << ")]";
 		NodeId owner = role.getOwner();
@@ -2630,9 +2747,16 @@ std::string PartitionTable::dumpPartitions(util::StackAllocator& alloc, TableTyp
 	case PT_CURRENT_GOAL:
 		partitionType = "CURRENT_GOAL";
 		break;
+	case PT_STABLE_GOAL:
+		partitionType = "STABLE_GOAL_TABLE";
+		break;
 	default:
 		break;
 	}
+	if (type == PT_CURRENT_GOAL) {
+		ss << dumpGoalAssignmentRule(currentGoalAssignmentRule_) << std::endl;
+	}
+
 	ss << "PartitionType : " << partitionType << terminateCode;
 
 	PartitionId pId;
@@ -2719,8 +2843,6 @@ std::string PartitionTable::dumpPartitionsList(util::StackAllocator& alloc, Tabl
 	countList.assign(static_cast<size_t>(nodeNum_), 0);
 	ownerCountList.assign(static_cast<size_t>(nodeNum_), 0);
 	uint32_t partitionNum = config_.partitionNum_;
-	int32_t replicationNum = config_.replicationNum_;
-	size_t pos = 0;
 
 	PartitionId pId;
 	LogSequentialNumber maxLSN = 0;
@@ -2737,13 +2859,9 @@ std::string PartitionTable::dumpPartitionsList(util::StackAllocator& alloc, Tabl
 	ss << "[";
 	for (pId = 0; pId < partitionNum; pId++) {
 		PartitionRole* role = &partitions_[pId].roles_[type];
-		int32_t psum = 0;
-		int32_t currentPos = 0;
 		NodeIdList currentBackupList;
 		NodeId currentOwnerNodeId = role->getOwner();
-		PartitionRevision& revision = role->getRevision();
 		NodeIdList& backups = role->getBackups();
-		int32_t backupNum = static_cast<int32_t>(backups.size());
 		ss << "{pId=" << pId
 			<< ", owner=" << dumpNodeAddress(currentOwnerNodeId)
 			<< ", backup=" << dumpNodeAddressList(backups) << "}";
@@ -3121,7 +3239,10 @@ std::string PartitionTable::NodesStat::dump() {
 	return oss.str().c_str();
 }
 
-bool PartitionTable::NodesStat::check(util::StackAllocator& alloc, double ratio) {
+bool PartitionTable::NodesStat::check(
+		util::StackAllocator& alloc, double ratio) {
+	UNUSED_VARIABLE(alloc);
+
 	if (nodeRackZoneCountList_.size() == 0) return true;
 	double ownerSd = calc(STANDARD_DEVIATION, OWNER_COUNT);
 	double dataSd = calc(STANDARD_DEVIATION, DATA_COUNT);
@@ -3247,3 +3368,435 @@ void PartitionTable::progress(double& goalProgress, double& replicaProgress) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
+
+void PartitionTable::getGoalPartitions(
+	util::StackAllocator& alloc, const  ServiceTypeInfo& addressType,
+	picojson::value& result, TableType target) {
+	try {
+		util::Vector<PartitionRole> goalList(alloc);
+		copyGoal(goalList, target);
+		picojson::array& partitionList = picojsonUtil::setJsonArray(result);
+		for (uint32_t pId = 0; pId < goalList.size(); pId++) {
+			picojson::object partition;
+			util::NormalOStringStream oss;
+			partition["pId"] = picojson::value(CommonUtility::makeString(oss, pId));
+
+			PartitionRole& currentRole = goalList[pId];
+			NodeId ownerNodeId = currentRole.getOwner();
+			picojson::object master;
+
+			getServiceAddress(ownerNodeId, master, addressType);
+			if (ownerNodeId != UNDEF_NODEID) {
+				partition["owner"] = picojson::value(master);
+			}
+			else {
+				partition["owner"] = picojson::value();
+			}
+			picojson::array& nodeList = picojsonUtil::setJsonArray(partition["backup"]);
+			NodeIdList& backups = currentRole.getBackups();
+			for (size_t pos = 0; pos < backups.size(); pos++) {
+				picojson::object backup;
+				NodeId backupNodeId = backups[pos];
+				getServiceAddress(backupNodeId, backup, addressType);
+				nodeList.push_back(picojson::value(backup));
+			}
+			partitionList.push_back(picojson::value(partition));
+		}
+	}
+	catch (std::exception& e) {
+		return GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+bool PartitionTable::setGoalPartitions(util::StackAllocator& alloc,
+	const picojson::value* paramValue, TableType tableType, bool checkNode) {
+	bool forSSL = isUseSSL();
+	bool stableCheck = (tableType == PT_STABLE_GOAL);
+
+	try {
+		util::Set<NodeAddress> constructionNodeSet(alloc);
+		util::Map<NodeAddress, NodeId> addressMap(alloc);
+		util::Map<NodeAddress, NodeId>::iterator itMap;
+		util::Vector<NodeId> liveNodeIdList(alloc);
+		util::Vector<PartitionRole> roleList(alloc);
+		roleList.reserve(getPartitionNum());
+		if (checkNode) {
+			getLiveNodeIdList(liveNodeIdList);
+		}
+		else {
+			getAllNodeIdList(liveNodeIdList);
+		}
+		for (size_t pos = 0; pos < liveNodeIdList.size(); pos++) {
+			NodeId nodeId = liveNodeIdList[pos];
+			NodeAddress address = getNodeAddress(nodeId, SYSTEM_SERVICE);
+			if (!address.isValid()) {
+				GS_THROW_USER_ERROR(GS_ERROR_PT_INVALID_GOAL_TABLE, "");
+			}
+			if (forSSL) {
+				address.port_ = static_cast<uint16_t>(getSSLPortNo(nodeId));
+			}
+			addressMap.insert(std::make_pair(address, nodeId));
+		}
+		int32_t partitionCount = 0;
+		if (paramValue != NULL) {
+			util::Set<PartitionId> pIdSet(alloc);
+			std::string jsonString(picojson::value(*paramValue).serialize());
+			const picojson::array& entryList = JsonUtils::as<picojson::array>(*paramValue);
+			for (picojson::array::const_iterator entryIt = entryList.begin();
+				entryIt != entryList.end(); ++entryIt) {
+				const picojson::value& entry = *entryIt;
+				std::string pname = JsonUtils::as<std::string>(entry, "pId");
+				const picojson::value* owner = JsonUtils::find<picojson::value>(entry, "owner");
+				const picojson::array* backupList = JsonUtils::find<picojson::array>(entry, "backup");
+				int64_t intVal;
+				PartitionId pId = 0;
+
+				if (pname.size() > 0 && SQLProcessor::ValueUtils::toLong(pname.data(), pname.size(), intVal)) {
+					pId = static_cast<int32_t>(intVal);
+				}
+				else {
+					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT,
+						"Invalid format, pId=" << pname);
+				}
+				if (pId >= getPartitionNum()) {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_SC_GOAL_INVALID_FORMAT, "Invalid format range, pId=" << pId);
+				}
+				partitionCount++;
+				if (owner == NULL) {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_SC_GOAL_NOT_OWNER, "Invalid format, not owner, pId=" << pId);
+				}
+				util::Set<PartitionId>::iterator it = pIdSet.find(pId);
+				if (it != pIdSet.end()) {
+					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_DUPLICATE_PARTITION,
+						"Duplicated partition pId=" << pId);
+				}
+				pIdSet.insert(pId);
+				PartitionRole role;
+				role.init(pId);
+				util::Set<NodeId> assignedList(alloc);
+				for (size_t i = 0;; i++) {
+					const picojson::value* addressValue;
+					if (i == 0) {
+						addressValue = owner;
+					}
+					else {
+						if (backupList == NULL || i > backupList->size()) {
+							break;
+						}
+						addressValue =
+							JsonUtils::find<picojson::value>((*backupList)[i - 1]);
+					}
+					if (addressValue == NULL ||
+						!addressValue->is<picojson::object>()) {
+						continue;
+					}
+					const char* systemAddress = JsonUtils::as<std::string>(*addressValue, "address").c_str();
+					uint16_t systemPort = static_cast<uint16_t>(
+						JsonUtils::asInt<uint16_t>(*addressValue, "port"));;
+					try {
+						const util::SocketAddress address(systemAddress, systemPort);
+					}
+					catch (std::exception& e) {
+						GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED,
+							"Target node is not resolve, reason=" << GS_EXCEPTION_MESSAGE(e));
+					}
+					NodeAddress tmpAddress(systemAddress, systemPort);
+					itMap = addressMap.find(tmpAddress);
+					if (itMap == addressMap.end()) {
+						GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED,
+							"Invalid node address=" << tmpAddress.dump() << ", pId=" << pId);
+					}
+					constructionNodeSet.insert(tmpAddress);
+					NodeId nodeId = (*itMap).second;
+					if (nodeId == UNDEF_NODEID && checkNode) {
+						GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED,
+							"Invalid node address=" << tmpAddress.dump() << ", pId=" << pId);
+					}
+					util::Set<NodeId>::iterator it = assignedList.find(nodeId);
+					if (it != assignedList.end()) {
+						GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT,
+							"Duplicated node address=" << tmpAddress.dump() << ", pId=" << pId);
+					}
+					assignedList.insert(nodeId);
+					NodeAddress& nodeAddress = getNodeAddress(nodeId, CLUSTER_SERVICE);
+					if (i == 0) {
+						if (nodeId == UNDEF_NODEID) {
+							GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_NOT_OWNER,
+								"Not setted owner address, pId=" << pId);
+						}
+						role.setOwner(nodeId);
+						role.getOwnerAddress() = nodeAddress;
+					}
+					else {
+						role.getBackups().push_back(nodeId);
+					}
+				}
+				role.encodeAddress(this, role);
+				if (!stableCheck) {
+					updateGoal(role, PT_CURRENT_GOAL);
+				}
+				else {
+					roleList.push_back(role);
+				}
+			}
+			if (isMaster() && !stableCheck) {
+				GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_GOAL));
+			}
+		}
+		if (stableCheck) {
+			if (partitionCount == static_cast<int64_t>(getPartitionNum())) {
+				if (!checkNode) {
+					stableGoal_.updateAll(roleList);
+					return true;
+				}
+				util::Set<NodeAddress> liveNodeAddressSet(alloc);
+				getLiveNodeAddressSet(liveNodeAddressSet);
+				if (liveNodeAddressSet == constructionNodeSet) {
+					stableGoal_.updateAll(roleList);
+					goal_.updateAll(roleList);
+					if (stableGoal_.isEnableInitialGenerate()) {
+						stableGoal_.setAssigned();
+					}
+					return true;
+				}
+				else {
+					util::NormalOStringStream oss1, oss2;
+					CommonUtility::dumpValueByFunction(oss1, liveNodeAddressSet);
+					CommonUtility::dumpValueByFunction(oss2, constructionNodeSet);
+					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT,
+						"Cluster construction is not match (expected=" <<  oss1.str()  << ", actual=" << oss2.str() << ")");
+				}
+			}
+			else {
+				if (checkNode) {
+					GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT,
+						"Not all partition assignment (expected=" << getPartitionNum() << ", actual=" << partitionCount << ")");
+				}
+			}
+		}
+		return false;
+	}
+	catch (std::exception &e) {
+		UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, e, "");
+		if (stableCheck) {
+			stableGoal_.clear();
+			return false;
+		}
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+void PartitionTable::writeStableGoal(util::StackAllocator& alloc) {
+	ServiceTypeInfo addressType(SYSTEM_SERVICE, isUseSSL());
+	picojson::value result;
+	getGoalPartitions(alloc, addressType, result, PT_CURRENT_GOAL);
+	std::string input(result.serialize());
+	stableGoal_.setGoalData(input);
+	stableGoal_.setCheckSum();
+	stableGoal_.writeFile();
+	stableGoal_.setAssigned();
+}
+
+bool PartitionTable::StableGoalPartition::writeFile() {
+	if (!enable_ || !enableInitialGenerate_) {
+		return false;
+	}
+	try {
+		if (!util::FileSystem::exists(goalFileName_.c_str())) {
+			UtilFile::writeFile(goalFileName_, goalData_.data(), goalData_.size(), false, 10, 100);
+			GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_TRACE_STABLE_GOAL,
+				"Generate stable goal file (fileName='" << goalFileName_ << "')");
+			return true;
+		}
+		else {
+			GS_TRACE_WARNING(CLUSTER_OPERATION, GS_TRACE_CS_TRACE_STABLE_GOAL,
+				"Skip generating stable goal (fileName='" << goalFileName_ << "', reason=already exists file)");
+			return false;
+		}
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, "Failed to generate stable goal (fileName='" << goalFileName_ << "')");
+		return false;
+	}
+}
+
+bool PartitionTable::GoalPartition::load() {
+	if (goalFileName_.empty()) {
+		return false;
+	}
+	try {
+		if (!util::FileSystem::exists(goalFileName_.c_str())) {
+			if (!isEnableInitialGenerate()) {
+				GS_TRACE_CLUSTER_INFO("Failed to load stable goal (fileName='" << goalFileName_ << "'  is already exists )");
+			}
+			return false;
+		}
+		std::allocator<char> alloc;
+		util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > buf(alloc);
+		ParamTable::fileToBuffer(goalFileName_.c_str(), buf);
+		std::string allStr(buf.begin(), buf.end());
+		CommonUtility::replaceAll(allStr, "\r\n", "\n");
+		CommonUtility::replaceAll(allStr, "\r", "\n");
+		goalData_ = allStr;
+		GS_TRACE_CLUSTER_INFO("Load stable goal (fileName='" << goalFileName_ << "')");
+		return true;
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, "Failed to load stable goal (fileName='" << goalFileName_ <<"')");
+		return false;
+	}
+}
+
+bool PartitionTable::StableGoalPartition::load() {
+	if (enable_) {
+		return GoalPartition::load();
+	}
+	return false;
+}
+
+void PartitionTable::StableGoalPartition::writeStableGoal(std::string& goal) {
+	try {
+		if (isEnable() && isEnableInitialGenerate()) {
+			setGoalData(goal);
+			picojson::value value;
+			if (validateFormat(value)) {
+				writeFile();
+			}
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+
+std::string PartitionTable::dumpGoalAssignmentRule() {
+	return dumpGoalAssignmentRule(goalAssignmentRule_);
+}
+
+std::string PartitionTable::dumpGoalAssignmentRule(int32_t rule) {
+	switch (rule) {
+		case PARTITION_ASSIGNMENT_RULE_DEFAULT: return "DEFAULT";
+		case PARTITION_ASSIGNMENT_RULE_ROUNDROBIN: return "ROUNDROBIN";
+		case PARTITION_ASSIGNMENT_RULE_STABLE_GOAL: return "STABLE_GOAL";
+		case PARTITION_ASSIGNMENT_RULE_PARTIAL_STABLE_GOAL: return "PARTIAL_STABLE_GOAL";
+		case PARTITION_ASSIGNMENT_RULE_COMMAND_SET_GOAL: return "COMMAND_SET_GOAL";
+		default: return "UNDEF_RULE";
+	}
+}
+
+PartitionTable::GoalPartition:: GoalPartition(const char* goalFileDir, const char* goalFileName) : 
+	partitionNum_(1), isValidateFormat_(false), enableInitialGenerate_(false), hashValue_(-1) {
+	if (goalFileDir != NULL && goalFileName != NULL) {
+		util::FileSystem::createPath(goalFileDir, goalFileName, goalFileName_);
+	}
+}
+
+PartitionTable::StableGoalPartition::StableGoalPartition(const ConfigTable& config, const char* configDir) :
+	GoalPartition(configDir, config.get<const char8_t*>(CONFIG_TABLE_CS_STABLE_GOAL_FILE_NAME)),
+	enable_(config.get<bool>(CONFIG_TABLE_CS_ENABLE_STABLE_GOAL)),
+	policy_(config.get<int32_t>(CONFIG_TABLE_CS_STABLE_GOAL_POLICY)),
+	configDir_(configDir), isAssigned_(false) {
+	enableInitialGenerate_ = (config.get<bool>(CONFIG_TABLE_CS_GENERATE_INITIAL_STABLE_GOAL));
+}
+
+bool PartitionTable::StableGoalPartition::validateFormat(picojson::value& value, bool useCheckSum) {
+	try {
+		const std::string err = JsonUtils::parseAll(value, goalData_.c_str(), goalData_.c_str() + goalData_.size());
+		if (!err.empty()) {
+			try {
+				GS_THROW_USER_ERROR(GS_ERROR_PT_INVALID_STABLE_GOAL_TABLE,
+					"Failed to parse stable goal (fileName='" << goalFileName_ << "' , reason=(" << err.c_str() << "))");
+			}
+			catch (std::exception& e) {
+				UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, "");
+			}
+			hashValue_ = -1;
+			isValidateFormat_ = false;
+			return false;
+		}
+		else {
+			isValidateFormat_ = true;
+			if (useCheckSum) {
+				int64_t  prevHashValue = hashValue_;
+				hashValue_ = calcCheckSum();
+				if (prevHashValue != -1 && prevHashValue != hashValue_) {
+					GS_TRACE_WARNING(CLUSTER_OPERATION, GS_TRACE_CS_TRACE_STABLE_GOAL,
+						"Stable goal file may be changed from initial (fileName='"
+						<< goalFileName_ << ", hashValue (prev = " << prevHashValue << ", current = " << hashValue_ << ")");
+				}
+			}
+			return true;
+		}
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, "");
+		return false;
+	}
+}
+
+uint32_t PartitionTable::StableGoalPartition::calcCheckSum() {
+	size_t size = std::min(goalData_.size(), static_cast<size_t>(MAX_CALC_HASH_SIZE));
+	return util::CRC32::calculate(goalData_.data(), size);
+}
+
+void PartitionTable::StableGoalPartition::setCheckSum() {
+	hashValue_ = calcCheckSum();
+}
+
+bool PartitionTable::StableGoalPartition::isSucceedOnError() {
+	return (enable_ && policy_ == 1 && isValidateFormat());
+}
+
+void PartitionTable::StableGoalPartition::initialCheck() {
+	try {
+		if (!enable_) {
+			return;
+		}
+		picojson::value value;
+		if (load() && validateFormat(value)) {
+			hashValue_ = calcCheckSum();
+			goalData_.clear();
+			isValidateFormat_ = false;
+		}
+		else {
+			if (!enableInitialGenerate_) {
+				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR,
+					"Invalid stable goal config parameter (enableStableGoal=true, generateInitialStableGoal=false)");
+			}
+			return;
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+
+void PartitionTable::preparePlanGoal() {
+	for (int32_t i = 0; i < getNodeNum(); i++) {
+		if (getHeartbeatTimeout(i) == UNDEF_TTL) {
+			resetDownNode(i);
+		}
+	}
+	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
+		clearCatchupRole(pId);
+	}
+}
+
+void PartitionTable::setStandbyMode(bool standbyMode, NodeId nodeId) {
+	if (nodeId >= nodeNum_) {
+		return;
+	}
+	nodes_[nodeId].standbyMode_ = standbyMode;
+}
+
+bool PartitionTable::getStandbyMode(NodeId nodeId) {
+	if (nodeId >= nodeNum_) {
+		return false;
+	}
+	return nodes_[nodeId].standbyMode_;
+}
+

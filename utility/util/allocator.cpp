@@ -20,7 +20,7 @@
 #include <algorithm>
 #include <map>
 
-#if UTIL_ALLOCATOR_REPORTER_ENABLED
+#if UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED || UTIL_ALLOCATOR_REPORTER_ENABLED
 #include <iostream>
 #endif
 
@@ -128,6 +128,22 @@ struct AllocatorDiffReporter::ActivationState {
 
 AllocationErrorHandler::~AllocationErrorHandler() {
 }
+
+
+#if UTIL_ALLOCATOR_DEBUG_REPORTER_ENABLED
+struct AllocatorStats;
+namespace detail {
+void AllocatorDebugReporter::reportUnexpectedUsage(
+		const AllocatorStats &stats, size_t total, size_t free) {
+	if (total == free) {
+		return;
+	}
+	std::cout <<
+			"[ERROR] Unexpected usage (allocator=" << stats.info_ <<
+			", total=" << total << ", free=" << free << ")" << std::endl;
+}
+} 
+#endif 
 
 
 #if UTIL_ALLOCATOR_REPORTER_ENABLED

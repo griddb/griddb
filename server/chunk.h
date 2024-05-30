@@ -52,6 +52,13 @@ protected:
 
 public:
 	typedef util::FixedSizeAllocator<util::Mutex> ChunkMemoryPool; 
+
+	static const int32_t COMPRESSED_MODE_NONE = 0;  
+	static const int32_t COMPRESSED_MODE_ZLIB = 0;  
+	static const int32_t COMPRESSED_MODE_ZSTD = 0x40000000; 
+	static const int32_t COMPRESSED_MODE_MASK = 0x70000000; 
+	static const int32_t COMPRESSED_SIZE_MASK = 0x0fffffff; 
+
 	Chunk() : data_(NULL), dataSize_(0) {}
 
 	Chunk(ChunkMemoryPool& pool, int32_t chunkSize)
@@ -121,12 +128,14 @@ public:
 		return HEADER_SIZE;
 	}
 
-	inline int32_t getCompressedSize() const {
-		return getInt(OFFSET_COMPRESSED_SIZE);
+	inline int32_t getCompressedSize(int32_t &compMode) const {
+		int32_t compressedSize = getInt(OFFSET_COMPRESSED_SIZE);
+		compMode = compressedSize & COMPRESSED_MODE_MASK;
+		return (compressedSize & COMPRESSED_SIZE_MASK);
 	}
 
-	inline Chunk& setCompressedSize(int32_t size) {
-		setInt(OFFSET_COMPRESSED_SIZE, size);
+	inline Chunk& setCompressedSize(int32_t size, int32_t compMode) {
+		setInt(OFFSET_COMPRESSED_SIZE, (size | compMode));
 		return *this;
 	}
 

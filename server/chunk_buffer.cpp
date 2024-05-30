@@ -247,20 +247,22 @@ uint64_t ChunkBuffer::calcHashTableSize2(
 		hashTableSizeRate = 0.01;
 	}
 	uint64_t memLimitByte = totalAtomicMemoryLimitNum << chunkExpSize;
-	uint64_t base = static_cast<double>(memLimitByte) * hashTableSizeRate
-			/ static_cast<double>(partitionGroupNum) / static_cast<double>(8);
+	uint64_t base = static_cast<uint64_t>(
+			static_cast<double>(memLimitByte) * hashTableSizeRate /
+			static_cast<double>(partitionGroupNum) / static_cast<double>(8));
 
 	if (partitionGroupNum == 1 && base * 4 <= MINIMUM_BUFFER_INFO_LIST_SIZE) {
 		return MINIMUM_BUFFER_INFO_LIST_SIZE;
 	}
-	uint64_t hashTableBit = util::nextPowerBitsOf2(base);
+	uint64_t hashTableBit = util::nextPowerBitsOf2(static_cast<uint32_t>(base));
 	uint64_t hashTableSize = UINT64_C(1) << hashTableBit;
 
 	uint64_t totalHashTableSize = hashTableSize * partitionGroupNum;
 	if (totalHashTableSize < MINIMUM_BUFFER_INFO_LIST_SIZE) {
 		assert(0 < MINIMUM_BUFFER_INFO_LIST_SIZE / partitionGroupNum);
-		hashTableBit = util::nextPowerBitsOf2(
-				MINIMUM_BUFFER_INFO_LIST_SIZE / partitionGroupNum);
+		hashTableBit = static_cast<uint32_t>(
+				util::nextPowerBitsOf2(static_cast<uint32_t>(
+						MINIMUM_BUFFER_INFO_LIST_SIZE / partitionGroupNum)));
 		hashTableSize = UINT64_C(1) << hashTableBit;
 		assert(MINIMUM_BUFFER_INFO_LIST_SIZE <=
 			   hashTableSize * partitionGroupNum);
@@ -288,13 +290,14 @@ BasicChunkBuffer<L>::BasicChunkBuffer(
 		agingSwapCounter_(0), chunkCategoryNum_(chunkCategoryNum),
 		maxOnceSwapNum_(MAX_ONCE_SWAP_SIZE_BYTE_ / chunkSize),
 		stats_(stats) {
+	UNUSED_VARIABLE(bufferHashMapSize);
 
 	bufferTable_ = UTIL_NEW LRUTable(numpages);
 	if (chunkSize >= compressorParam_.fileSystemBlockSize_ * 2) {
 		Chunk tmpChunk;
 		int32_t skipSize = tmpChunk.getHeaderSize();
 		double ratio = 1.0 - static_cast<double>(compressorParam_.minSpaceSavings_) / 100.0;
-		int32_t compressedSizeLimit = chunkSize * ratio;
+		int32_t compressedSizeLimit = static_cast<int32_t>(chunkSize * ratio);
 		int32_t maxCompressedSizeLimit = chunkSize - compressorParam_.fileSystemBlockSize_;
 		if (compressedSizeLimit > maxCompressedSizeLimit) {
 			compressedSizeLimit = maxCompressedSizeLimit;
@@ -329,14 +332,24 @@ template<class L>
 BasicChunkBuffer<L>& BasicChunkBuffer<L>::setCompression(
 		ChunkCompressionTypes::Mode mode, size_t skipSize,
 		size_t compressedSizeLimit) {
+
+	zlibCompressor_.reset(UTIL_NEW ChunkCompressorZlib(
+			chunkSize_, skipSize, compressedSizeLimit));
+	zstdCompressor_.reset(UTIL_NEW ChunkCompressorZstd(
+			chunkSize_, skipSize, compressedSizeLimit,
+			CompressorParam::DEFAULT_ZSTD_COMPRESSION_LEVEL));
+
 	switch (mode) {
 	case ChunkCompressionTypes::BLOCK_COMPRESSION:
-		chunkCompressor_.reset(UTIL_NEW ChunkCompressorZip(
-				chunkSize_, skipSize, compressedSizeLimit));
+	case ChunkCompressionTypes::BLOCK_COMPRESSION_ZLIB:
+		chunkCompressor_ = zlibCompressor_.get();
+		break;
+	case ChunkCompressionTypes::BLOCK_COMPRESSION_ZSTD:
+		chunkCompressor_ = zstdCompressor_.get();
 		break;
 	default:
 		assert(mode == ChunkCompressionTypes::NO_BLOCK_COMPRESSION);
-		chunkCompressor_.reset();
+		chunkCompressor_ = NULL;
 		break;
 	}
 	return *this;
@@ -377,7 +390,7 @@ void BasicChunkBuffer<L>::validatePinCount() {
 
 template<class L>
 uint64_t BasicChunkBuffer<L>::getTotalPinCount() {
-	int pinCount = 0;
+	int64_t pinCount = 0;
 	if (bufferTable_->getCurrentNumElems() > 0) {
 		LRUTable::Cursor bufferTableCursor = bufferTable_->createCursor();
 		LRUFrame* fr;
@@ -386,7 +399,7 @@ uint64_t BasicChunkBuffer<L>::getTotalPinCount() {
 			pinCount += fr->pincount_;
 		}
 	}
-	return pinCount;
+	return static_cast<uint64_t>(pinCount);
 }
 
 template<class L>
@@ -398,7 +411,7 @@ template<class L>
 bool BasicChunkBuffer<L>::resize(int32_t newCapacity) {
 	uint64_t currentLimit = bufferTable_->getCurrentNumElems();
 	uint64_t swapNum = 0;
-	if (newCapacity < (currentLimit + 1)) {
+	if (static_cast<uint64_t>(newCapacity) < (currentLimit + 1)) {
 		swapNum = ((currentLimit + 1) - newCapacity);
 	}
 	if (maxOnceSwapNum_ < swapNum) {
@@ -406,7 +419,7 @@ bool BasicChunkBuffer<L>::resize(int32_t newCapacity) {
 	}
 	ChunkAccessor accessor(*this);
 	if (swapNum > 0 && bufferTable_->getCurrentNumElems() - newCapacity > 0) {
-		int32_t reduce = swapNum;
+		int32_t reduce = static_cast<int32_t>(swapNum);
 		for (int32_t i = 0; i < reduce; i++) {
 			if (!bufferTable_->gotoL2FromL1(pool_)) {
 				break;
@@ -530,7 +543,8 @@ void BasicChunkBuffer<L>::updateStoreMemoryAgingParams(
 		int64_t totalLimitNum, int32_t partitionGroupNum) {
 
 	const double avgNum =
-			totalLimitNum / static_cast<double>(partitionGroupNum);
+			static_cast<double>(totalLimitNum) /
+			static_cast<double>(partitionGroupNum);
 
 	const double rate = storeMemoryAgingSwapRate_;
 
@@ -544,7 +558,7 @@ template<class L>
 BasicChunkBuffer<L>::ChunkAccessor::ChunkAccessor(BasicChunkBuffer& bcBuffer) :
 		bcBuffer_(bcBuffer),
 		outFile_(nullptr),
-		chunkCompressor_(bcBuffer.chunkCompressor_.get()) {
+		chunkCompressor_(bcBuffer.chunkCompressor_) {
 }
 
 template<class L>
@@ -716,6 +730,7 @@ void BasicChunkBuffer<L>::ChunkAccessor::pinChunkMissHit(
 					bcBuffer_.bufferTable_->expand(); 
 					bool result = bcBuffer_.bufferTable_->gotoL1FromL2(); 
 					assert(result);
+					UNUSED_VARIABLE(result);
 				}
 			}
 		}
@@ -822,7 +837,8 @@ void BasicChunkBuffer<L>::ChunkAccessor::flush(PartitionId pId) {
 	assert(bcBuffer_.beginPId_ <= pId && pId < bcBuffer_.endPId_);
 	for (auto& itr : bcBuffer_.bufferMap_.getMap()) {
 		if (itr.second != -1) {
-			LRUFrame* fr = bcBuffer_.bufferTable_->get(itr.second);
+			LRUFrame* fr = bcBuffer_.bufferTable_->get(
+					static_cast<int32_t>(itr.second));
 			if (fr) {
 				assert(fr->pincount_ > 0);
 				if (fr->isdirty_) {
@@ -898,23 +914,27 @@ void BasicChunkBuffer<L>::ChunkAccessor::seekAndRead(
 	const size_t nth = pId - bcBuffer_.beginPId_;
 	VirtualFileBase* dataFile = bcBuffer_.dataFileList_[nth];
 	Chunk chunk;
-	if (chunkCompressor_ != nullptr) {
 		dataFile->seekAndRead(offset, buff, buffSize, ioWatch);
-		chunk.setData(buff, buffSize);
+		chunk.setData(buff, static_cast<int32_t>(buffSize));
+	int32_t compressedMode = 0;
+	int32_t compressedSize = chunk.getCompressedSize(compressedMode);
+	if (compressedSize != bcBuffer_.chunkSize_ - chunk.getHeaderSize()) {
 		util::LockGuard<util::Mutex> guard(bcBuffer_.uncompressorMutex());
 
 		StatStopwatch &watch = bcBuffer_.stats_.timeTable_(
 				ChunkBufferStats::BUF_STAT_UNCOMPRESS_TIME);
+		bool result = false;
 		watch.start();
-		bool result = chunkCompressor_->uncompress(chunk.getData(), chunk.getCompressedSize());
-		watch.stop();
-
-		if (result) {
-			chunk.setCompressedSize(bcBuffer_.chunkSize_ - chunk.getHeaderSize());
+		if (compressedMode == Chunk::COMPRESSED_MODE_ZSTD) {
+			result = bcBuffer_.zstdCompressor_->uncompress(chunk.getData(), compressedSize);
+		} else {
+			result = bcBuffer_.zlibCompressor_->uncompress(chunk.getData(), compressedSize);
 		}
-	} else {
-		dataFile->seekAndRead(offset, buff, buffSize, ioWatch);
-		chunk.setData(buff, buffSize);
+		watch.stop();
+		if (result) {
+			chunk.setCompressedSize(bcBuffer_.chunkSize_ - chunk.getHeaderSize(),
+									Chunk::COMPRESSED_MODE_NONE);
+		}
 	}
 	chunk.checkMagic(offset);
 	chunk.checkSum(chunk.calcCheckSum(), offset);
@@ -928,11 +948,11 @@ void BasicChunkBuffer<L>::ChunkAccessor::seekAndWrite(
 	assert(bcBuffer_.beginPId_ <= pId && pId < bcBuffer_.endPId_);
 	size_t nth = pId - bcBuffer_.beginPId_;
 	VirtualFileBase* dataFile = outFile_ ? outFile_ : bcBuffer_.dataFileList_[nth];
-	size_t targetWriteSize = 0;
+	size_t targetWriteSize = 0; 
 	assert(dataFile);
 	if (chunkCompressor_ != nullptr) {
 		Chunk chunk;
-		chunk.setData(buff, buffSize);
+		chunk.setData(buff, static_cast<int32_t>(buffSize));
 		const uint32_t chunkCheckSum = chunk.calcCheckSum();
 		size_t compressedSize = 0;
 		{
@@ -947,17 +967,19 @@ void BasicChunkBuffer<L>::ChunkAccessor::seekAndWrite(
 				assert(compressedData);
 				Chunk outChunk;
 				outChunk.setData(static_cast<uint8_t*>(compressedData), bcBuffer_.chunkSize_);
-				outChunk.setCompressedSize(compressedSize);
+				outChunk.setCompressedSize(static_cast<int32_t>(compressedSize), chunkCompressor_->getCompressorId());
 				outChunk.setCheckSum(chunkCheckSum);
 				const size_t unitSize = bcBuffer_.compressorParam_.fileSystemBlockSize_;
 				size_t writeSize = (((outChunk.getHeaderSize() + compressedSize) + unitSize) / unitSize) * unitSize;
-				assert(writeSize < bcBuffer_.chunkSize_);
+				assert(static_cast<ptrdiff_t>(writeSize) < bcBuffer_.chunkSize_);
 				targetWriteSize = writeSize;
 				dataFile->seekAndWrite(
 						offset, outChunk.getData(), outChunk.getDataSize(),
-						writeSize, ioWatch);
+						static_cast<int32_t>(writeSize), ioWatch);
 			} else {
-				chunk.setCompressedSize(bcBuffer_.chunkSize_ - chunk.getHeaderSize());
+				chunk.setCompressedSize(
+						bcBuffer_.chunkSize_ - chunk.getHeaderSize(),
+						Chunk::COMPRESSED_MODE_NONE);
 				chunk.setCheckSum(chunkCheckSum);
 				dataFile->seekAndWrite(
 						offset, chunk.getData(), chunk.getDataSize(),
@@ -968,15 +990,17 @@ void BasicChunkBuffer<L>::ChunkAccessor::seekAndWrite(
 	}
 	else {
 		Chunk chunk;
-		chunk.setData(buff, buffSize);
+		chunk.setData(buff, static_cast<int32_t>(buffSize));
 		chunk.setCompressedSize(
-				bcBuffer_.chunkSize_ - chunk.getHeaderSize());
+				bcBuffer_.chunkSize_ - chunk.getHeaderSize(),
+				Chunk::COMPRESSED_MODE_NONE);
 		chunk.setCheckSum(chunk.calcCheckSum());
 		dataFile->seekAndWrite(
 				offset, chunk.getData(), chunk.getDataSize(),
 				bcBuffer_.chunkSize_, ioWatch);
 		targetWriteSize = bcBuffer_.chunkSize_;
 	}
+	UNUSED_VARIABLE(targetWriteSize);
 }
 
 template<class L>
@@ -984,18 +1008,29 @@ void BasicChunkBuffer<L>::ChunkAccessor::tmpFileRead(
 		ChunkCopyContext* cxt, int64_t offset, uint8_t* buff, size_t buffSize) {
 	StatStopwatch::NonStat ioWatch;
 	Chunk chunk;
-	if (chunkCompressor_ != nullptr) {
 		cxt->datafile_->seekAndRead(offset, buff, buffSize, ioWatch.get());
-		chunk.setData(buff, buffSize);
+		chunk.setData(buff, static_cast<int32_t>(buffSize));
+	int32_t compressedMode = 0;
+	int32_t compressedSize = chunk.getCompressedSize(compressedMode);
+	if (compressedSize != bcBuffer_.chunkSize_ - chunk.getHeaderSize()) {
 		util::LockGuard<util::Mutex> guard(bcBuffer_.uncompressorMutex());
-		StatStopwatch &watch = bcBuffer_.stats_.timeTable_(
+
+		StatStopwatch& watch = bcBuffer_.stats_.timeTable_(
 				ChunkBufferStats::BUF_STAT_UNCOMPRESS_TIME);
+		bool result = false;
 		watch.start();
-		chunkCompressor_->uncompress(chunk.getData(), chunk.getCompressedSize());
+		if (compressedMode == Chunk::COMPRESSED_MODE_ZSTD) {
+			result = bcBuffer_.zstdCompressor_->uncompress(chunk.getData(), compressedSize);
+		}
+		else {
+			result = bcBuffer_.zlibCompressor_->uncompress(chunk.getData(), compressedSize);
+		}
 		watch.stop();
-	} else {
-		cxt->datafile_->seekAndRead(offset, buff, buffSize, ioWatch.get());
-		chunk.setData(buff, buffSize);
+		if (result) {
+			chunk.setCompressedSize(
+					bcBuffer_.chunkSize_ - chunk.getHeaderSize(),
+					Chunk::COMPRESSED_MODE_NONE);
+		}
 	}
 	chunk.checkMagic(offset);
 
@@ -1009,9 +1044,10 @@ void BasicChunkBuffer<L>::ChunkAccessor::tmpFileWrite(
 
 	assert(cxt->datafile_);
 	Chunk chunk;
-	chunk.setData(buff, buffSize);
+	chunk.setData(buff, static_cast<int32_t>(buffSize));
 	chunk.setCompressedSize(
-			bcBuffer_.chunkSize_ - chunk.getHeaderSize());
+			bcBuffer_.chunkSize_ - chunk.getHeaderSize(),
+			Chunk::COMPRESSED_MODE_NONE);
 	chunk.setCheckSum(chunk.calcCheckSum());
 	cxt->datafile_->seekAndWrite(
 			offset, chunk.getData(), chunk.getDataSize(),
@@ -1149,11 +1185,11 @@ int32_t LRUTable::shiftHotToCold(int32_t count) {
 	if (hotNumElems_ == 0) {
 		return 0;
 	}
-	int32_t oldHotHead = head1_;
-	int32_t oldHotTail = tail1_;
-	int32_t oldColdTail = tail2_;
+
+#ifndef NDEBUG
 	int32_t oldHotNumElems = hotNumElems_;
 	int32_t oldColdNumElems = coldNumElems_;
+#endif
 
 	if (hotNumElems_ <= count) {
 		if (tail2_ >= 0) {
@@ -1217,11 +1253,11 @@ int32_t LRUTable::shiftColdToHot(int32_t count) {
 	if (coldNumElems_ == 0) {
 		return 0;
 	}
-	int32_t oldHotHead = head1_;
-	int32_t oldHotTail = tail1_;
-	int32_t oldColdTail = tail2_;
+
+#ifndef NDEBUG
 	int32_t oldHotNumElems = hotNumElems_;
 	int32_t oldColdNumElems = coldNumElems_;
+#endif
 
 	if (coldNumElems_ <= count) {
 		table_[tail2_].next_ = head1_;
@@ -1376,7 +1412,7 @@ void LRUTable::expand() {
 		table_.push_back(LRUFrame());
 		++maxNumElems_;
 		init(pos);
-		assert(table_.size() == maxNumElems_);
+		assert(static_cast<ptrdiff_t>(table_.size()) == maxNumElems_);
 		table_[pos].next_ = stock_;
 		stock_ = pos;
 	} catch(std::exception &e) {

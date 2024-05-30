@@ -119,11 +119,21 @@ public:
 			KeyDataStore* keyStore, const StatsSet &stats);
 
 	~KeyDataStore();
-	void initialize(ManagerSet& resourceSet) {};
+	void initialize(ManagerSet& resourceSet) {
+		UNUSED_VARIABLE(resourceSet);
+	}
 	Serializable* exec(TransactionContext* txn, KeyDataStoreValue* storeValue, Serializable* message);
 	void finalize() {};
-	void redo(util::StackAllocator &alloc, RedoMode mode, const util::DateTime &redoStartTime,
-			  Timestamp redoStartEmTime, Serializable* message) {};
+	void redo(
+			util::StackAllocator &alloc, RedoMode mode,
+			const util::DateTime &redoStartTime, Timestamp redoStartEmTime,
+			Serializable* message) {
+		UNUSED_VARIABLE(alloc);
+		UNUSED_VARIABLE(mode);
+		UNUSED_VARIABLE(redoStartTime);
+		UNUSED_VARIABLE(redoStartEmTime);
+		UNUSED_VARIABLE(message);
+	};
 	bool support(Support type);
 	void preProcess(TransactionContext* txn, ClusterService* clsService);
 	void postProcess(TransactionContext* txn);

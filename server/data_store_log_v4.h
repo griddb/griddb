@@ -36,9 +36,13 @@ struct DataStoreLogV4 : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 	};
 
 	struct Commit : public EmptyDataLog {
@@ -195,9 +199,13 @@ struct DataStoreLogV4 : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 	};
 	struct ContinueAlterContainer : public EmptyDataLog {
 		void encode(EventByteOutStream& out) {
@@ -210,9 +218,13 @@ struct DataStoreLogV4 : public Serializable {
 			encode<OutStream>(out);
 		}
 		template <typename S>
-		void encode(S& out) {}
+		void encode(S& out) {
+			UNUSED_VARIABLE(out);
+		}
 		template <typename S>
-		void decode(S& in) {}
+		void decode(S& in) {
+			UNUSED_VARIABLE(in);
+		}
 	};
 
 	struct PutRow : Serializable {
@@ -382,6 +394,8 @@ struct DataStoreLogV4 : public Serializable {
 		case GET_ROW:
 			value_.lockRow_ = static_cast<LockRow*>(mess);
 			break;
+		default:
+			break;
 		}
 	}
 	~DataStoreLogV4() {
@@ -421,6 +435,8 @@ struct DataStoreLogV4 : public Serializable {
 			break;
 		case GET_ROW:
 			ALLOC_DELETE(*alloc_, value_.lockRow_);
+			break;
+		default:
 			break;
 		}
 	}
@@ -476,6 +492,8 @@ struct DataStoreLogV4 : public Serializable {
 			break;
 		case GET_ROW:
 			value_.lockRow_->encode(out);
+			break;
+		default:
 			break;
 		}
 	}
@@ -653,7 +671,10 @@ struct TxnLog : public Serializable {
 		case GET_ROW:
 			return false;
 		default:
-			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unknown event type: " << dsLog_->type_);
+			GS_THROW_USER_ERROR(
+					GS_ERROR_CM_INTERNAL_ERROR,
+					"Unknown event type: " <<
+					static_cast<int32_t>(dsLog_->type_));
 			return false;
 		}
 	}

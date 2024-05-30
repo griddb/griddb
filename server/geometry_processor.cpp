@@ -85,8 +85,12 @@ int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManagerV4 &, A
 /*!
 	@brief Set field value to message
 */
-void GeometryProcessor::getField(TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &strategy,
-	ColumnId columnId, const Value *objectValue, MessageRowStore *messageRowStore) {
+void GeometryProcessor::getField(
+		TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &strategy,
+		ColumnId columnId, const Value *objectValue,
+		MessageRowStore *messageRowStore) {
+	UNUSED_VARIABLE(strategy);
+
 	const uint8_t *image = objectValue->getImage();  
 	if (image != NULL) {
 		uint32_t dataSize = objectValue->size();

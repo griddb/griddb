@@ -156,10 +156,14 @@ void QueryProcessor::search(TransactionContext &txn, BaseContainer &container,
 		util::XArray<KeyData> startKeyFields(alloc);
 		util::XArray<KeyData> endKeyFields(alloc);
 		if (startKey != NULL) {
-			container.getRowKeyFields(txn, startKey->size(), startKey->data(), startKeyFields);
+			container.getRowKeyFields(
+					txn, static_cast<uint32_t>(startKey->size()),
+					startKey->data(), startKeyFields);
 		}
 		if (endKey != NULL) {
-			container.getRowKeyFields(txn, endKey->size(), endKey->data(), endKeyFields);
+			container.getRowKeyFields(
+					txn, static_cast<uint32_t>(endKey->size()),
+					endKey->data(), endKeyFields);
 		}
 		util::Vector<ColumnId> rowIdColumnIdList(alloc);
 		rowIdColumnIdList.push_back(container.getRowIdColumnId());

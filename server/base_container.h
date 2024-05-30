@@ -455,7 +455,7 @@ public:
 	void getNullsStats(util::XArray<uint8_t> &nullsList) const {
 		uint16_t limitSize = sizeof(int64_t);
 		if (!isNullsStatsStatus() && indexSchema_->getNullbitsSize() > limitSize) {
-			uint16_t diffSize = indexSchema_->getNullbitsSize() - limitSize;
+			const uint32_t diffSize = indexSchema_->getNullbitsSize() - limitSize;
 			nullsList.push_back(indexSchema_->getNullsStats(), limitSize);
 			for (uint32_t i = 0; i < diffSize; i++) {
 				nullsList.push_back(0xFF);
@@ -1048,12 +1048,15 @@ protected:
 		util::XArray<RowId> &rowIdList);
 	void addUpdatedRow(TransactionContext &txn, RowId rowId, OId oId) {
 		rsNotifier_.addUpdatedRow(rowId, oId);
+		UNUSED_VARIABLE(txn);
 	}
 	void addRemovedRow(TransactionContext &txn, RowId rowId, OId oId) {
+		UNUSED_VARIABLE(txn);
 		getDataStore()->getResultSetManager()->addRemovedRow(getContainerId(),
 			rowId, oId);
 	}
 	void addRemovedRowArray(TransactionContext &txn, OId oId) {
+		UNUSED_VARIABLE(txn);
 		getDataStore()->getResultSetManager()->addRemovedRowArray(
 			getContainerId(), oId);
 	}
@@ -1125,10 +1128,12 @@ protected:
 		return (baseContainerImage_->status_ & ALTER_CONTAINER_BIT) != 0;
 	}
 	void setAlterContainer() {
-		baseContainerImage_->status_ |= ALTER_CONTAINER_BIT;
+		uint8_t &dest = baseContainerImage_->status_;
+		dest = static_cast<uint8_t>(dest | ALTER_CONTAINER_BIT);
 	}
 	void resetAlterContainer() {
-		baseContainerImage_->status_ &= ~ALTER_CONTAINER_BIT;
+		uint8_t &dest = baseContainerImage_->status_;
+		dest = static_cast<uint8_t>(dest & ALTER_CONTAINER_BIT);
 	}
 	bool isNullsStatsStatus() const {
 		return (baseContainerImage_->status_ & NULLS_STATS_BIT) != 0;

@@ -67,7 +67,7 @@
 
 		<javac srcdir="${srcDir}" destdir="${binDir}"
 			encoding="${srcEncoding}" debug="${includeDebugInfo}"
-			includeantruntime="no" source="1.6" target="1.6"
+			includeantruntime="no"
       classpathref="buildClasspath">
         <src path="${srcDir}"/>
         <src path="${contribSrcDir}"/>
@@ -80,7 +80,7 @@
 
 		<javac srcdir="${stubSrcDir}" destdir="${binDir}"
 			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
-			source="1.6" target="1.6" classpath="${binDir}">
+			classpath="${binDir}">
 		</javac>
 	</target>
 
@@ -89,7 +89,7 @@
 
 		<javac srcdir="${confSrcDir}" destdir="${confBinDir}"
 			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
-			source="1.6" target="1.6" classpath="${binDir}">
+			classpath="${binDir}">
 		</javac>
 	</target>
 
@@ -98,7 +98,7 @@
 
 		<javac srcdir="${callLoggingSrcDir}" destdir="${callLoggingBinDir}"
 			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
-			source="1.6" target="1.6">
+			>
 			<classpath>
 				<pathelement location="${binDir}"/>
 				<path refid="buildClasspath"/>

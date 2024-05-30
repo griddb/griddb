@@ -467,6 +467,8 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 #define UTIL_UNUSED_VARIABLE(v) static_cast<void>(v)
 #endif
 
+#define UNUSED_VARIABLE(v) UTIL_UNUSED_VARIABLE(v)
+
 #if UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED
 #define UTIL_UNUSED_TYPE_ALIAS(type) \
 	do { using utilUnused_##type [[maybe_unused]] = type; } while (false)

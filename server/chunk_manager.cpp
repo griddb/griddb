@@ -146,9 +146,9 @@ MeshedChunkTable::~MeshedChunkTable() {
 }
 
 void MeshedChunkTable::init(int16_t extentsize) {
-	extentPower_ = util::nextPowerBitsOf2(extentsize);
-	extentSize_ = INT16_C(1) << extentPower_;
-	extentPosMask_ = extentSize_ - 1;
+	extentPower_ = static_cast<int16_t>(util::nextPowerBitsOf2(extentsize));
+	extentSize_ = static_cast<int16_t>(INT16_C(1) << extentPower_);
+	extentPosMask_ = static_cast<int16_t>(extentSize_ - 1);
 
 
 	chainTable_ = UTIL_NEW DLTable();
@@ -163,10 +163,11 @@ void MeshedChunkTable::redo(int64_t chunkId, DSGroupId groupId, int64_t offset, 
 	if (offset >= 0) {
 		assert(vacancy >= 0);
 		{
-			for (int32_t index = extents_.size(); index <= targetindex; index++) {
+			for (int32_t index = static_cast<int32_t>(extents_.size());
+					index <= targetindex; index++) {
 				extents_.push_back(UTIL_NEW ChunkExtent(extentSize_));
-				chainTable_->resize(extents_.size());
-				freeTable_->resize(extents_.size());
+				chainTable_->resize(static_cast<int32_t>(extents_.size()));
+				freeTable_->resize(static_cast<int32_t>(extents_.size()));
 			}
 		}
 		{
@@ -177,7 +178,7 @@ void MeshedChunkTable::redo(int64_t chunkId, DSGroupId groupId, int64_t offset, 
 		}
 	} else {
 		assert(vacancy < 0);
-		if (targetindex < extents_.size()) {
+		if (targetindex < static_cast<ptrdiff_t>(extents_.size())) {
 			ChunkExtent* extent = extents_[targetindex];
 			int16_t pos = getPos(chunkId);
 			extent->free0(pos);
@@ -187,7 +188,7 @@ void MeshedChunkTable::redo(int64_t chunkId, DSGroupId groupId, int64_t offset, 
 
 int64_t MeshedChunkTable::reinit() {
 	int64_t blockCount = 0;
-	for (int32_t index = 0; index < extents_.size(); index++) {
+	for (int32_t index = 0; index < static_cast<ptrdiff_t>(extents_.size()); index++) {
 		ChunkExtent& extent = *extents_[index];
 		extent.initFreeChain();
 		if (extent.getNumUsed() == extent.getExtentSize()) {
@@ -235,23 +236,23 @@ int32_t MeshedChunkTable::allocateExtent(DSGroupId groupId) {
 	if (chain0_->peek() < 0) {
 		index = extents_.size();
 		extents_.push_back(UTIL_NEW ChunkExtent(extentSize_));
-		chainTable_->resize(extents_.size());
-		freeTable_->resize(extents_.size());
+		chainTable_->resize(static_cast<int32_t>(extents_.size()));
+		freeTable_->resize(static_cast<int32_t>(extents_.size()));
 	} else {
 		index = chain0_->peek();
-		chain0_->remove(index);
+		chain0_->remove(static_cast<int32_t>(index));
 	}
 	extents_[index]->initFreeChain();
 	extents_[index]->use(groupId);
-	return index;
+	return static_cast<int32_t>(index);
 }
 
 bool MeshedChunkTable::tryAllocateExtent(DSGroupId groupId, int32_t index) {
-	if (index >= extents_.size()) {
-		for (int32_t i = extents_.size(); i <= index; i++) {
+	if (index >= static_cast<ptrdiff_t>(extents_.size())) {
+		for (int32_t i = static_cast<int32_t>(extents_.size()); i <= index; i++) {
 			extents_.push_back(UTIL_NEW ChunkExtent(extentSize_));
-			chainTable_->resize(extents_.size());
-			freeTable_->resize(extents_.size());
+			chainTable_->resize(static_cast<int32_t>(extents_.size()));
+			freeTable_->resize(static_cast<int32_t>(extents_.size()));
 			chain0_->add(index);
 		}
 	}
@@ -268,7 +269,7 @@ bool MeshedChunkTable::tryAllocateExtent(DSGroupId groupId, int32_t index) {
 }
 
 void MeshedChunkTable::resetIncrementalDirtyFlags(bool resetAll) {
-	for (int32_t index = 0; index < extents_.size(); index++) {
+	for (int32_t index = 0; index < static_cast<ptrdiff_t>(extents_.size()); index++) {
 		ChunkExtent* extent = extents_[index];
 		const int16_t extentSize = extent->getExtentSize();
 		if (extent && extent->isUsed()) {
@@ -359,7 +360,7 @@ void MeshedChunkTable::Group::allocate(RawChunkInfo &rawInfo) {
 bool MeshedChunkTable::Group::isAllocated(int64_t chunkId) {
 	int32_t index = mct_.getIndex(chunkId);
 	int16_t pos = mct_.getPos(chunkId);
-	if (index < mct_.extents_.size()) {
+	if (index < static_cast<ptrdiff_t>(mct_.extents_.size())) {
 		ChunkExtent& extent = *(mct_.extents_[index]);
 		if (extent.isUsed()) {
 			assert(extent.getGroupId() == groupId_);
@@ -434,7 +435,7 @@ std::string MeshedChunkTable::Group::toString() {
 }
 void MeshedChunkTable::Group::extentChecker() {
 	int32_t index;
-	for (index = 0; index < mct_.extents_.size(); index++) {
+	for (index = 0; index < static_cast<ptrdiff_t>(mct_.extents_.size()); index++) {
 		ChunkExtent& extent = *mct_.extents_[index];
 		std::cout << index <<  " ***** " << extent.toString() <<
 				" " << extent.getNumUsed() << " " << extent.getExtentSize() <<
@@ -527,7 +528,7 @@ bool MeshedChunkTable::Group::StableGroupChunkCursor::next(bool advance, RawChun
 				index_ = group_.chain_->peek();
 				pos_ = 0;
 			} else {
-				for (; index_ < mct_.extents_.size(); index_++) {
+				for (; index_ < static_cast<ptrdiff_t>(mct_.extents_.size()); index_++) {
 					extent = mct_.extents_[index_];
 					assert(extent);
 					if (extent->getGroupId() == group_.groupId_) {
@@ -535,7 +536,7 @@ bool MeshedChunkTable::Group::StableGroupChunkCursor::next(bool advance, RawChun
 						break;
 					}
 				}
-				if (index_ >= mct_.extents_.size()) {
+				if (index_ >= static_cast<ptrdiff_t>(mct_.extents_.size())) {
 					return false;
 				}
 			}
@@ -823,6 +824,7 @@ void ChunkManager::update(MeshedChunkTable::Group &group, ChunkAccessor &ca) {
 			assert(chunkBuffer_.isDirty(frameRef2));
 			chunkBuffer_.swapOffset(pId_, offset1, offset2);
 			assert(chunkBuffer_.isDirty(frameRef1));
+			UNUSED_VARIABLE(frameRef1);
 
 			chunkBuffer_.purgeChunk(pId_, offset1, false);
 			appendUndo(chunkId, groupId, offset1, chunkinfo.getVacancy());
@@ -873,7 +875,6 @@ void ChunkManager::removeChunk(MeshedChunkTable::Group &group, int64_t chunkId) 
 		}
 		group.remove(chunkId, logversion_);
 		chunkBuffer_.purgeChunk(pId_, offset0, false);
-		const ChunkCategoryId categoryId = getChunkCategoryId(group.getId());
 		stats().table_(ChunkManagerStats::CHUNK_STAT_USE_CHUNK_COUNT)
 				.decrement();
 		--blockCount_;
@@ -910,7 +911,7 @@ int64_t ChunkManager::copyChunk(
 		ChunkBuddy chunk(*chunk0);
 
 		DSGroupId groupId = chunk.getGroupId();
-		ChunkId chunkId = chunk.getChunkId();
+		ChunkId chunkId = static_cast<ChunkId>(chunk.getChunkId());
 		uint8_t vacancy = chunk.getMaxFreeExpSize();
 
 		Log log(LogType::PutChunkDataLog, cxt->logManager_->getLogFormatVersion());
@@ -984,7 +985,7 @@ uint64_t ChunkManager::getCurrentLimit() {
 }
 
 void ChunkManager::adjustStoreMemory(uint64_t newLimit) {
-	chunkBuffer_.resize(newLimit);
+	chunkBuffer_.resize(static_cast<int32_t>(newLimit));
 
 	updateStoreMemoryAgingParams();
 	chunkBuffer_.rebalance();
@@ -1021,9 +1022,9 @@ void ChunkManager::validatePinCount() {
 void ChunkManager::restoreChunk(uint8_t *blockImage, size_t size, int64_t offset) {
 	Chunk srcChunk0;
 	ChunkBuddy srcChunk(srcChunk0);
-	srcChunk.setData(blockImage, size);
+	srcChunk.setData(blockImage, static_cast<int32_t>(size));
 	DSGroupId groupId = srcChunk.getGroupId();
-	ChunkId chunkId = srcChunk.getChunkId();
+	ChunkId chunkId = static_cast<ChunkId>(srcChunk.getChunkId());
 	uint8_t vacancy = srcChunk.getMaxFreeExpSize();
 
 	chunkTable_->redo(chunkId, groupId, offset, vacancy);
@@ -1225,6 +1226,8 @@ ChunkCompressionTypes::Mode ChunkManager::Config::getCompressionMode(
 	switch (mode) {
 	case ChunkCompressionTypes::NO_BLOCK_COMPRESSION:
 	case ChunkCompressionTypes::BLOCK_COMPRESSION:
+	case ChunkCompressionTypes::BLOCK_COMPRESSION_ZLIB:
+	case ChunkCompressionTypes::BLOCK_COMPRESSION_ZSTD:
 		break;
 	default:
 		assert(false);
@@ -1257,11 +1260,15 @@ bool ChunkManager::Config::setAtomicCpFileAutoClearCache(bool flag) {
 
 std::vector<std::string> ChunkManager::Config::parseCpFileDirList(
 		ConfigTable &configTable) {
+	UNUSED_VARIABLE(configTable);
+
 	std::vector<std::string> dirList;
 	return dirList;
 }
 
 void ChunkManager::Config::setCpFileDirList(const char* jsonStr) {
+	UNUSED_VARIABLE(jsonStr);
+
 	cpFileDirList_.clear();
 }
 
@@ -1269,7 +1276,9 @@ void ChunkManager::Config::setCpFileDirList(const char* jsonStr) {
 const util::NameCoderEntry<ChunkCompressionTypes::Mode>
 		ChunkManager::Coders::MODE_LIST[] = {
 	UTIL_NAME_CODER_ENTRY(ChunkCompressionTypes::NO_BLOCK_COMPRESSION),
-	UTIL_NAME_CODER_ENTRY(ChunkCompressionTypes::BLOCK_COMPRESSION)
+	UTIL_NAME_CODER_ENTRY(ChunkCompressionTypes::BLOCK_COMPRESSION),
+	UTIL_NAME_CODER_ENTRY(ChunkCompressionTypes::BLOCK_COMPRESSION_ZLIB),
+	UTIL_NAME_CODER_ENTRY(ChunkCompressionTypes::BLOCK_COMPRESSION_ZSTD)
 };
 
 const util::NameCoder<

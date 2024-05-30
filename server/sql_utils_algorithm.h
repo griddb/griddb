@@ -2401,14 +2401,20 @@ bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUniqueAt(A &action) {
 		for (;;) {
 			std::pop_heap(elemList_.begin(), it, typedPred);
 
-			(TypedAction(action))(*(--it), util::FalseType());
+			const bool continuable = (TypedAction(action))(*(--it), util::FalseType());
 
 			if ((TypedAction(action))(*it, util::TrueType(), typedPred) &&
 					typedPred(*elemList_.begin(), *it)) {
 				(TypedAction(action))(*it, util::TrueType());
 			}
 
-			if (!it->next()) {
+			const bool exists = it->next();
+
+			if (!continuable) {
+				return false;
+			}
+
+			if (!exists) {
 				if (it - elemList_.begin() <= 1) {
 					break;
 				}
@@ -2423,14 +2429,21 @@ bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUniqueAt(A &action) {
 	{
 		const bool single =
 				(TypedAction(action))(*(--it), util::TrueType(), util::TrueType());
-		do {
-			(TypedAction(action))(*it, util::FalseType());
+		for (;;) {
+			const bool continuable = (TypedAction(action))(*it, util::FalseType());
 
 			if ((TypedAction(action))(*it, util::TrueType(), typedPred)) {
 				(TypedAction(action))(*it, util::TrueType());
 			}
+
+			if (!it->next() || !single) {
+				break;
+			}
+
+			if (!continuable) {
+				return false;
+			}
 		}
-		while (it->next() && single);
 	}
 
 	return true;

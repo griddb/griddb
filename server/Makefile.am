@@ -16,6 +16,7 @@ trdir = $(srcdir)/tr-cpp
 newsqlincdir = $(srcdir)/include
 sqlitedir = $(libdir)/sqlite_mod
 sqliteworkdir = $(libdir)/sqlite_mod/build/work
+zstddir = $(libdir)/zstd
 
 all-local: $(buildenvfile)
 
@@ -50,6 +51,7 @@ $(buildenvfile): $(deploybinfile)
 clean-local:
 	rm -fv $(bindir)/$(serverbinname) $(bindir)/$(serverenvname)
 	$(sqlitedir)/build/build.sh --clean
+	$(zstddir)/build.sh --clean
 
 distclean-local:
 	rm -fv Makefile.in
@@ -180,6 +182,15 @@ $(sqliteworkdir)/sqlite3.h: $(sqlitebasicdeps)
 $(trdir)/libtrcpp.a:
 	./configure
 	make
+
+###
+zstdsrcfiles = \
+$(zstddir)/lib/zstd.h \
+$(zstddir)/build.sh
+
+$(zstddir)/lib/libzstd.a: $(zstdsrcfiles)
+	$(zstddir)/build.sh
+###
 
 BUILT_SOURCES = \
 $(sqliteworkdir)/sqlite3.h
@@ -389,6 +400,7 @@ NEWSQL_LDADD = \
 $(QP_LDADD) \
 $(utildir)/libutil.a \
 $(libdir)/MessagePack/libmsgpack.a \
+$(libdir)/zstd/lib/libzstd.a \
 -lpthread -lrt -ldl -lstdc++ -lz \
 $(sqliteworkdir)/libsqlite3.a
 
@@ -404,6 +416,7 @@ NEWSQL_INCLUDES = \
 -I$(srcdir)/tr-cpp \
 -I$(sqliteworkdir) \
 -I$(sqlitedir)/src \
+-I$(libdir)/zstd/lib \
 -I$(newsqlincdir)
 
 NEWSQL_LDFLAG = \

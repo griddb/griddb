@@ -558,6 +558,12 @@ class UtilFile {
 
 	static void createFile(const char* path);
 	static void removeFile(const char* path);
+	
+	static bool writeFile(const std::string& pathName, const std::string& fileName, const char* data, const size_t size, bool existsCheck, int32_t retryCount, int32_t retryWaitTime);
+	static bool writeFile(const std::string& filePathName, const char* data, const size_t size, bool existsCheck, int32_t retryCount, int32_t retryWaitTime);
+
+	template<typename T>
+	static bool readFile(const std::string& pathName, bool existsCheck, T& value);
 
 	static void dump(const char* path);
 };
@@ -701,7 +707,7 @@ inline std::string UtilBytes::getString(const void* data, int32_t dataLength, in
 }
 
 inline void UtilBytes::setString(void* data, int32_t dataLength, int32_t pos, const std::string& value) {
-	assert(pos + value.size() < dataLength);
+	assert(pos + static_cast<ptrdiff_t>(value.size()) < dataLength);
 	static_cast<void>(dataLength);
 	uint8_t* u8data = static_cast<uint8_t*>(data);
 	memcpy(u8data + pos, value.c_str(), value.size());

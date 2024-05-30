@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 5.5.0
+%define griddb_ver 5.6.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -43,6 +43,7 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/uuid
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/omaha
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zstd
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample/program
@@ -104,6 +105,7 @@ install -c -m 640 3rd_party/picojson/org/include/README.mkdn                %{bu
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt              %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 install -c -m 640 3rd_party/uuid/uuid/COPYING                               %{buildroot}%{griddb_instdir}/3rd_party/uuid
 install -c -m 640 3rd_party/fletcher32_simd/fletcher32_simd/LICENSE         %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
+install -c -m 640 3rd_party/zstd/LICENSE                        %{buildroot}%{griddb_instdir}/3rd_party/zstd
 
 
 
@@ -314,6 +316,7 @@ fi
 %dir %{griddb_instdir}
 %dir %{griddb_instdir}/bin
 %dir %{griddb_instdir}/conf
+%dir %{griddb_instdir}/conf_multicast
 %dir %{griddb_instdir}/3rd_party
 %dir %{griddb_instdir}/3rd_party/MessagePack
 %dir %{griddb_instdir}/3rd_party/ebb
@@ -327,6 +330,7 @@ fi
 %dir %{griddb_instdir}/3rd_party/omaha
 %dir %{griddb_instdir}/3rd_party/zigzag_encoding
 %dir %{griddb_instdir}/3rd_party/fletcher32_simd
+%dir %{griddb_instdir}/3rd_party/zstd
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/sample
 %dir %{griddb_instdir}/docs/sample/program
@@ -381,6 +385,7 @@ fi
 %{griddb_instdir}/3rd_party/omaha/COPYING
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
 %{griddb_instdir}/3rd_party/fletcher32_simd/LICENSE
+%{griddb_instdir}/3rd_party/zstd/LICENSE
 
 %{griddb_instdir}/README.md
 %{griddb_instdir}/docs/sample/program/Sample1.java
@@ -413,6 +418,8 @@ fi
 /usr/griddb/bin/gridstore
 
 %changelog
+* Wed Feb 07 2024 Toshiba Digital Solutions Corporation
+- 5.5.0
 * Mon Nov 13 2023 Toshiba Digital Solutions Corporation
 - 5.3.1
 * Mon Jun 12 2023 Toshiba Digital Solutions Corporation

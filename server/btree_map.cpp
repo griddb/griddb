@@ -243,7 +243,7 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
 		uint8_t[keySize];
 	memcpy(suspendKey_, keyData, keySize);
-	suspendKeySize_ = keySize;
+	suspendKeySize_ = static_cast<uint32_t>(keySize);
 
 	uint32_t valueSize = sizeof(OId);
 	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
@@ -264,7 +264,7 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext& txn,
 	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
 		uint8_t[keySize];
 	memcpy(suspendKey_, keyData, keySize);
-	suspendKeySize_ = keySize;
+	suspendKeySize_ = static_cast<uint32_t>(keySize);
 
 	uint32_t valueSize = sizeof(KeyDataStoreValue);
 	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
@@ -396,7 +396,7 @@ int32_t BtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
 	bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
 	InitializeFunc initializeFunc(txn, columnType, isUnique, btreeMapType,
 		elemSize, this);
-	elemSize_ = elemSize;
+	elemSize_ = static_cast<uint8_t>(elemSize);
 	switchToBasicType(columnType, initializeFunc);
 	return initializeFunc.ret_;
 }
@@ -426,7 +426,7 @@ template <>
 int32_t BtreeMap::initialize<CompositeInfoObject, OId>(TransactionContext &txn, ColumnType columnType,
 													   bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
 	assert(elemSize != 0);
-	elemSize_ = elemSize; 
+	elemSize_ = static_cast<uint8_t>(elemSize); 
 	nodeMaxSize_ = calcNodeMaxSize(elemSize_);
 	nodeMinSize_ = calcNodeMinSize(elemSize_);
 

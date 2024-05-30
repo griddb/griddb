@@ -16,6 +16,7 @@
 */
 #include "sql_type.h"
 #include "sql_common.h"
+#include "sql_utils.h"
 #include "data_store_common.h"
 
 const uint32_t SQLState::EXCEPTION_CODE_STATE_BITS = 24;
@@ -204,6 +205,8 @@ bool NoSQLCommonUtils::isAccessibleContainer(uint8_t attribute, bool& isWritable
 }
 
 bool NoSQLCommonUtils::isWritableContainer(uint8_t attribute, uint8_t type) {
+	UNUSED_VARIABLE(type);
+
 	switch (static_cast<ContainerAttribute>(attribute)) {
 	case CONTAINER_ATTR_SINGLE:
 	case CONTAINER_ATTR_LARGE:
@@ -406,5 +409,164 @@ void TaskProfiler::copy(util::StackAllocator& alloc, const TaskProfiler& target)
 	else {
 		customData_ = ALLOC_NEW(alloc) util::XArray<uint8_t>(
 			target.customData_->begin(), target.customData_->end(), alloc);
+	}
+}
+
+int64_t convertToTime(util::String& timeStr) {
+	const size_t size = timeStr.size();
+	if (size == 10) {
+		if (timeStr.find('-') != util::String::npos) {
+			timeStr.append("T00:00:00Z");
+		}
+	}
+	else if (size == 12 || size == 8) {
+		if (timeStr.find(':') != util::String::npos) {
+			timeStr.insert(0, "1970-01-01T");
+			timeStr.append("Z");
+		}
+	}
+	const bool trimMilliseconds = false;
+	int64_t targetValue;
+	try {
+		targetValue = util::DateTime(timeStr.c_str(), trimMilliseconds).getUnixTime();
+	}
+	catch (std::exception& e) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR,
+			GS_EXCEPTION_MERGE_MESSAGE(e, "Invalid date format"));
+	}
+	return targetValue;
+}
+
+
+void convertUpper(char8_t const *p, size_t size, char8_t *out) {
+	char c;
+	for (size_t i = 0; i < size; i++) {
+		c = *(p + i);
+		if ((c >= 'a') && (c <= 'z')) {
+			*(out + i) = static_cast<char8_t>(c - 32);
+		}
+		else {
+			*(out + i) = c;
+		}
+	}
+}
+
+util::String normalizeName(util::StackAllocator &alloc, const char8_t *src) {
+	util::XArray<char8_t> dest(alloc);
+	dest.resize(strlen(src) + 1);
+	convertUpper(
+			src, static_cast<uint32_t>(dest.size()), &dest[0]);
+	return util::String(&dest[0], alloc);
+}
+
+bool checkAcceptableTupleType(TupleList::TupleColumnType type) {
+	switch (type & ~TupleList::TYPE_MASK_NULLABLE) {
+		case TupleList::TYPE_BOOL :
+		case TupleList::TYPE_BYTE :
+		case TupleList::TYPE_SHORT:
+		case TupleList::TYPE_INTEGER :
+		case TupleList::TYPE_LONG :
+		case TupleList::TYPE_FLOAT :
+		case TupleList::TYPE_NUMERIC :
+		case TupleList::TYPE_DOUBLE :
+		case TupleList::TYPE_TIMESTAMP :
+		case TupleList::TYPE_MICRO_TIMESTAMP :
+		case TupleList::TYPE_NANO_TIMESTAMP :
+		case TupleList::TYPE_NULL :
+		case TupleList::TYPE_STRING :
+		case TupleList::TYPE_BLOB :
+		case TupleList::TYPE_ANY:
+			return true;
+		default:
+			return false;
+	}
+}
+
+ColumnType convertTupleTypeToNoSQLType(TupleList::TupleColumnType type) {
+	switch (type & ~TupleList::TYPE_MASK_NULLABLE) {
+	case TupleList::TYPE_BOOL: return COLUMN_TYPE_BOOL;
+	case TupleList::TYPE_BYTE: return COLUMN_TYPE_BYTE;
+	case TupleList::TYPE_SHORT: return COLUMN_TYPE_SHORT;
+	case TupleList::TYPE_INTEGER: return COLUMN_TYPE_INT;
+	case TupleList::TYPE_LONG: return COLUMN_TYPE_LONG;
+	case TupleList::TYPE_FLOAT: return COLUMN_TYPE_FLOAT;
+	case TupleList::TYPE_NUMERIC: return COLUMN_TYPE_DOUBLE;
+	case TupleList::TYPE_DOUBLE: return COLUMN_TYPE_DOUBLE;
+	case TupleList::TYPE_TIMESTAMP: return COLUMN_TYPE_TIMESTAMP;
+	case TupleList::TYPE_MICRO_TIMESTAMP: return COLUMN_TYPE_MICRO_TIMESTAMP;
+	case TupleList::TYPE_NANO_TIMESTAMP: return COLUMN_TYPE_NANO_TIMESTAMP;
+	case TupleList::TYPE_NULL: return COLUMN_TYPE_NULL;
+	case TupleList::TYPE_STRING: return COLUMN_TYPE_STRING;
+	case TupleList::TYPE_GEOMETRY: return COLUMN_TYPE_GEOMETRY;
+	case TupleList::TYPE_BLOB: return COLUMN_TYPE_BLOB;
+	case TupleList::TYPE_ANY: return COLUMN_TYPE_ANY;
+	default:
+		GS_THROW_USER_ERROR(GS_ERROR_NOSQL_INTERNAL,
+				"Unsupported type, type=" << static_cast<int32_t>(type));
+	}
+}
+
+bool checkNoSQLTypeToTupleType(ColumnType type) {
+	switch (type & ~TupleList::TYPE_MASK_NULLABLE) {
+		case COLUMN_TYPE_BOOL :
+		case COLUMN_TYPE_BYTE :
+		case COLUMN_TYPE_SHORT:
+		case COLUMN_TYPE_INT :
+		case COLUMN_TYPE_LONG :
+		case COLUMN_TYPE_FLOAT :
+		case COLUMN_TYPE_DOUBLE :
+		case COLUMN_TYPE_TIMESTAMP :
+		case COLUMN_TYPE_MICRO_TIMESTAMP :
+		case COLUMN_TYPE_NANO_TIMESTAMP :
+		case COLUMN_TYPE_NULL :
+		case COLUMN_TYPE_STRING :
+		case COLUMN_TYPE_BLOB :
+			return true;
+		case COLUMN_TYPE_GEOMETRY:
+		case COLUMN_TYPE_STRING_ARRAY:
+		case COLUMN_TYPE_BOOL_ARRAY:
+		case COLUMN_TYPE_BYTE_ARRAY:
+		case COLUMN_TYPE_SHORT_ARRAY:
+		case COLUMN_TYPE_INT_ARRAY:
+		case COLUMN_TYPE_LONG_ARRAY:
+		case COLUMN_TYPE_FLOAT_ARRAY:
+		case COLUMN_TYPE_DOUBLE_ARRAY:
+		case COLUMN_TYPE_TIMESTAMP_ARRAY:
+			return false;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_NOSQL_INTERNAL,
+					"Unsupported type, type=" << static_cast<int32_t>(type));
+	}
+}
+
+TupleList::TupleColumnType convertNoSQLTypeToTupleType(ColumnType type) {
+	switch (type) {
+	case COLUMN_TYPE_BOOL : return TupleList::TYPE_BOOL;
+	case COLUMN_TYPE_BYTE : return TupleList::TYPE_BYTE;
+	case COLUMN_TYPE_SHORT: return TupleList::TYPE_SHORT;
+	case COLUMN_TYPE_INT : return TupleList::TYPE_INTEGER;
+	case COLUMN_TYPE_LONG : return TupleList::TYPE_LONG;
+	case COLUMN_TYPE_FLOAT : return TupleList::TYPE_FLOAT;
+	case COLUMN_TYPE_DOUBLE : return TupleList::TYPE_DOUBLE;
+	case COLUMN_TYPE_TIMESTAMP : return TupleList::TYPE_TIMESTAMP;
+	case COLUMN_TYPE_MICRO_TIMESTAMP : return TupleList::TYPE_MICRO_TIMESTAMP;
+	case COLUMN_TYPE_NANO_TIMESTAMP : return TupleList::TYPE_NANO_TIMESTAMP;
+	case COLUMN_TYPE_NULL : return TupleList::TYPE_NULL;
+	case COLUMN_TYPE_STRING : return TupleList::TYPE_STRING;
+	case COLUMN_TYPE_BLOB : return  TupleList::TYPE_BLOB;
+	case COLUMN_TYPE_GEOMETRY:
+	case COLUMN_TYPE_STRING_ARRAY:
+	case COLUMN_TYPE_BOOL_ARRAY:
+	case COLUMN_TYPE_BYTE_ARRAY:
+	case COLUMN_TYPE_SHORT_ARRAY:
+	case COLUMN_TYPE_INT_ARRAY:
+	case COLUMN_TYPE_LONG_ARRAY:
+	case COLUMN_TYPE_FLOAT_ARRAY:
+	case COLUMN_TYPE_DOUBLE_ARRAY:
+	case COLUMN_TYPE_TIMESTAMP_ARRAY:
+		return TupleList::TYPE_ANY;
+	default:
+		GS_THROW_USER_ERROR(GS_ERROR_NOSQL_INTERNAL,
+				"Unsupported type, type=" << static_cast<int32_t>(type));
 	}
 }

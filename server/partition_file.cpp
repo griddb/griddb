@@ -17,6 +17,7 @@
 #include "partition_file.h"
 #include "chunk_manager.h"
 #include "chunk.h"
+#include "zstd.h"  
 #ifndef _WIN32
 #include <fcntl.h>
 #include <linux/falloc.h>
@@ -24,6 +25,7 @@
 
 UTIL_TRACER_DECLARE(CHUNK_MANAGER);  
 UTIL_TRACER_DECLARE(IO_MONITOR);
+UTIL_TRACER_DECLARE(SIZE_MONITOR); 
 
 
 FileStatTable::FileStatTable(const util::StdAllocator<void, void> &alloc) :
@@ -75,7 +77,7 @@ uint64_t FileStatTable::getAllocatedSize(const util::FileStatus &status) {
 /*!
 	@brief コンストラクタ
 */
-ChunkCompressorZip::ChunkCompressorZip(
+ChunkCompressorZlib::ChunkCompressorZlib(
 		size_t chunkSize, size_t skipSize, size_t compressedSizeLimit)
 : compressBuffer_(NULL), uncompressBuffer_(NULL),
   chunkSize_(chunkSize), skipSize_(skipSize),
@@ -94,7 +96,7 @@ ChunkCompressorZip::ChunkCompressorZip(
 	uncompressBuffer_ = UTIL_NEW uint8_t[bufferSize_];
 }
 
-ChunkCompressorZip::~ChunkCompressorZip() {
+ChunkCompressorZlib::~ChunkCompressorZlib() {
 	delete [] compressBuffer_;
 	compressBuffer_ = NULL;
 	delete [] uncompressBuffer_;
@@ -104,7 +106,7 @@ ChunkCompressorZip::~ChunkCompressorZip() {
 /*!
 	@brief チャンクを圧縮
 */
-size_t ChunkCompressorZip::compress(const void* area, void*& out) {
+size_t ChunkCompressorZlib::compress(const void* area, void*& out) {
 	assert(area);
 	out = NULL;
 	const uint8_t* top = static_cast<const uint8_t*>(area);
@@ -118,7 +120,7 @@ size_t ChunkCompressorZip::compress(const void* area, void*& out) {
 	if (ret != Z_OK) {
 		if (isFirstTime_) {
 			GS_TRACE_ERROR(CHUNK_MANAGER, GS_TRACE_CHM_COMPRESSION_FAILED,
-						   "error occured in compress.");
+						   "error occured in compress. ret=" << ret);
 			isFirstTime_ = false;
 		}
 		compressionErrorCount_++;
@@ -138,7 +140,7 @@ size_t ChunkCompressorZip::compress(const void* area, void*& out) {
 /*!
 	@brief 圧縮チャンクを展開
 */
-bool ChunkCompressorZip::uncompress(void* chunkTop, size_t compressedSize) {
+bool ChunkCompressorZlib::uncompress(void* chunkTop, size_t compressedSize) {
 	assert(chunkTop);
 	assert(compressedSize <= chunkSize_);
 	uint8_t* top = static_cast<uint8_t*>(chunkTop);
@@ -149,7 +151,7 @@ bool ChunkCompressorZip::uncompress(void* chunkTop, size_t compressedSize) {
 			reinterpret_cast<Bytef*>(top + skipSize_), compressedSize);
 		if (ret != Z_OK) {
 			GS_TRACE_ERROR(CHUNK_MANAGER, GS_TRACE_CHM_COMPRESSION_FAILED,
-						   "error occured in uncompress.");
+						   "error occured in uncompress. ret=" << ret);
 		}
 		assert(destLen <= (chunkSize_ - skipSize_));
 		memcpy(top + skipSize_, uncompressBuffer_, destLen);
@@ -158,6 +160,121 @@ bool ChunkCompressorZip::uncompress(void* chunkTop, size_t compressedSize) {
 	else {
 		return false;
 	}
+}
+
+/*!
+	@brief 圧縮IDを返す
+*/
+int32_t ChunkCompressorZlib::getCompressorId() {
+	return Chunk::COMPRESSED_MODE_ZLIB;
+}
+
+/*!
+	@brief コンストラクタ
+*/
+ChunkCompressorZstd::ChunkCompressorZstd(
+		size_t chunkSize, size_t skipSize, size_t compressedSizeLimit, int32_t compressLevel)
+: compressBuffer_(NULL), uncompressBuffer_(NULL),
+  chunkSize_(chunkSize), skipSize_(skipSize),
+  compressedSizeLimit_(compressedSizeLimit),
+  bufferSize_(ZSTD_compressBound(chunkSize)), compressLevel_(compressLevel),
+  compressionErrorCount_(0), compressBound_(0), isFirstTime_(true)
+{
+	GS_TRACE_DEBUG(
+				SIZE_MONITOR, GS_TRACE_CHM_INTERNAL_INFO,
+				"ChunkCompressorZstd::compresszedSizeLimit," << compressedSizeLimit_ <<
+				",compressLevel," << compressLevel_);
+	static uint32_t minVersion = 130; 
+	uint32_t zstdVersion = ZSTD_versionNumber();
+	if (minVersion > zstdVersion) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CHM_INCOMPATIBLE_ZLIB_VERSION,
+			"the zstd library version (zstd_version) is incompatible"
+				<< " with the version assumed, " << minVersion
+				<< ", but the library version, " << zstdVersion);
+	}
+	compressBound_ = ZSTD_compressBound(bufferSize_); 
+	compressBuffer_ = UTIL_NEW uint8_t[bufferSize_];  
+	uncompressBuffer_ = UTIL_NEW uint8_t[bufferSize_];
+}
+
+ChunkCompressorZstd::~ChunkCompressorZstd() {
+	delete [] compressBuffer_;
+	compressBuffer_ = NULL;
+	delete [] uncompressBuffer_;
+	uncompressBuffer_ = NULL;
+}
+
+/*!
+	@brief チャンクを圧縮
+*/
+size_t ChunkCompressorZstd::compress(const void* area, void*& out) {
+	assert(area);
+	out = NULL;
+	const uint8_t* top = static_cast<const uint8_t*>(area);
+	size_t bodySize = chunkSize_ - skipSize_;
+	size_t compressedSize = bufferSize_;
+	size_t ret = ZSTD_compress(
+		(compressBuffer_ + skipSize_), bufferSize_, 
+		(top + skipSize_), bodySize,
+		compressLevel_);
+
+	if (ZSTD_isError(ret)) {
+		if (isFirstTime_) {
+			GS_TRACE_ERROR(CHUNK_MANAGER, GS_TRACE_CHM_COMPRESSION_FAILED,
+						   "error occured in compress. reason=" <<
+						   ZSTD_getErrorName(ret));
+			isFirstTime_ = false;
+		}
+		compressionErrorCount_++;
+		return 0;
+	} else {
+		compressedSize = ret; 
+		if (skipSize_ + compressedSize <= compressedSizeLimit_) {
+			assert(skipSize_ + compressedSize <= chunkSize_);
+			memcpy(compressBuffer_, top , skipSize_);
+			out = compressBuffer_;
+			return compressedSize;
+		} else {
+			return 0;
+		}
+	}
+}
+
+/*!
+	@brief 圧縮チャンクを展開
+*/
+bool ChunkCompressorZstd::uncompress(void* chunkTop, size_t compressedSize) {
+	assert(chunkTop);
+	assert(compressedSize <= chunkSize_);
+	uint8_t* top = static_cast<uint8_t*>(chunkTop);
+	if (compressedSize < (chunkSize_ - skipSize_)) {
+		size_t destLen = bufferSize_;
+		size_t ret = ZSTD_decompress(
+			uncompressBuffer_, destLen,
+			top + skipSize_, compressedSize);
+		if (ZSTD_isError(ret)) {
+			GS_THROW_SYSTEM_ERROR(
+				GS_ERROR_CM_UNCOMPRESSION_FAILED,
+				"error occured in uncompress. reason=" <<
+				ZSTD_getErrorName(ret));
+		}
+		else {
+			destLen = ret; 
+		}
+		assert(destLen <= (chunkSize_ - skipSize_));
+		memcpy(top + skipSize_, uncompressBuffer_, destLen);
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+/*!
+	@brief 圧縮IDを返す
+*/
+int32_t ChunkCompressorZstd::getCompressorId() {
+	return Chunk::COMPRESSED_MODE_ZSTD;
 }
 
 /*!
@@ -243,7 +360,7 @@ void VirtualFileNIO::read(
 		if (readSize == 0 && retryCount > 0) {
 			util::FileStatus status;
 			files_[index]->getStatus(&status);
-			if (status.getSize() <= filePos) {
+			if (static_cast<uint64_t>(status.getSize()) <= filePos) {
 				memset(readAddr, 0, readRemain);
 				readRemain = 0;
 				break;
@@ -268,9 +385,11 @@ void VirtualFileNIO::read(
 void VirtualFileNIO::write(
 		int32_t index, void* buff, size_t buffLength, int32_t length,
 		int64_t offset, StatStopwatch &ioWatch) {
-	assert(length <= buffLength);
+	assert(length <= static_cast<ptrdiff_t>(buffLength));
+
 	int32_t retryCount = 0;
 	uint64_t filePos = static_cast<uint64_t>(offset * chunkSize_);
+	UNUSED_VARIABLE(buffLength);
 	ssize_t writeRemain = length;
 	const uint8_t* writeAddr = static_cast<const uint8_t*>(buff);
 	ioWatch.start();
@@ -359,7 +478,7 @@ void VirtualFileNIO::seekAndWrite(
 					chunkSize_ - length,
 					ioWatch);
 		}
-#endif
+#endif 
 	}
 }
 
@@ -491,6 +610,38 @@ SimpleFile& SimpleFile::open() {
 	return *this;
 }
 
+
+bool SimpleFile::readOnlyOpen() {
+	try {
+		file_ = UTIL_NEW util::NamedFile();
+		if (util::FileSystem::exists(path_.c_str())) {
+			try {
+				file_->open(path_.c_str(), util::FileFlag::TYPE_READ_WRITE);
+			}
+			catch (std::exception& e) {
+				delete file_;
+				file_ = NULL;
+				return false;
+			}
+			util::FileStatus status;
+			file_->getStatus(&status);
+			tailOffset_ = status.getSize();
+			flushedOffset_ = tailOffset_;
+			return true;
+		}
+		else {
+			delete file_;
+			file_ = NULL;
+			return false;
+		}
+	}
+	catch (std::exception& e) {
+		delete file_;
+		file_ = NULL;
+		return false;
+	}
+}
+
 void SimpleFile::seek(int64_t offset) {
 	file_->seek(offset);
 }
@@ -501,7 +652,6 @@ void SimpleFile::copyAll(const char *dest, uint8_t* buffer, size_t bufferSize) {
 
 	uint64_t size = getSize();
 	uint64_t readOffset = 0;
-	uint64_t writeOffset = 0;
 	uint64_t remain = size;
 	while(remain > 0) {
 		uint64_t requestSize = (remain > bufferSize) ? bufferSize : remain;
@@ -538,7 +688,8 @@ int64_t SimpleFile::readLong(int64_t& offset) {
 			if (retryCount > 0) {
 				util::FileStatus status;
 				file_->getStatus(&status);
-				if (status.getSize() <= (offset + sizeof(n))) {
+				if (static_cast<uint64_t>(status.getSize()) <=
+						offset + sizeof(n)) {
 					n = -1;
 					readRemain = 0;
 					break;
@@ -576,6 +727,7 @@ void SimpleFile::writeLong(int64_t len) {
 
 	ssize_t writeBytes = file_->write(&len, sizeof(len), tailOffset_);
 	assert(writeBytes == sizeof(len));
+	UNUSED_VARIABLE(writeBytes);
 
 	tailOffset_ += sizeof(len);
 	const uint32_t lap = ioWatch.stop();
@@ -767,6 +919,21 @@ void BufferedReader::open() {
 	bufferPos_ = 0;
 }
 
+bool BufferedReader::readOnlyOpen() {
+	bufferUsed_ = 0;
+	bufferedOffset_ = 0;
+	readOffset_ = 0;
+	bufferPos_ = 0;
+	if (file_) {
+		if (!file_->readOnlyOpen()) {
+			delete file_;
+			file_ = NULL;
+			return false;
+		}
+	}
+	return true;
+}
+
 int64_t BufferedReader::readLong(int64_t& offset) {
 	if (!file_) {
 		return -1;
@@ -784,7 +951,8 @@ int32_t BufferedReader::updateBuffer(int64_t& offset, int64_t& readSize) {
 	readSize = 0;
 	uint64_t remain = bufferSize_;
 	fileSize_ = file_->getSize();
-	if (offset + remain > fileSize_) {
+	if (static_cast<uint64_t>(offset) + remain >
+			static_cast<uint64_t>(fileSize_)) {
 		remain = fileSize_ - offset;
 	}
 	if (remain == 0) {
@@ -795,7 +963,7 @@ int32_t BufferedReader::updateBuffer(int64_t& offset, int64_t& readSize) {
 	readTime += file_->read(remain, buffer_.data(), bufferedOffset_);
 	readSize = remain;
 	bufferPos_ = 0;
-	bufferUsed_ = remain;
+	bufferUsed_ = static_cast<int32_t>(remain);
 	readOffset_ = offset;
 	return readTime;
 }
@@ -812,7 +980,7 @@ int32_t BufferedReader::read(int64_t len, void* buff, int64_t& offset, int64_t& 
 	if (bufferPos_ + len <= bufferUsed_) {
 		memcpy(dest, buffer_.data() + bufferPos_, len);
 		readOffset_ += len;
-		bufferPos_ += len;
+		bufferPos_ += static_cast<int32_t>(len);
 		offset += len;
 		readSize = len;
 		return readTime;
@@ -834,15 +1002,15 @@ int32_t BufferedReader::read(int64_t len, void* buff, int64_t& offset, int64_t& 
 		offset += copySize;
 		readSize += copySize;
 	}
-	if (remain < bufferSize_) {
+	if (remain < static_cast<uint64_t>(bufferSize_)) {
 		bufferedOffset_ = readOffset_;
 		int64_t readSize2;
 		readTime += updateBuffer(bufferedOffset_, readSize2);
-		assert(readSize2 >= remain);
-		bufferUsed_ = readSize2;
+		assert(static_cast<uint64_t>(readSize2) >= remain);
+		bufferUsed_ = static_cast<int32_t>(readSize2);
 		memcpy(dest, buffer_.data(), remain);
 		readOffset_ += remain;
-		bufferPos_ = remain;
+		bufferPos_ = static_cast<int32_t>(remain);
 		offset += remain;
 		readSize += remain;
 		return readTime;
@@ -851,6 +1019,7 @@ int32_t BufferedReader::read(int64_t len, void* buff, int64_t& offset, int64_t& 
 		uint64_t prev = readOffset_;
 		readTime += file_->read(remain, dest, readOffset_);
 		assert((readOffset_ - prev) == remain);
+		UNUSED_VARIABLE(prev);
 		bufferPos_ = 0;
 		bufferUsed_ = 0;
 		offset += remain;

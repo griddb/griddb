@@ -28,9 +28,9 @@
 
 template<typename T>
 void decodeLargeRow(
-	const char* key, util::StackAllocator& alloc, TransactionContext& txn,
-	DataStoreV4* dataStore, const char8_t* dbName, BaseContainer* container,
-	T& record, const EventMonotonicTime emNow);
+		const char* key, util::StackAllocator& alloc, TransactionContext& txn,
+		DataStoreV4* dataStore, const char8_t* dbName, BaseContainer* container,
+		T& record, const EventMonotonicTime emNow);
 
 #ifndef _WIN32
 #include <signal.h>  
@@ -56,8 +56,9 @@ const int32_t SQLService::SQL_CLIENT_VERSION = SQL_V4_0_1_CLIENT_VERSION;
 const int32_t SQLService::SQL_V4_0_MSG_VERSION = 1;
 const int32_t SQLService::SQL_V4_1_MSG_VERSION = 2;
 const int32_t SQLService::SQL_V4_1_0_MSG_VERSION = 3;
-const int32_t SQLService::SQL_V5_5_MSG_VERSION = 3;
-const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_5_MSG_VERSION;
+const int32_t SQLService::SQL_V5_5_MSG_VERSION = 4;
+const int32_t SQLService::SQL_V5_6_MSG_VERSION = 5;
+const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_6_MSG_VERSION;
 const bool SQLService::SQL_MSG_BACKWARD_COMPATIBLE = false;
 
 static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
@@ -88,7 +89,6 @@ void SQLGetContainerHandler::operator()(
 	const EventMonotonicTime emNow
 		= ec.getHandlerStartMonotonicTime();
 	PartitionId pId = ev.getPartitionId();
-	bool isSettedCompositeIndex = false;
 
 	Response response(alloc);
 
@@ -116,9 +116,6 @@ void SQLGetContainerHandler::operator()(
 		}
 
 		util::XArray<uint8_t>& containerNameBinary = inMes.containerNameBinary_;
-		bool isContainerLock = inMes.isContainerLock_;
-		ClientId clientId = inMes.clientId_;
-		SessionId queryId = inMes.queryId_;
 
 		util::String containerName(alloc);
 
@@ -234,7 +231,7 @@ void SQLGetContainerHandler::operator()(
 				= *sqlService_->getAllocator();
 
 			containerKey.toString(alloc, containerName);
-			TableContainerInfo containerInfo(sqlAllocator);
+			TableContainerInfo containerInfo;
 
 			OptionSet optionSet(alloc);
 			info.containerType_ = container->getContainerType();
@@ -402,6 +399,10 @@ SQLService::SQLService(
 		CONFIG_TABLE_SQL_SEND_PENDING_TASK_CONCURRENCY)),
 	addBatchMaxCount_(config.get<int32_t>(
 		CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT)),
+	tablePartitioningMaxAssignedNum_(config.get<int32_t>(
+		CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_NUM)),
+	tablePartitioningMaxAssignedEntryNum_(config.get<int32_t>(
+		CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM)),
 	totalInternalConnectionCount_(0),
 	totalExternalConnectionCount_(0),
 	eventMonitor_(pgConfig_)
@@ -567,13 +568,16 @@ void SQLService::initialize(const ManagerSet& mgrSet) {
 		authenticationAckHandler_.initialize(mgrSet, true);
 		checkTimeoutHandler_.initialize(mgrSet, true);
 		int64_t checkSQLAuthInterval = 60 * 5;
-		for (int32_t pgId = 0; pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
+		for (int32_t pgId = 0;
+				static_cast<uint32_t>(pgId) < pgConfig_.getPartitionGroupCount();
+				pgId++) {
 			const PartitionId beginPId =
 				pgConfig_.getGroupBeginPartitionId(pgId);
 			Event timeoutCheckEvent(
 				eeSource_, TXN_COLLECT_TIMEOUT_RESOURCE, beginPId);
 			ee_.addPeriodicTimer(
-				timeoutCheckEvent, checkSQLAuthInterval * 1000);
+				timeoutCheckEvent,
+				static_cast<int32_t>(checkSQLAuthInterval * 1000));
 		}
 
 		executeHandler_.initialize(mgrSet);
@@ -673,6 +677,7 @@ void SQLServiceHandler::initialize(const ManagerSet& mgrSet) {
 	@param [in] ev イベント
 */
 void SQLTimerNotifyClientHandler::operator ()(EventContext& ec, Event& ev) {
+	UNUSED_VARIABLE(ev);
 
 	if (clsSvc_->getNotificationManager().getMode()
 		!= NOTIFICATION_MULTICAST) {
@@ -723,8 +728,9 @@ void SQLTimerNotifyClientHandler::operator ()(EventContext& ec, Event& ev) {
 	- フォーマット <address, port, partitionNum, hashType>
 	- パーティション数は特に使わない
 */
-void SQLTimerNotifyClientHandler::encode(EventByteOutStream& out,
-	EventContext& ec) {
+void SQLTimerNotifyClientHandler::encode(
+		EventByteOutStream& out, EventContext& ec) {
+	UNUSED_VARIABLE(ec);
 
 	try {
 		const uint8_t hashType = 0;
@@ -1137,9 +1143,10 @@ void SQLRequestHandler::decodeBindInfo(util::ByteStream<util::ArrayInStream>& in
 	@param [in] varPartIn 可変長ストリーム
 */
 void SQLRequestHandler::decodeBindColumnInfo(
-	util::ByteStream<util::ArrayInStream>& in,
-	RequestInfo& request, InStream& fixedPartIn,
-	InStream& varPartIn) {
+		util::ByteStream<util::ArrayInStream>& in,
+		RequestInfo& request, InStream& fixedPartIn,
+		InStream& varPartIn) {
+	UNUSED_VARIABLE(in);
 
 	try {
 		int64_t numValue;
@@ -1346,7 +1353,6 @@ void SQLService::requestCancel(EventContext& ec) {
 }
 
 void SQLService::sendCancel(EventContext& ec, NodeId nodeId) {
-	util::StackAllocator& alloc = ec.getAllocator();
 	try {
 		Event request(ec, REQUEST_CANCEL, IMMEDIATE_PARTITION_ID);
 		const NodeDescriptor& nd = ee_.getServerND(nodeId);
@@ -1669,6 +1675,18 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		config, CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT, INT32)
 		.setMin(0)
 		.setDefault(1000);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_NUM, INT32)
+		.setMin(TABLE_PARTITIONING_MAX_HASH_PARTITIONING_NUM)
+		.setMax(TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM)
+		.setDefault(TABLE_PARTITIONING_DEFAULT_MAX_ASSIGN_NUM);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM, INT32)
+		.setMin(1)
+		.setMax(TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM)
+		.setDefault(TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM);
 }
 
 /*!
@@ -1817,23 +1835,22 @@ SQLService::StatUpdator::StatUpdator() : service_(NULL) {}
 
 template<typename T>
 void putLargeRows(
-	const char* key,
-	util::StackAllocator& alloc,
-	TransactionContext& txn,
-	DataStoreV4* dataStore,
-	StatementHandler* statementHandler,
-	PartitionTable* partitionTable,
-	TransactionManager* transactionManager,
-	StatementHandler::Request& request,
-	util::XArray<ColumnInfo>& columnInfoList,
-	util::XArray<const util::XArray<uint8_t>*>& logRecordList,
-	KeyDataStoreValue& keyStoreValue,
-	bool isNoClient, T& record) {
+		const char* key,
+		util::StackAllocator& alloc,
+		TransactionContext& txn,
+		DataStoreV4* dataStore,
+		StatementHandler* statementHandler,
+		PartitionTable* partitionTable,
+		TransactionManager* transactionManager,
+		StatementHandler::Request& request,
+		util::XArray<ColumnInfo>& columnInfoList,
+		util::XArray<const util::XArray<uint8_t>*>& logRecordList,
+		KeyDataStoreValue& keyStoreValue,
+		bool isNoClient, T& record) {
+	UNUSED_VARIABLE(partitionTable);
 
 	util::XArray<uint8_t> fixedPart(alloc);
 	util::XArray<uint8_t> varPart(alloc);
-
-	PutStatus putStatus;
 
 	OutputMessageRowStore outputMrs(
 		dataStore->getConfig(),
@@ -1872,21 +1889,21 @@ void putLargeRows(
 }
 
 void putLargeBinaryRows(
-	const char* key, util::StackAllocator& alloc,
-	TransactionContext& txn,
-	DataStoreV4* dataStore,
-	StatementHandler* statementHandler,
-	PartitionTable* partitionTable,
-	TransactionManager* transactionManager,
-	StatementHandler::Request& request,
-	util::XArray<ColumnInfo>& columnInfoList,
-	util::XArray<const util::XArray<uint8_t>*>& logRecordList,
-	KeyDataStoreValue& keyStoreValue,
-	util::XArray<uint8_t>& record) {
+		const char* key, util::StackAllocator& alloc,
+		TransactionContext& txn,
+		DataStoreV4* dataStore,
+		StatementHandler* statementHandler,
+		PartitionTable* partitionTable,
+		TransactionManager* transactionManager,
+		StatementHandler::Request& request,
+		util::XArray<ColumnInfo>& columnInfoList,
+		util::XArray<const util::XArray<uint8_t>*>& logRecordList,
+		KeyDataStoreValue& keyStoreValue,
+		util::XArray<uint8_t>& record) {
+	UNUSED_VARIABLE(partitionTable);
 
 	util::XArray<uint8_t> fixedPart(alloc);
 	util::XArray<uint8_t> varPart(alloc);
-	PutStatus putStatus;
 
 	OutputMessageRowStore outputMrs(
 		dataStore->getConfig(),
@@ -1916,9 +1933,10 @@ void putLargeBinaryRows(
 
 template<typename T>
 void decodeLargeRow(
-	const char* key, util::StackAllocator& alloc, TransactionContext& txn,
-	DataStoreV4* dataStore, const char* dbName, BaseContainer* container,
-	T& record, const EventMonotonicTime emNow) {
+		const char* key, util::StackAllocator& alloc, TransactionContext& txn,
+		DataStoreV4* dataStore, const char* dbName, BaseContainer* container,
+		T& record, const EventMonotonicTime emNow) {
+	UNUSED_VARIABLE(dbName);
 
 	if (container->getAttribute() != CONTAINER_ATTR_LARGE
 		&& container->getAttribute() != CONTAINER_ATTR_VIEW) {
@@ -2455,14 +2473,15 @@ void UpdateContainerStatusHandler::decode(EventByteInStream& in,
 }
 
 bool checkExpiredContainer(
-	util::StackAllocator& alloc,
-	EventContext& ec,
-	const FullContainerKey& containerKey,
-	TransactionContext& txn,
-	ContainerId containerId,
-	TablePartitioningInfo<util::StackAllocator>& partitioningInfo,
-	PartitionTable* pt,
-	const DataStoreConfig& dsConfig) {
+		util::StackAllocator& alloc,
+		EventContext& ec,
+		const FullContainerKey& containerKey,
+		TransactionContext& txn,
+		ContainerId containerId,
+		TablePartitioningInfo<util::StackAllocator>& partitioningInfo,
+		PartitionTable* pt,
+		const DataStoreConfig& dsConfig) {
+	UNUSED_VARIABLE(dsConfig);
 
 	if (!partitioningInfo.isTableExpiration()) {
 		return false;
@@ -2679,8 +2698,6 @@ void UpdateContainerStatusHandler::operator()(
 			containerNameBinary.data(),
 			containerNameBinary.size());
 
-		LogManager<MutexLocker>* logManager_ = getLogManager(txn.getPartitionId());
-
 		bool caseSensitive = getCaseSensitivity(request).isContainerNameCaseSensitive();
 		KeyDataStore* keyStore = getKeyDataStore(txn.getPartitionId());
 		KeyDataStoreValue keyStoreValue = keyStore->get(txn, containerKey, caseSensitive);
@@ -2873,13 +2890,13 @@ void UpdateContainerStatusHandler::operator()(
 					partitioningInfo.checkMaxAssigned(
 						txn,
 						containerKey,
-						partitioningNum);
+						partitioningNum, sqlService_->getTablePartitioningMaxAssignedNum());
 
 					partitioningInfo.newEntry(
 						affinityNumber,
 						PARTITION_STATUS_CREATE_END,
 						partitioningNum,
-						baseValue);
+						baseValue, sqlService_->getTablePartitioningMaxAssignedEntryNum());
 
 					partitioningInfo.incrementTablePartitioningVersionId();
 					partitioningInfo.activeContainerCount_ += partitioningNum;
@@ -2909,7 +2926,7 @@ void UpdateContainerStatusHandler::operator()(
 						affinityNumber,
 						PARTITION_STATUS_DROP_START,
 						partitioningNum,
-						baseValue);
+						baseValue, sqlService_->getTablePartitioningMaxAssignedEntryNum());
 
 					updatePartitioningInfo = true;
 				}
@@ -2975,8 +2992,7 @@ void UpdateContainerStatusHandler::operator()(
 			}
 			else {
 				if (entry != NULL) {
-
-					size_t removePos = entry->pos_;
+					const int32_t removePos = static_cast<int32_t>(entry->pos_);
 					tablePartitioningIndexInfo.remove(removePos);
 
 					partitioningInfo.incrementTablePartitioningVersionId();
@@ -3183,8 +3199,6 @@ void CreateLargeIndexHandler::operator()(
 
 		uint8_t existIndex = 0;
 		bool noClient = false;
-
-		LogManager<MutexLocker>* logManager_ = getLogManager(txn.getPartitionId());
 
 		KeyDataStore* keyStore = getKeyDataStore(txn.getPartitionId());
 		KeyDataStoreValue keyStoreValue = keyStore->get(alloc, txn.getContainerId());
@@ -3465,7 +3479,6 @@ void UpdateTableCacheHandler::operator()(EventContext& ec, Event& ev) {
 	try {
 		util::StackAllocator& alloc = ec.getAllocator();
 		EventByteInStream in(ev.getInStream());
-		bool isLocal = false;
 		DatabaseId dbId;
 		util::String dbName(alloc);
 		util::String tableName(alloc);
@@ -3553,7 +3566,6 @@ void SQLRequestNoSQLClientHandler::operator()(EventContext& ec, Event& ev) {
 	ClientId clientId;
 	StatementId stmtId = UNDEF_STATEMENTID;
 	bool isSetted = false;
-	StatementExecStatus status;
 
 	try {
 		EventByteInStream in(ev.getInStream());
@@ -3589,14 +3601,10 @@ void SQLRequestNoSQLClientHandler::operator()(EventContext& ec, Event& ev) {
 
 		try {
 			if (isSetted) {
-				status = StatementHandler::TXN_STATEMENT_ERROR;
 				const util::Exception checkException = GS_EXCEPTION_CONVERT(e, "");
-				int32_t errorCode = checkException.getErrorCode();
-				if (isDenyException(errorCode)) {
-					status = StatementHandler::TXN_STATEMENT_DENY;
-				}
+
 				Event response(ec, UPDATE_CONTAINER_STATUS, replyPId);
-				EventByteOutStream out = encodeCommonPart(response, stmtId, TXN_STATEMENT_SUCCESS);
+				encodeCommonPart(response, stmtId, TXN_STATEMENT_SUCCESS);
 				EventEngine* ee = txnSvc_->getEE();
 				SQLExecutionManager::Latch latch(clientId, executionManager_);
 				SQLExecution* execution = latch.get();
@@ -3695,6 +3703,12 @@ void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& con
 
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT, *this);
+
+	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_NUM, *this);
+
+	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM, *this);
 }
 
 void SQLService::Config::operator()(
@@ -3742,6 +3756,12 @@ void SQLService::Config::operator()(
 		break;
 	case CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT:
 		sqlSvc_->setAddBatchMaxCount(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_NUM:
+		sqlSvc_->setTablePartitioningMaxAssignedNum(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM:
+		sqlSvc_->setTablePartitioningMaxAssignedEntryNum(value.get<int32_t>());
 		break;
 	}
 }

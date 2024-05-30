@@ -214,18 +214,20 @@ private:
 	int64_t checkLsn_;
 	bool isXLog_;
 	std::vector<uint8_t> buffer_;
+	bool pipeline_;
+	int64_t fileSize_;
 
 public:
 	LogIterator(LogManager<L>* logmanager, int64_t logVersion)
 		: logManager_(logmanager), alloc_(&logmanager->getAllocator()),
 		  nextFile_(0), logFile_(NULL), logversion_(logVersion),
-		  offset_(0), lastLsn_(0), checkLsn_(-1), isXLog_(false) {
+		  offset_(0), lastLsn_(0), checkLsn_(-1), isXLog_(false), pipeline_(false), fileSize_(-1) {
 	};
 
-	LogIterator(LogManager<L>* logmanager, int64_t logVersion, uint64_t offset)
+	LogIterator(LogManager<L>* logmanager, int64_t logVersion, uint64_t offset, uint64_t fileSize)
 		: logManager_(logmanager), alloc_(&logmanager->getAllocator()),
 		  nextFile_(0), logFile_(NULL), logversion_(logVersion),
-		  offset_(offset), lastLsn_(0), checkLsn_(-1), isXLog_(false) {
+		  offset_(offset), lastLsn_(0), checkLsn_(-1), isXLog_(false), pipeline_(true), fileSize_(fileSize) {
 	};
 
 	void add(const std::string& filename);
@@ -239,6 +241,14 @@ public:
 
 	void markXLog() {
 		isXLog_ = true;
+	}
+
+	int64_t getOffset() {
+		return offset_;
+	}
+
+	int64_t getFileSize() {
+		return fileSize_;
 	}
 
 	std::string toString() const;
@@ -280,12 +290,13 @@ private:
 	int32_t position_;
 	util::Atomic<bool> needFlush_;
 	LogManagerStats &stats_;
+	LogManager<MutexLocker>* logManager_;
 
 public:
 	WALBuffer(PartitionId pId, LogManagerStats &stats);
 	~WALBuffer();
 
-	WALBuffer& init(SimpleFile* logfile);
+	WALBuffer& init(SimpleFile* logfile, LogManager<MutexLocker>& logManager);
 
 	uint64_t append(const uint8_t* data, size_t dataLength);
 
@@ -319,6 +330,7 @@ private:
 	void handleDuplicateError(std::exception &e);
 	void setDuplicateStatus(
 			DuplicateLogMode::Status status, bool force = false);
+	void deleteDuplicateFile();
 };
 
 
@@ -329,11 +341,13 @@ struct LogManagerConst {
 
 	static const uint16_t LOGFORMAT_OLD_VERSION;
 	static const uint16_t LOGFORMAT_BASE_VERSION;
+	static const uint16_t LOGFORMAT_V56_ZSTD_VERSION;
 	static const uint16_t LOGFORMAT_LATEST_VERSION;
 	static const uint16_t LOGFORMAT_ACCEPTABLE_VERSIONS[];
 
 	static uint16_t getBaseFormatVersion();
 	static uint16_t getLatestFormatVersion();
+	static uint16_t getV56zstdFormatVersion();
 
 	static bool isAcceptableFormatVersion(uint16_t version);
 	static uint32_t getLogFormatVersionScore(uint16_t version);
@@ -353,7 +367,14 @@ public:
 			util::StackAllocator& alloc, WALBuffer& xWALbuffer,
 			WALBuffer& cpWALBuffer, int32_t checkpointrange,
 			const char* cpLogPath, const char* xLogPath, PartitionId pId,
-			LogManagerStats &stats);
+			LogManagerStats &stats, std::string& uuid);
+
+	LogManager(
+		ConfigTable& configTable, std::unique_ptr<L>&& locker,
+		util::StackAllocator& alloc, WALBuffer& xWALbuffer, WALBuffer& cpWALBuffer,
+		const char* xLogPath, PartitionId pId,
+		LogManagerStats& stats);
+
 	~LogManager();
 
 	enum PersistencyMode {
@@ -434,6 +455,8 @@ public:
 
 	int64_t getStartLogVersion();
 
+	LogSequentialNumber getCurrentStartLSN(bool prev);
+
 	void closeFiles(bool withFlush, bool byCP);
 
 	void removeAllLogFiles(bool byCP);
@@ -486,6 +509,17 @@ public:
 	void setLogFormatVersion(uint16_t version);
 	uint16_t getLogFormatVersion();
 
+	void deleteDuplicateFile() {
+		if (duplicateFile_) {
+			delete duplicateFile_;
+			duplicateFile_ = NULL;
+		}
+	}
+
+	void setUuid(std::string& uuid) {
+		uuid_ = uuid;
+	}
+
 private:
 	void setDuplicateStatus(
 			DuplicateLogMode::Status status, bool force = false);
@@ -519,6 +553,7 @@ private:
 	std::vector<SimpleFile*> pendingFiles_;
 	LogManagerStats &stats_;
 	uint16_t logFormatVersion_; 
+	std::string uuid_;
 };
 
 
@@ -584,14 +619,25 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 				if (nextFile_ < static_cast<int32_t>(fileNames_.size())) {
 					logFile_ = new BufferedReader(
 						fileNames_.at(nextFile_), DEFAULT_LOG_READ_BUFFER_SIZE);
-					logFile_->open();
 					logversion_ = nextFile_;
 					nextFile_++;
-					offset_ = 0;
+					if (!pipeline_) {
+						logFile_->open();
+						offset_ = 0;
+					}
+					else {
+						if (!logFile_->readOnlyOpen()) {
+							delete logFile_;
+							logFile_ = NULL;
+							fileSize_ = -1;
+							return NULL;
+						}
+					}
 					if (logFile_->getSize() == 0) {
 						logFile_->close();
 						delete logFile_;
 						logFile_ = NULL;
+						fileSize_ = 0;
 						continue;
 					}
 				} else {
@@ -600,6 +646,13 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 			}
 			try {
 				uint64_t fileSize = logFile_->getSize();
+				if (pipeline_ && fileSize_ != -1) {
+					if (fileSize_ != static_cast<int64_t>(fileSize)) {
+						GS_THROW_USER_ERROR(GS_ERROR_LM_CHANGE_READ_TARGET_LOG_FILE, 
+							"Failed to open log file (logFileName=" << logFile_->getFileName() << ", prevSize=" << fileSize_ << ", currentSize=" << fileSize << ")");
+					}
+				}
+				fileSize_ = fileSize;
 				if (offset_ + sizeof(int64_t) > fileSize) {
 					if (isXLog_) {
 						guard.release();
@@ -732,7 +785,7 @@ LogManager<L>::LogManager(
 		std::unique_ptr<L>&& locker, util::StackAllocator& alloc,
 		WALBuffer& xWALBuffer, WALBuffer& cpWALBuffer,
 		int32_t checkpointrange, const char* cpLogPath, const char* xLogPath,
-		PartitionId pId, LogManagerStats &stats) :
+		PartitionId pId, LogManagerStats &stats, std::string& uuid) :
 		config_(configTable), locker_(std::move(locker)), alloc_(alloc),
 		xWALBuffer_(xWALBuffer), cpWALBuffer_(cpWALBuffer),
 		checkpointrange_(checkpointrange), pId_(pId),
@@ -742,10 +795,34 @@ LogManager<L>::LogManager(
 		longtermLogAvailable_(false), longtermSyncLogErrorFlag_(false),
 		keepXLogVersion_(-1), child_(NULL),
 		stats_(stats),
-		logFormatVersion_(LogManagerConst::LOGFORMAT_BASE_VERSION)
+		logFormatVersion_(LogManagerConst::LOGFORMAT_BASE_VERSION),
+		uuid_(uuid)
 {
 	xWALBuffer_.use();
 	cpWALBuffer_.use();
+}
+
+template<class L>
+LogManager<L>::LogManager(
+	ConfigTable& configTable,
+	std::unique_ptr<L>&& locker, util::StackAllocator& alloc,
+	WALBuffer& xWALBuffer, 
+	WALBuffer& cpWALBuffer,
+	const char* xLogPath,
+	PartitionId pId, LogManagerStats& stats) :
+	config_(configTable), locker_(std::move(locker)), alloc_(alloc),
+	xWALBuffer_(xWALBuffer), 
+	cpWALBuffer_(cpWALBuffer),
+	pId_(pId),
+	xLogPath_(xLogPath),
+	logversion_(-1), cpFile_(nullptr), xFile_(nullptr), duplicateFile_(nullptr),
+	suffix_(nullptr), xLogFileOffset_(0), xLogCount_(0),
+	longtermLogAvailable_(false), longtermSyncLogErrorFlag_(false),
+	keepXLogVersion_(-1), child_(NULL),
+	stats_(stats),
+	logFormatVersion_(LogManagerConst::LOGFORMAT_BASE_VERSION)
+{
+	xWALBuffer_.use();
 }
 
 template<class L>
@@ -875,14 +952,20 @@ void LogManager<L>::init(int64_t logversion, bool withFlush, bool byCP) {
 	xFile_->open();
 	xLogFileOffset_ = 0;
 
-	xWALBuffer_.init(xFile_);
+	xWALBuffer_.init(xFile_, *this);
 
 	if (duplicateLogMode_.status_ == DuplicateLogMode::DUPLICATE_LOG_ENABLE) {
 		if (xWALBuffer_.getDuplicateStatus() !=
 				DuplicateLogMode::DUPLICATE_LOG_ERROR) {
 			util::NormalOStringStream oss3;
-			oss3 << duplicateLogMode_.duplicateLogPath_.c_str() << "/" << pId_ <<
+			if (uuid_.empty()) {
+				oss3 << duplicateLogMode_.duplicateLogPath_.c_str() << "/" << pId_ <<
 					"_" << logversion_ << LogManagerConst::XLOG_FILE_SUFFIX;
+			}
+			else {
+				oss3 << duplicateLogMode_.duplicateLogPath_.c_str() << "/" << pId_ <<
+					"_" << logversion_ << "_" << uuid_ << LogManagerConst::XLOG_FILE_SUFFIX;
+			}
 
 			xWALBuffer_.setStopOnDuplicateError(
 					duplicateLogMode_.stopOnDuplicateErrorFlag_);
@@ -898,7 +981,7 @@ void LogManager<L>::init(int64_t logversion, bool withFlush, bool byCP) {
 	else {
 		xWALBuffer_.setDuplicateFile(NULL);
 	}
-	cpWALBuffer_.init(cpFile_);
+	cpWALBuffer_.init(cpFile_, *this);
 	existLsnMap_[logversion] = getLSN() + 1; 
 
 	appendXLog(LogType::CheckpointStartLog, NULL, 0, NULL); 
@@ -1139,6 +1222,17 @@ int64_t LogManager<L>::getStartLogVersion() {
 	return itr->first;
 }
 
+template <class L>
+LogSequentialNumber LogManager<L>::getCurrentStartLSN(bool prev) {
+	assert(!existLsnMap_.empty());
+	ExistLsnMap::reverse_iterator itr = existLsnMap_.rbegin();
+	if (existLsnMap_.size() == 1 || !prev) {
+		return (itr->second - 1);
+	}
+	++itr;
+	return (itr->second - 1);
+}
+
 /*!
 	@brief 指定ログバージョン以前のファイル削除
 
@@ -1269,7 +1363,7 @@ void LogManager<L>::closeFiles(bool withFlush, bool byCP) {
 				if (duplicateFile_) {
 					duplicateFile_->clearFileCache();
 					duplicateFile_->close();
-					delete duplicateFile_;
+					deleteDuplicateFile();
 				}
 				delete xFile_;
 			}
@@ -1520,6 +1614,9 @@ inline uint16_t LogManagerConst::getBaseFormatVersion() {
 inline uint16_t LogManagerConst::getLatestFormatVersion() {
 	return LogManagerConst::LOGFORMAT_LATEST_VERSION;
 };
+inline uint16_t LogManagerConst::getV56zstdFormatVersion() {
+	return LogManagerConst::LOGFORMAT_V56_ZSTD_VERSION;
+};
 
 /*!
     @brief Checks the version of the Log format
@@ -1556,7 +1653,7 @@ inline uint16_t LogManagerConst::selectNewerVersion(uint16_t arg1, uint16_t arg2
 }
 
 inline uint32_t Log::getCommonHeaderSize() {
-	return sizeof(int8_t) * 2 + sizeof(int16_t) * 3 + sizeof(int64_t) * 5;
+	return static_cast<uint32_t>(sizeof(int8_t) * 2 + sizeof(int16_t) * 3 + sizeof(int64_t) * 5);
 };
 
 inline Log& Log::setCheckSum() {

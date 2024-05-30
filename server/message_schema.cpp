@@ -226,7 +226,9 @@ MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 					break;
 				default:
 					GS_THROW_USER_ERROR(
-						GS_ERROR_DS_DS_SCHEMA_INVALID, "Unsupported option type : " << optionType);
+							GS_ERROR_DS_DS_SCHEMA_INVALID,
+							"Unsupported option type : " <<
+							static_cast<int32_t>(optionType));
 				}
 				in >> tmpValue;
 				optionType = static_cast<OptionType>(tmpValue);
@@ -276,7 +278,9 @@ MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
 					break;
 				default:
 					GS_THROW_USER_ERROR(
-						GS_ERROR_DS_DS_SCHEMA_INVALID, "Unsupported option type : " << optionType);
+							GS_ERROR_DS_DS_SCHEMA_INVALID,
+							"Unsupported option type : " <<
+							static_cast<int32_t>(optionType));
 				}
 				in >> tmpValue;
 				optionType = static_cast<OptionType>(tmpValue);

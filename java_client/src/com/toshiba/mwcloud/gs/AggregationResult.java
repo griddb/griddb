@@ -111,11 +111,14 @@ public interface AggregationResult {
 	 * @return 通常精度のTIMESTAMP型({@link Date})の集計値。結果がTIMESTAMP型
 	 * 以外の場合は{@code null}
 	 * </div><div lang="en">
-	 * Obtains the result of aggregating time-type values in TIMESTAMP type ({@link Date}).
+	 * Retrieves the result of aggregating time-type values as normal -precision TIMESTAMP type ({@link Date}) values.
 	 *
 	 * <p>It returns {@code null} if a result is not of TIMESTAMP type. </p>
 	 *
-	 * @return Result of aggregating TIMESTAMP type ({@link Date}).
+	 * <p>If high-precision TIMESTAMP values are retained, they are converted to 
+	 * normal-precision values and then returned.</p>
+	 *
+	 * @return Result of aggregating normal-precision TIMESTAMP type ({@link Date}) values.
 	 * If the type of result is different, returns {@code null}.
 	 * </div>
 	 */
@@ -135,6 +138,15 @@ public interface AggregationResult {
 	 * 以外の場合は{@code null}
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Retrieves the result of aggregating time-type values as high-precision TIMESTAMP type ({@link Timestamp}) values.
+	 *
+	 * <p>If non-TIMESTAMP type values are retained, 
+	 * {@code null} is returned.</p>
+	 *
+	 * <p>If normal-precision TIMESTAMP values are retained, 
+	 * they are converted to high-precision values and then returned.</p>
+	 *
+	 * @return Result of aggregating high-precision TIMESTAMP type ({@link Timestamp}) values.
 	 * @since 5.3
 	 * </div>
 	 */

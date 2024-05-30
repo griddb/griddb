@@ -24,7 +24,6 @@
 #include "sql_execution.h"
 #include "transaction_manager.h"
 
-
 const DQLProcessor::ProcRegistrar DQLProcessor::REGISTRAR_LIST[] = {
 	ProcRegistrar::of<DQLProcs::GroupOption>(SQLType::EXEC_GROUP),
 	ProcRegistrar::of<DQLProcs::JoinOption>(SQLType::EXEC_JOIN),
@@ -416,6 +415,8 @@ void DQLProcessor::setUpConfig(
 	dest.set(
 			SQLOpTypes::CONF_INTERRUPTION_SCAN_COUNT,
 			config->interruptionScanCount_);
+	dest.set(
+			SQLOpTypes::CONF_SCAN_COUNT_BASED, config->scanCountBased_);
 	store.setConfig(dest);
 }
 
@@ -1919,6 +1920,59 @@ bool SQLCompiler::ProcessorUtils::reducePartitionedTarget(
 	}
 
 	return reduced;
+}
+
+bool SQLCompiler::ProcessorUtils::isReduceableTablePartitionCondition(
+		const Expr &expr, const TableInfo &tableInfo,
+		const util::Vector<uint32_t> &affinityRevList,
+		int32_t subContainerId) {
+	SQLExprs::PlanPartitioningInfo basePartitioning;
+	SQLExprs::PlanPartitioningInfo *partitioning =
+			DQLProcs::CompilerUtils::toPlanPartitioningInfo(
+					tableInfo.partitioning_, basePartitioning);
+	if (partitioning == NULL) {
+		return false;
+	}
+
+	const SQLTableInfo::SubInfoList &subInfoList =
+			tableInfo.partitioning_->subInfoList_;
+	if (subContainerId < 0 ||
+			static_cast<size_t>(subContainerId) >= subInfoList.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	const int64_t nodeAffinity = subInfoList[subContainerId].nodeAffinity_;
+
+	const TupleColumnType columnType = tableInfo.columnInfoList_[
+			partitioning->partitioningColumnId_].first;
+
+	Type condType = expr.op_;
+	const Expr *columnExpr = expr.left_;
+	const Expr *valueExpr = expr.right_;
+	if (columnExpr == NULL || valueExpr == NULL) {
+		return false;
+	}
+
+	if (columnExpr->op_ != SQLType::EXPR_COLUMN) {
+		std::swap(columnExpr, valueExpr);
+		if (columnExpr->op_ != SQLType::EXPR_COLUMN) {
+			return false;
+		}
+		condType = swapCompOp(condType);
+	}
+
+	const uint32_t tableInputId = 0;
+	if (columnExpr->inputId_ != tableInputId) {
+		return false;
+	}
+
+	if (valueExpr->op_ != SQLType::EXPR_CONSTANT) {
+		return false;
+	}
+
+	return SQLExprs::DataPartitionUtils::isReduceableTablePartitionCondition(
+			*partitioning, columnType, affinityRevList, nodeAffinity, condType,
+			columnExpr->columnId_, valueExpr->value_);
 }
 
 bool SQLCompiler::ProcessorUtils::getTablePartitionKeyList(

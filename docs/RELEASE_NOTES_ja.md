@@ -11,3 +11,4 @@
   * [V5.1 Release Notes](GridDB-5.1-CE-RELEASE_NOTES_ja.md)
   * [V5.3 Release Notes](GridDB-5.3-CE-RELEASE_NOTES_ja.md)
   * [V5.5 Release Notes](GridDB-5.5-CE-RELEASE_NOTES_ja.md)
+  * [V5.6 Release Notes](GridDB-5.6-CE-RELEASE_NOTES_ja.md)

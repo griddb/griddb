@@ -122,9 +122,11 @@ public class RowKeyPredicate<K> {
 	 * <p>The target Container must have a {@link RowKey}, and the type of the {@link RowKey} must be
 	 * the specified {@link GSType}</p>
 	 *
+	 * <p>Also, the Column precision should match.</p>
+	 * 
 	 * <p>Unlike {@link #create(Class)}, this method is used when the type of {@link RowKey} is not specified
-	 * when the application is compiled. However, the criteria for checking the RowKey type when setting
-	 * the condition is the same as {@link #create(Class)}.</p>
+	 * when the application is compiled. However, the criteria for checking 
+	 * the RowKey type and precision when setting the condition is the same.</p>
 	 *
 	 * <p>The type of {@link RowKey} that can be set is only that allowed
 	 * by either one of the subinterfaces of {@link Container}.</p>
@@ -172,6 +174,30 @@ public class RowKeyPredicate<K> {
 	 * @see Container
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Creates a matching condition where the specified 
+	 * {@link GSType} and date/time precision are the RowKey type.
+	 *
+	 * <p>The target Container for which a matching condition is evaluated 
+	 * must have a RowKey, and the type of the RowKey must be the specified {@link GSType}.</p>
+	 *
+	 * <p>Also, the Column precision should match.</p>
+	 *
+	 * <p>Unlike {@link #create(Class)}, this method is appropriate for use when 
+	 * the type of RowKey is not specified when the application is compiled. However, 
+	 * the criteria for checking the RowKey type and precision when setting the condition is the same.</p>
+	 *
+	 * <p>The type of a RowKey that can be set is only the one that is 
+	 * allowed by either one of the subinterfaces of {@link Container}.</p>
+	 *
+	 * @param keyType the type of a RowKey used to evaluate the matching condition.
+	 * @param timePrecision the date/time precision of a RowKey used to evaluate the matching condition.
+	 *
+	 * @return newly created {@link RowKeyPredicate}
+	 *
+	 * @throws GSException if the specified type is not supported as a RowKey at any time.
+	 * @throws NullPointerException If {@code null}が is specified as a {@code keyType} argument
+	 *
+	 * @see Container
 	 * @since 5.3
 	 * </div>
 	 */
@@ -223,8 +249,10 @@ public class RowKeyPredicate<K> {
 	 * with a single column, and the type of the Row key must be same as the specified
 	 * {@link GSType}.</p>
 	 *
-	 * <p>The type of {@link RowKey} that can be set is only that allowed
-	 * by either one of the subinterfaces of {@link Container}.
+	 * <p>Also, the Column precision should match.</p>
+	 *
+	 * <p>The type and precision of a RowKey that can be set are only 
+	 * those that are allowed by either one of the subinterfaces of {@link Container}.
 	 * For the correspondence of {@link Class} to {@link GSType},
 	 * see the definition of {@link Container}.</p>
 	 *
@@ -277,6 +305,31 @@ public class RowKeyPredicate<K> {
 	 * @see Container
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Creates a matching condition where the {@link GSType} corresponding to 
+	 * the specified {@link Class} and date/time precision is the RowKey type.
+	 *
+	 * <p>The target Container for which a matching condition is evaluated 
+	 * must have a RowKey composed of a single column, and the type of the 
+	 * RowKey must be the same as the type of the specified {@link GSType}.</p>
+	 *
+	 * <p>Also, the Column precision should match.</p>
+	 *
+	 * <p>The type of a RowKey that can be set is only the one that is 
+	 * allowed by either one of the subinterfaces of {@link Container}
+	 * For more about the mapping between {@link Class} and {@link GSType}, 
+	 * see the definition of a {@link Container}.</p>
+	 *
+	 * <p>Use {@link #create(ContainerInfo)} to create a matching condition regardless of 
+	 * the number of columns configuring a RowKey such as a composite Row key.</p>
+	 *
+	 * @param keyType the {@link Class} that corresponds to the type of a RowKey used to evaluate the matching condition.
+	 *
+	 * @return newly created {@link RowKeyPredicate}
+	 *
+	 * @throws GSException if the specified type is not supported as a RowKey at any time.
+	 * @throws NullPointerException If {@code null} is specified as a {@code keyType} argument
+	 *
+	 * @see Container
 	 * @since 5.3
 	 * </div>
 	 */

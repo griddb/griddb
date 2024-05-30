@@ -56,7 +56,8 @@ SQLProcessorConfig::SQLProcessorConfig() :
 		sortTopNBatchThreshold_(-1),
 		sortTopNBatchSize_(-1),
 		interruptionProjectionCount_(-1),
-		interruptionScanCount_(-1) {
+		interruptionScanCount_(-1),
+		scanCountBased_(-1) {
 }
 
 const SQLProcessorConfig& SQLProcessorConfig::getDefault() {
@@ -106,7 +107,8 @@ SQLProcessorConfig::SQLProcessorConfig(const DefaultTag&) :
 		sortTopNBatchThreshold_(6),
 		sortTopNBatchSize_(-1),
 		interruptionProjectionCount_(100000),
-		interruptionScanCount_(10000) {
+		interruptionScanCount_(10000),
+		scanCountBased_(-1) {
 	SQLProcessor::DQLTool::customizeDefaultConfig(*this);
 }
 
@@ -138,6 +140,7 @@ bool SQLProcessorConfig::merge(const SQLProcessorConfig &base) {
 	merged |= mergeValue(base, base.sortTopNBatchSize_);
 	merged |= mergeValue(base, base.interruptionProjectionCount_);
 	merged |= mergeValue(base, base.interruptionScanCount_);
+	merged |= mergeValue(base, base.scanCountBased_);
 	return merged;
 }
 
@@ -204,6 +207,7 @@ void SQLProcessorConfig::Manager::apply(
 
 	if (overrideDefaults) {
 		config_ = config;
+		config_.scanCountBased_ = (config.interruptionScanCount_ >= 0 ? 1 : -1);
 	}
 	else {
 		config_.merge(config);

@@ -60,33 +60,7 @@ enum DDLCommandType {
 	DDL_DROP_VIEW
 };
 
-static const char* getCommandString(DDLCommandType type) {
-	switch (type) {
-	case DDL_CREATE_DATABASE: return "CREATE DATABASE";
-	case DDL_DROP_DATABASE: return "DROP DATABASE";
-	case DDL_CREATE_TABLE: return "CREATE TABLE";
-	case DDL_DROP_TABLE: return "DROP TABLE";
-	case DDL_CREATE_INDEX: return "CREATE INDEX";
-	case DDL_DROP_INDEX: return "DROP INDEX";
-	case DDL_CREATE_USER: return "CREATE USER";
-	case DDL_DROP_USER: return "DROP USER";
-	case DDL_SET_PASSWORD: return "SET PASSWORD";
-	case DDL_GRANT: return "GRANT";
-	case DDL_REVOKE: return "REVOKE";
-	case DDL_BEGIN: return "BEGIN";
-	case DDL_COMMIT: return "COMMIT";
-	case DDL_ROLLBACK: return "ROLLBACK";
-	case CMD_GET_TABLE: return "GET TABLE";
-	case DDL_DROP_PARTITION: return "DROP PARTITION";
-	case DDL_ADD_COLUMN: return "ADD COLUMN";
-	case DDL_RENAME_COLUMN: return "RENAME COLUMN";
-	case DDL_CREATE_VIEW: return "CREATE VIEW";
-	case DDL_DROP_VIEW: return "DROP VIEW";
-	default: return "UNSUPPORTED";
-	}
-}
-
-
+const char8_t* getCommandString(DDLCommandType type);
 
 struct PartitionRangeList {
 	struct PartitionRange {
@@ -133,7 +107,7 @@ struct PartitionRangeList {
 
 template<class T> void randomShuffle(
 	util::Vector<T>& ary, int32_t size, util::Random& random) {
-	for (uint32_t i = 0;i < size; i++) {
+	for (int32_t i = 0; i < size; i++) {
 		uint32_t j = (uint32_t)(random.nextInt32()) % size;
 		T t = ary[i];
 		ary[i] = ary[j];
@@ -563,7 +537,11 @@ private:
 		@brief 指定DBが接続DBと異なるかの判定
 		@note 接続DB以外のDB操作はできないためこれで判定可能
 	*/
-	void checkConnectedDb(DDLCommandType CommandType, const char* dbName, bool caseSensitive) {
+	void checkConnectedDb(
+			DDLCommandType CommandType, const char* dbName,
+			bool caseSensitive) {
+		UNUSED_VARIABLE(CommandType);
+
 		if (caseSensitive) {
 			if (strcmp(dbName_.c_str(), dbName) != 0) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_CONNECTED_DATABASE,
@@ -890,14 +868,18 @@ void NoSQLStore::getLargeRecord(util::StackAllocator& alloc,
 
 template<typename Alloc>
 void createSubContainer(
-	TableExpirationSchemaInfo& info,
-	util::StackAllocator& alloc, NoSQLStore* command,
-	NoSQLContainer& targetContainer, NoSQLContainer* currentContainer,
-	util::XArray<uint8_t>& subContainerSchema,
-	TablePartitioningInfo<Alloc>& partitioningInfo,
-	TablePartitioningIndexInfo& tablePartitioningIndexInfo,
-	const NameWithCaseSensitivity& tableName,
-	int32_t partitionNum, NodeAffinityNumber& affinity) {
+		TableExpirationSchemaInfo& info,
+		util::StackAllocator& alloc, NoSQLStore* command,
+		NoSQLContainer& targetContainer, NoSQLContainer* currentContainer,
+		util::XArray<uint8_t>& subContainerSchema,
+		TablePartitioningInfo<Alloc>& partitioningInfo,
+		TablePartitioningIndexInfo& tablePartitioningIndexInfo,
+		const NameWithCaseSensitivity& tableName,
+		int32_t partitionNum, NodeAffinityNumber& affinity) {
+	UNUSED_VARIABLE(alloc);
+	UNUSED_VARIABLE(targetContainer);
+	UNUSED_VARIABLE(partitionNum);
+	UNUSED_VARIABLE(affinity);
 
 	NoSQLStoreOption cmdOption;
 	cmdOption.ifNotExistsOrIfExists_ = true;

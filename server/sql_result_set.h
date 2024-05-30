@@ -154,8 +154,10 @@ public:
 
 	void setFixedFieldPadding(size_t size) {
 		uint64_t padding = 0;
-		for (size_t pos = 0; pos < size; pos += sizeof(padding)) {
-			(*cursor_.fixedPartOut_).writeAll(&padding, size - pos);
+		for (size_t rest = size; rest > 0;) {
+			const size_t writeSize = std::min(rest, sizeof(padding));
+			(*cursor_.fixedPartOut_).writeAll(&padding, writeSize);
+			rest -= writeSize;
 		}
 	}
 

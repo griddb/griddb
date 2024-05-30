@@ -51,6 +51,8 @@ import java.util.Set;
  * <p>Generally, in extraction of a specific range and aggregation operations on TimeSeries,
  * more efficient implementation is selected than on {@link Collection}.</p>
  *
+ * <p>A row key consists of only a single normal-precision TIMESTAMP type column.</p>
+ *
  * <p>There are some limitations on row operations unlike {@link Collection}.
  * If a compression option based on {@link TimeSeriesProperties}
  * has been set, the following operations cannot be performed.</p>

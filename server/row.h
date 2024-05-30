@@ -609,7 +609,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::checkVarDataSize
 	util::XArray<uint32_t> &varDataObjectPosList) {
 	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
-	uint32_t variableColumnNum = varList.size();
+	uint32_t variableColumnNum = static_cast<uint32_t>(varList.size());
 
 	uint32_t currentObjectSize = ValueProcessor::getEncodedVarSize(
 		variableColumnNum);  
@@ -778,10 +778,9 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 				varColumnIdList[elemNth]);
 			if (isConvertSpecialType && columnInfo.getColumnType() == COLUMN_TYPE_STRING_ARRAY) {				
 				uint32_t linkHeaderValue =
-					ValueProcessor::encodeVarSize(
-						LINK_VARIABLE_COLUMN_DATA_SIZE);
-				uint32_t linkHeaderSize =
-					ValueProcessor::getEncodedVarSize(
+						static_cast<uint32_t>(ValueProcessor::encodeVarSize(
+								LINK_VARIABLE_COLUMN_DATA_SIZE));
+				uint32_t linkHeaderSize = ValueProcessor::getEncodedVarSize(
 						LINK_VARIABLE_COLUMN_DATA_SIZE);
 				memcpy(destAddr, &linkHeaderValue, linkHeaderSize);
 				destAddr += linkHeaderSize;
@@ -896,8 +895,6 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 	TransactionContext &txn, MessageRowStore *messageRowStore) {
 	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
-	AllocateStrategy& allocateStrategy =
-		rowArrayCursor_->getContainer().getRowAllocateStrategy();
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	const uint8_t *source;
 	uint32_t size;
@@ -1008,6 +1005,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(TransactionContext &txn,
 	const ColumnInfo &columnInfo, BaseObject &baseObject) {
+	UNUSED_VARIABLE(txn);
 	assert(!isNullValue(columnInfo));
 	if (ValueProcessor::isSimple(columnInfo.getColumnType())) {
 		if (rowArrayCursor_->isNotExistColumn(columnInfo)) {
@@ -1097,8 +1095,6 @@ const void * BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getVaria
 	const ColumnInfo &columnInfo = column.getColumnInfo();
 	const OId baseOId = getVariableArray();
 	uint32_t varHeaderSize = rowArrayCursor_->currentParam_.varHeaderSize_;
-	AllocateStrategy& allocateStrategy =
-		rowArrayCursor_->getContainer().getRowAllocateStrategy();
 	if (util::IsSame<RowArrayAccessType<rowArrayType>, RowArrayGeneralType>::VALUE) {
 		if (rowArrayCursor_->isNotExistColumn(columnInfo) || baseOId == UNDEF_OID) {
 			return Value::getDefaultVariableValue(columnInfo.getColumnType());
@@ -1555,7 +1551,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 	if (!isLatestSchema()) {
 		currentParam_.varHeaderSize_ = ValueProcessor::getEncodedVarSize(currentParam_.varColumnNum_);
 		if (currentParam_.varColumnNum_ == 0 && latestParam_.varColumnNum_ != 0) {
-			currentParam_.nullOffsetDiff_ += sizeof(OId);
+			currentParam_.nullOffsetDiff_ += static_cast<uint32_t>(sizeof(OId));
 			currentParam_.columnOffsetDiff_ = currentParam_.nullOffsetDiff_;
 		}
 
@@ -1597,6 +1593,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 template<typename Container, RowArrayType rowArrayType>
 inline bool BaseContainer::RowArrayImpl<Container, rowArrayType>::load(TransactionContext &txn, OId oId,
 	BaseContainer *container, uint8_t getOption) {
+	UNUSED_VARIABLE(txn);
 	if (getOption != OBJECT_READ_ONLY) {
 		rowArrayStorage_.load(oId, getOption);
 	}
@@ -1652,7 +1649,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::append(
 	row.initialize();
 	row.setRowId(rowId);
 	row.setFields(txn, messageRowStore);
-	setRowNum(getRowNum() + 1);
+	setRowNum(static_cast<uint16_t>(getRowNum() + 1));
 	updateNullsStats(row.getNullsAddr());
 	container_->updateNullsStats(row.getNullsAddr());
 	container_->addUpdatedRow(txn, row.getRowId(), getOId());
@@ -1770,7 +1767,7 @@ inline bool BaseContainer::RowArrayImpl<Container, rowArrayType>::end() {
 template<typename Container, RowArrayType rowArrayType>
 inline bool BaseContainer::RowArrayImpl<Container, rowArrayType>::tail() {
 	if (getRowNum() != 0) {
-		moveCursor(getRowNum() - 1);
+		moveCursor(static_cast<uint16_t>(getRowNum() - 1));
 	}
 	else {
 		resetCursor();
@@ -1902,13 +1899,14 @@ inline uint16_t BaseContainer::RowArrayImpl<Container, rowArrayType>::getMaxRowN
 */
 template<typename Container, RowArrayType rowArrayType>
 inline uint32_t BaseContainer::RowArrayImpl<Container, rowArrayType>::getHeaderSize() const {
-	uint32_t headerSize = HEADER_AREA_SIZE + getNullbitsSize(); 
+	const uint32_t headerSize =
+			static_cast<uint32_t>(HEADER_AREA_SIZE + getNullbitsSize());
 	assert(headerSize == calcHeaderSize(getNullbitsSize()));
 	return headerSize;
 }
 template<typename Container, RowArrayType rowArrayType>
 inline uint32_t BaseContainer::RowArrayImpl<Container, rowArrayType>::calcHeaderSize(uint32_t nullbitsSize) {
-	return HEADER_AREA_SIZE + nullbitsSize;
+	return static_cast<uint32_t>(HEADER_AREA_SIZE + nullbitsSize);
 }
 
 template<typename Container, RowArrayType rowArrayType>
@@ -2033,7 +2031,7 @@ inline uint8_t *BaseContainer::RowArrayImpl<Container, rowArrayType>::getTIdAddr
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::setFirstUpdate() {
 	uint8_t *val = getBitsAddr();
-	*val |= Row::getFirstUpdateBit();
+	*val = static_cast<uint8_t>((*val) | Row::getFirstUpdateBit());
 }
 /*!
 	@brief Reset flag that this RowArray is already updated in the
@@ -2042,7 +2040,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::setFirstUpdate() {
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::resetFirstUpdate() {
 	uint8_t *val = getBitsAddr();
-	*val ^= Row::getFirstUpdateBit();
+	*val = static_cast<uint8_t>((*val) ^ Row::getFirstUpdateBit());
 }
 /*!
 	@brief Check if this RowArray is already updated in the transaction
@@ -2088,7 +2086,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::updateCursor() {
 		}
 		nextCursor();
 	}
-	setRowNum(maxRowPos + 1);
+	setRowNum(static_cast<uint16_t>(maxRowPos + 1));
 	moveCursor(currentCursor);
 }
 template<typename Container, RowArrayType rowArrayType>
@@ -2133,7 +2131,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::insert(
 	row_.setRowId(rowId);
 	row_.setFields(txn, messageRowStore);
 	if (elemCursor_ >= getRowNum()) {
-		setRowNum(elemCursor_ + 1);
+		setRowNum(static_cast<uint16_t>(elemCursor_ + 1));
 	}
 	updateNullsStats(row_.getNullsAddr());
 	container_->updateNullsStats(row_.getNullsAddr());
@@ -2327,10 +2325,10 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::searchNextRowId(RowId
 		return false;
 	}
 	uint16_t lowPos = elemCursor_;
-	uint16_t highPos = rowNum - 1;
+	uint16_t highPos = static_cast<uint16_t>(rowNum - 1);
 	uint16_t midPos = 0;
 	while (lowPos <= highPos) {
-		midPos = ((lowPos + highPos) >> 1);
+		midPos = static_cast<uint16_t>((lowPos + highPos) >> 1);
 		moveCursor(midPos);
 		bool isExist = !row_.isRemoved();
 		if (!isExist) {
@@ -2417,7 +2415,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::shift(TransactionCont
 	}
 	if (targetPos != getMaxRowNum()) {
 		for (uint16_t i = targetPos; i > insertPos; i--) {
-			moveCursor(i - 1);
+			moveCursor(static_cast<uint16_t>(i - 1));
 			Row row(getRow(), this);
 			OId oldOId = getOId();
 			moveCursor(i);
@@ -2435,13 +2433,13 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::shift(TransactionCont
 		moveCursor(insertPos);
 	}
 	else {
-		for (uint16_t i = insertPos + 1; i > 0; i--) {
+		for (uint16_t i = static_cast<uint16_t>(insertPos + 1); i > 0; i--) {
 			if (i >= getMaxRowNum()) {
 				continue;
 			}
-			moveCursor(i - 1);
+			moveCursor(static_cast<uint16_t>(i - 1));
 			if (row_.isRemoved()) {
-				targetPos = i - 1;
+				targetPos = static_cast<uint16_t>(i - 1);
 				break;
 			}
 		}
@@ -2450,7 +2448,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::shift(TransactionCont
 			Row row(getRow(), this);
 			if (!row.isRemoved()) {
 				OId oldOId = getOId();
-				moveCursor(i - 1);
+				moveCursor(static_cast<uint16_t>(i - 1));
 				Row destRow(getRow(), this);
 				OId newOId = getOId();
 				RowId rowId = row.getRowId();
@@ -2460,7 +2458,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::shift(TransactionCont
 				moveList.push_back(std::make_pair(oldOId, newOId));
 			}
 		}
-		moveCursor(insertPos - 1);
+		moveCursor(static_cast<uint16_t>(insertPos - 1));
 	}
 	updateCursor();
 }
@@ -2484,7 +2482,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::split(TransactionCont
 			splitRowArray.next();
 		}
 		for (uint16_t i = midPos; i > insertPos; i--) {
-			moveCursor(i - 1);
+			moveCursor(static_cast<uint16_t>(i - 1));
 			Row row(getRow(), this);
 			OId oldOId = getOId();
 			moveCursor(i);
@@ -2499,7 +2497,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::split(TransactionCont
 		moveCursor(insertPos);
 	}
 	else {
-		uint16_t destCursor = getMaxRowNum() - midPos;
+		uint16_t destCursor = static_cast<uint16_t>(getMaxRowNum() - midPos);
 		for (uint16_t i = midPos; i < getMaxRowNum(); i++) {
 			moveCursor(i);
 			if (i == insertPos) {
@@ -2514,7 +2512,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::split(TransactionCont
 			splitRowArray.next();
 		}
 		splitRowArray.moveCursor(destCursor);
-		moveCursor(midPos - 1);
+		moveCursor(static_cast<uint16_t>(midPos - 1));
 	}
 	updateCursor();
 	splitRowArray.updateCursor();
@@ -2593,7 +2591,8 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 	while (restRowNum >= currentMaxRowNum) {
 		RowId baseRowId = row_.getRowId();
 		RowArray splitRowArray(txn, container_);
-		splitRowArray.initialize(txn, baseRowId, currentMaxRowNum);
+		splitRowArray.initialize(
+				txn, baseRowId, static_cast<uint16_t>(currentMaxRowNum));
 		for (size_t i = 0; i < static_cast<size_t>(currentMaxRowNum); i++) {
 			OId oldOId = getOId();
 			convert(txn, *(splitRowArray.getDefaultImpl()));	
@@ -2611,10 +2610,13 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 
 	if (restRowNum > 0) {
 		bool isRowArraySizeControlMode = false;
-		int64_t restMaxRowNum = getContainer().calcRowArrayNum(txn, isRowArraySizeControlMode, restRowNum);
+		int64_t restMaxRowNum = getContainer().calcRowArrayNum(
+				txn, isRowArraySizeControlMode,
+				static_cast<uint16_t>(restRowNum));
 		RowId baseRowId = row_.getRowId();
 		RowArray splitRowArray(txn, container_);
-		splitRowArray.initialize(txn, baseRowId, restMaxRowNum);
+		splitRowArray.initialize(
+				txn, baseRowId, static_cast<uint16_t>(restMaxRowNum));
 		for (size_t i = 0; i < static_cast<size_t>(restRowNum); i++) {
 			OId oldOId = getOId();
 			convert(txn, *(splitRowArray.getDefaultImpl()));	
@@ -2633,7 +2635,8 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 	if (thisRowArrayRowNum > 0) {
 		begin();
 		RowArray splitRowArray(txn, container_);
-		splitRowArray.initialize(txn, getRowId(), thisRowArrayMaxRowNum);
+		splitRowArray.initialize(
+				txn, getRowId(), static_cast<uint16_t>(thisRowArrayMaxRowNum));
 		for (size_t i = 0; i < static_cast<size_t>(thisRowArrayRowNum); i++) {
 			OId oldOId = getOId();
 			convert(txn, *(splitRowArray.getDefaultImpl()));	
@@ -2658,7 +2661,8 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 		if (activeRowNum == 0) {
 			RowId baseRowId = getRowId();
 			RowArray splitRowArray(txn, container_);
-			splitRowArray.initialize(txn, baseRowId, currentMaxRowNum);
+			splitRowArray.initialize(
+					txn, baseRowId, static_cast<uint16_t>(currentMaxRowNum));
 			splitRAList.push_back(std::make_pair( splitRowArray.getRowId(), splitRowArray.getBaseOId()));
 			newCurrentOId = splitRowArray.getBaseOId();
 		}
@@ -2710,9 +2714,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::reset(
 	setRowId(baseRowId);
 
 	setContainerId(container_->getContainerId());
-	setColumnNum(container_->getColumnNum());
-	setVarColumnNum(container_->getVariableColumnNum());
-	setRowFixedColumnSize(container_->getRowFixedColumnSize());
+	setColumnNum(
+			static_cast<uint16_t>(container_->getColumnNum()));
+	setVarColumnNum(
+			static_cast<uint16_t>(container_->getVariableColumnNum()));
+	setRowFixedColumnSize(
+			static_cast<uint16_t>(container_->getRowFixedColumnSize()));
 
 	uint32_t nullBitSize = getNullbitsSize();
 	uint8_t *nullsList = getNullsStats();

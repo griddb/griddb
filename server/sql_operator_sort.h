@@ -437,16 +437,21 @@ struct SQLSortOps::SortNway::MergeAction {
 		typedef TypeAt TypedOp;
 
 		explicit TypeAt(const MergeAction &base) : base_(base) {}
-		bool operator()(const TupleHeapQueue::Element &elem) const;
+
+		bool operator()(const TupleHeapQueue::Element &elem) const {
+			return (
+					base_.template projectBy<T>(elem) &&
+					base_.checkContinuable());
+		}
 
 		bool operator()(
 				const TupleHeapQueue::Element&, const util::FalseType&) const {
-			return true;
+			return base_.checkContinuable();
 		}
 
 		void operator()(
 				const TupleHeapQueue::Element &elem, const util::TrueType&) const {
-			(*this)(elem);
+			base_.template projectBy<T>(elem);
 		}
 
 		bool operator()(
@@ -467,16 +472,25 @@ struct SQLSortOps::SortNway::MergeAction {
 
 	MergeAction(SortContext &cxt, const BaseType &projectorBase);
 
-	bool operator()(const TupleHeapQueue::Element &elem) const;
+	bool operator()(const TupleHeapQueue::Element &elem) const {
+		return (project(elem) && checkContinuable());
+	}
 
 	bool operator()(const TupleHeapQueue::Element&, const util::FalseType&) {
-		return true;
+		return checkContinuable();
 	}
 
 	void operator()(
 			const TupleHeapQueue::Element &elem, const util::TrueType&) {
-		(*this)(elem);
+		project(elem);
 	}
+
+	bool project(const TupleHeapQueue::Element &elem) const;
+
+	template<typename T>
+	bool projectBy(const TupleHeapQueue::Element &elem) const;
+
+	bool checkContinuable() const;
 
 	OpContext &cxt_;
 	ProjectorType projector_;
@@ -952,7 +966,7 @@ SQLSortOps::SortNway::MergeAction<Fixed, Limited, Rotating>::MergeAction(
 
 template<bool Fixed, bool Limited, bool Rotating>
 inline bool SQLSortOps::SortNway::MergeAction<
-		Fixed, Limited, Rotating>::operator()(
+		Fixed, Limited, Rotating>::project(
 		const TupleHeapQueue::Element &elem) const {
 	projector_.template projectorAt<void>().projectBy(cxt_, elem.getValue());
 
@@ -963,14 +977,13 @@ inline bool SQLSortOps::SortNway::MergeAction<
 		}
 	}
 
-
 	return true;
 }
 
 template<bool Fixed, bool Limited, bool Rotating>
 template<typename T>
 inline bool SQLSortOps::SortNway::MergeAction<
-		Fixed, Limited, Rotating>::TypeAt<T>::operator()(
+		Fixed, Limited, Rotating>::projectBy(
 		const TupleHeapQueue::Element &elem) const {
 	const bool reversed =
 			T::VariantTraitsType::OfValueComparator::ORDERING_REVERSED;
@@ -978,16 +991,22 @@ inline bool SQLSortOps::SortNway::MergeAction<
 			void, !reversed, void, void> VariantType;
 	typedef typename T::template VariantRebind<VariantType>::Type TraitsType;
 
-	base_.projector_.template projectorAt<TraitsType>().projectBy(
-			base_.cxt_, elem.getValue());
+	projector_.template projectorAt<TraitsType>().projectBy(
+			cxt_, elem.getValue());
 
 	if (Limited) {
-		assert(base_.workingRestLimit_ > 0);
-		if (--base_.workingRestLimit_ <= 0) {
+		assert(workingRestLimit_ > 0);
+		if (--workingRestLimit_ <= 0) {
 			return false;
 		}
 	}
 
+	return true;
+}
+
+template<bool Fixed, bool Limited, bool Rotating>
+inline bool SQLSortOps::SortNway::MergeAction<
+		Fixed, Limited, Rotating>::checkContinuable() const {
 
 	return true;
 }

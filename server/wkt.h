@@ -132,26 +132,26 @@ struct wktParserArg {
 #define wktParser_YYWILDCARD 1
 #define wktParserTOKENTYPE Token
 typedef union {
-	int yyinit;
-	wktParserTOKENTYPE yy0;
-	QuadraticSurface *yy2;
-	double yy8;
-	MultiPolygon *yy22;
-	MultiPoint *yy28;
-	QP_XArray<Expr *> *yy29;
-	QP_XArray<Point *> *yy30;
-	Polygon *yy35;
-	Expr *yy46;
-	QP_XArray<Polygon *> *yy47;
-	QP_XArray<MultiPoint *> *yy59;
-	Point *yy61;
+  int yyinit;
+  wktParserTOKENTYPE yy0;
+  QuadraticSurface* yy2;
+  double yy8;
+  MultiPolygon * yy22;
+  MultiPoint* yy28;
+  QP_XArray<Expr*> * yy29;
+  QP_XArray<Point*>* yy30;
+  Polygon* yy35;
+  Expr* yy46;
+  QP_XArray<Polygon*> * yy47;
+  QP_XArray<MultiPoint*> * yy59;
+  Point* yy61;
 } wktParser_YYMINORTYPE;
 #ifndef wktParser_YYSTACKDEPTH
 #define wktParser_YYSTACKDEPTH 2000
 #endif
-#define wktParserARG_SDECL lemon_wktParser::wktParserArg *arg
-#define wktParserARG_PDECL , lemon_wktParser::wktParserArg *arg
-#define wktParserARG_STORE this->arg = arg
+#define wktParserARG_SDECL  lemon_wktParser::wktParserArg *arg 
+#define wktParserARG_PDECL , lemon_wktParser::wktParserArg *arg 
+#define wktParserARG_STORE this->arg  = arg 
 #define wktParser_YYNSTATE 80
 #define wktParser_YYNRULE 38
 #define wktParser_YY_NO_ACTION (wktParser_YYNSTATE + wktParser_YYNRULE + 2)
@@ -243,13 +243,13 @@ class wktParser {
 #define wktParser_YY_ACTTAB_COUNT (240)
 #define wktParser_YY_SHIFT_USE_DFLT (-7)
 #define wktParser_YY_SHIFT_COUNT (51)
-#define wktParser_YY_SHIFT_MIN (-6)
-#define wktParser_YY_SHIFT_MAX (126)
+#define wktParser_YY_SHIFT_MIN   (-6)
+#define wktParser_YY_SHIFT_MAX   (126)
 #define wktParser_YY_REDUCE_USE_DFLT (-14)
 #define wktParser_YY_REDUCE_COUNT (28)
-#define wktParser_YY_REDUCE_MIN (-13)
-#define wktParser_YY_REDUCE_MAX (206)
-#define wktParser_YYNFALLBACK (1)
+#define wktParser_YY_REDUCE_MIN   (-13)
+#define wktParser_YY_REDUCE_MAX   (206)
+#define wktParser_YYNFALLBACK  (1)
 
 	static const wktParser_YYACTIONTYPE yy_action[wktParser_YY_ACTTAB_COUNT];
 	static const wktParser_YYCODETYPE yy_lookahead[wktParser_YY_ACTTAB_COUNT];
@@ -413,6 +413,7 @@ public:
 		wktParser_YYCODETYPE yymajor,   /* Type code for object to destroy */
 		wktParser_YYMINORTYPE *yypminor /* The object to be destroyed */
 		) {
+		UNUSED_VARIABLE(yypminor);
 		switch (yymajor) {
 		/* Here is inserted the actions which take place when a
 		** terminal or non-terminal is destroyed.  This can happen
@@ -595,6 +596,7 @@ public:
 	** The following routine is called if the stack overflows.
 	*/
 	void yyStackOverflow(wktParser_YYMINORTYPE *yypMinor) {
+		UNUSED_VARIABLE(yypMinor);
 		yyidx--;
 #ifndef NDEBUG
 		if (yyTraceFILE) {
@@ -604,6 +606,7 @@ public:
 		while (yyidx >= 0) yy_pop_parser_stack();
 		/* Here code is inserted which will execute if the parser
 		** stack every overflows */
+
 	}
 
 	/*
@@ -711,8 +714,8 @@ private:
 		**  #line <lineno> <thisfile>
 		**     break;
 		*/
-		case 0: /* geom ::= GISFUNC LP gisarg RP */
-		{
+      case 0: /* geom ::= GISFUNC LP gisarg RP */
+{
 			Expr *e = Expr::newFunctionNode(yymsp[-3].minor.yy0,
 				yymsp[-1].minor.yy29, *(arg->txn), *(arg->fmap));
 			*arg->ev = e->eval(*(arg->txn), *(arg->objectManager), *(arg->strategy), NULL,
@@ -721,9 +724,10 @@ private:
 			if (yymsp[-1].minor.yy29) {
 				WKTPARSER_DELETE(yymsp[-1].minor.yy29);
 			}
-		} break;
-		case 1: /* geom ::= GISFUNC LP EMPTY RP */
-		{
+		}
+        break;
+      case 1: /* geom ::= GISFUNC LP EMPTY RP */
+{
 			Expr *emptyArg1 = Expr::newStringValue("EMPTY", *(arg->txn));
 			QP_XArray<Expr *> emptyArg(arg->txn->getDefaultAllocator());
 			emptyArg.push_back(emptyArg1);
@@ -733,17 +737,19 @@ private:
 				arg->fmap, EVAL_MODE_NORMAL);
 			WKTPARSER_DELETE(e);
 			WKTPARSER_DELETE(emptyArg1);
-		} break;
-		case 2: /* gisarg ::= gisexpr */
-		{
+		}
+        break;
+      case 2: /* gisarg ::= gisexpr */
+{
 			yygotominor.yy29 =
 				WKTPARSER_NEW ExprList(arg->txn->getDefaultAllocator());
 			yygotominor.yy29->push_back(yymsp[0].minor.yy46);
 			yygotominor.yy29->push_back(
 				Expr::newNumericValue(static_cast<int64_t>(-1), *(arg->txn)));
-		} break;
-		case 3: /* gisarg ::= gisexpr SEMICOLON INTEGER */
-		{
+		}
+        break;
+      case 3: /* gisarg ::= gisexpr SEMICOLON INTEGER */
+{
 			yygotominor.yy29 =
 				WKTPARSER_NEW ExprList(arg->txn->getDefaultAllocator());
 			yygotominor.yy29->push_back(yymsp[-2].minor.yy46);
@@ -752,9 +758,10 @@ private:
 			int64_t val = std::strtol(yymsp[0].minor.yy0.z, endptr, 0);
 			yygotominor.yy29->push_back(Expr::newNumericValue(val,
 				*(arg->txn)));
-		} break;
-		case 4: /* gisarg ::= gisexpr SEMICOLON MINUS INTEGER */
-		{
+		}
+        break;
+      case 4: /* gisarg ::= gisexpr SEMICOLON MINUS INTEGER */
+{
 			yygotominor.yy29 =
 				WKTPARSER_NEW ExprList(arg->txn->getDefaultAllocator());
 			yygotominor.yy29->push_back(yymsp[-3].minor.yy46);
@@ -762,41 +769,46 @@ private:
 			int64_t val = std::strtol(yymsp[0].minor.yy0.z, endptr, 0);
 			yygotominor.yy29->push_back(Expr::newNumericValue(-val,
 				*(arg->txn)));
-		} break;
-		case 5: /* gisarg ::= */
-		{
+		}
+        break;
+      case 5: /* gisarg ::= */
+{
 			yygotominor.yy29 = NULL;
-		} break;
-		case 6: /* gisexpr ::= gismultipoint2d */
-		{
+		}
+        break;
+      case 6: /* gisexpr ::= gismultipoint2d */
+{
 			yygotominor.yy46 =
 				Expr::newGeometryValue(yymsp[0].minor.yy28, *(arg->txn));
-		} break;
-		case 7: /* gisexpr ::= gismultipoint3d */
-		{
+		}
+        break;
+      case 7: /* gisexpr ::= gismultipoint3d */
+{
 			yygotominor.yy46 =
 				Expr::newGeometryValue(yymsp[0].minor.yy28, *(arg->txn));
-		} break;
-		case 8: /* gisexpr ::= gispolygon2d */
-		case 9: /* gisexpr ::= gispolygon3d */
-			yytestcase(yyruleno == 9);
-			{
+		}
+        break;
+      case 8: /* gisexpr ::= gispolygon2d */
+      case 9: /* gisexpr ::= gispolygon3d */ yytestcase(yyruleno==9);
+{
 				yygotominor.yy46 =
 					Expr::newGeometryValue(yymsp[0].minor.yy35, *(arg->txn));
 			}
-			break;
-		case 10: /* gisexpr ::= gismultipolygon3d */
-		{
+        break;
+      case 10: /* gisexpr ::= gismultipolygon3d */
+{
 			yygotominor.yy46 =
 				Expr::newGeometryValue(yymsp[0].minor.yy22, *(arg->txn));
-		} break;
-		case 11: /* gisexpr ::= gisqsf */
-		{
+		}
+        break;
+      case 11: /* gisexpr ::= gisqsf */
+{
 			yygotominor.yy46 =
 				Expr::newGeometryValue(yymsp[0].minor.yy2, *(arg->txn));
-		} break;
-		case 12: /* gispolygon2d ::= LP gisnpointlist2d RP */
-		{
+		}
+        break;
+      case 12: /* gispolygon2d ::= LP gisnpointlist2d RP */
+{
 			yygotominor.yy35 = WKTPARSER_NEW Polygon(static_cast<int64_t>(-1),
 				yymsp[-1].minor.yy59, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[-1].minor.yy59->empty()) {
@@ -804,9 +816,10 @@ private:
 				yymsp[-1].minor.yy59->pop_back();
 			}
 			WKTPARSER_DELETE(yymsp[-1].minor.yy59);
-		} break;
-		case 13: /* gispolygon2d ::= gisnpointlist2d */
-		{
+		}
+        break;
+      case 13: /* gispolygon2d ::= gisnpointlist2d */
+{
 			yygotominor.yy35 = WKTPARSER_NEW Polygon(
 				-1, yymsp[0].minor.yy59, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy59->empty()) {
@@ -814,28 +827,25 @@ private:
 				yymsp[0].minor.yy59->pop_back();
 			}
 			WKTPARSER_DELETE(yymsp[0].minor.yy59);
-		} break;
-		case 14: /* gisnpointlist2d ::= gisnpointlist2d COMMA LP gismultipoint2d
-					RP */
-		case 24: /* gisnpointlist3d ::= gisnpointlist3d COMMA LP gismultipoint3d
-					RP */
-			yytestcase(yyruleno == 24);
-			{
+		}
+        break;
+      case 14: /* gisnpointlist2d ::= gisnpointlist2d COMMA LP gismultipoint2d RP */
+      case 24: /* gisnpointlist3d ::= gisnpointlist3d COMMA LP gismultipoint3d RP */ yytestcase(yyruleno==24);
+{
 				yygotominor.yy59 = yymsp[-4].minor.yy59;
 				yymsp[-4].minor.yy59->push_back(yymsp[-1].minor.yy28);
 			}
-			break;
-		case 15: /* gisnpointlist2d ::= LP gismultipoint2d RP */
-		case 25: /* gisnpointlist3d ::= LP gismultipoint3d RP */
-			yytestcase(yyruleno == 25);
-			{
+        break;
+      case 15: /* gisnpointlist2d ::= LP gismultipoint2d RP */
+      case 25: /* gisnpointlist3d ::= LP gismultipoint3d RP */ yytestcase(yyruleno==25);
+{
 				yygotominor.yy59 = WKTPARSER_NEW QP_XArray<MultiPoint *>(
 					arg->txn->getDefaultAllocator());
 				yygotominor.yy59->push_back(yymsp[-1].minor.yy28);
 			}
-			break;
-		case 16: /* gismultipoint2d ::= gispointlist2d */
-		{
+        break;
+      case 16: /* gismultipoint2d ::= gispointlist2d */
+{
 			yygotominor.yy28 = WKTPARSER_NEW MultiPoint(
 				-1, *yymsp[0].minor.yy30, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy30->empty()) {
@@ -843,11 +853,11 @@ private:
 				yymsp[0].minor.yy30->pop_back();
 			}
 			WKTPARSER_DELETE(yymsp[0].minor.yy30);
-		} break;
-		case 17: /* gispointlist2d ::= gispointlist2d COMMA gispoint2d */
-		case 27: /* gispointlist3d ::= gispointlist3d COMMA gispoint3d */
-			yytestcase(yyruleno == 27);
-			{
+		}
+        break;
+      case 17: /* gispointlist2d ::= gispointlist2d COMMA gispoint2d */
+      case 27: /* gispointlist3d ::= gispointlist3d COMMA gispoint3d */ yytestcase(yyruleno==27);
+{
 				if (yymsp[-2].minor.yy30 == NULL) {
 					yygotominor.yy30 = WKTPARSER_NEW QP_XArray<Point *>(
 						arg->txn->getDefaultAllocator());
@@ -857,24 +867,24 @@ private:
 				}
 				yygotominor.yy30->push_back(yymsp[0].minor.yy61);
 			}
-			break;
-		case 18: /* gispointlist2d ::= gispoint2d */
-		case 28: /* gispointlist3d ::= gispoint3d */
-			yytestcase(yyruleno == 28);
-			{
+        break;
+      case 18: /* gispointlist2d ::= gispoint2d */
+      case 28: /* gispointlist3d ::= gispoint3d */ yytestcase(yyruleno==28);
+{
 				yygotominor.yy30 = WKTPARSER_NEW QP_XArray<Point *>(
 					arg->txn->getDefaultAllocator());
 				yygotominor.yy30->push_back(yymsp[0].minor.yy61);
 			}
-			break;
-		case 19: /* gispoint2d ::= signed signed */
-		{
+        break;
+      case 19: /* gispoint2d ::= signed signed */
+{
 			yygotominor.yy61 =
 				WKTPARSER_NEW Point(-1, yymsp[-1].minor.yy8, yymsp[0].minor.yy8,
 					std::numeric_limits<double>::quiet_NaN(), *(arg->txn));
-		} break;
-		case 20: /* gismultipolygon3d ::= gisnpolygonlist3d */
-		{
+		}
+        break;
+      case 20: /* gismultipolygon3d ::= gisnpolygonlist3d */
+{
 			yygotominor.yy22 =
 				WKTPARSER_NEW MultiPolygon(static_cast<int64_t>(-1),
 					*yymsp[0].minor.yy47, *(arg->txn), *(arg->objectManager), *(arg->strategy));
@@ -883,21 +893,23 @@ private:
 				yymsp[0].minor.yy47->pop_back();
 			}
 			WKTPARSER_DELETE(yymsp[0].minor.yy47);
-		} break;
-		case 21: /* gisnpolygonlist3d ::= gisnpolygonlist3d COMMA LP
-					gispolygon3d RP */
-		{
+		}
+        break;
+      case 21: /* gisnpolygonlist3d ::= gisnpolygonlist3d COMMA LP gispolygon3d RP */
+{
 			yygotominor.yy47 = yymsp[-4].minor.yy47;
 			yygotominor.yy47->push_back(yymsp[-1].minor.yy35);
-		} break;
-		case 22: /* gisnpolygonlist3d ::= LP gispolygon3d RP */
-		{
+		}
+        break;
+      case 22: /* gisnpolygonlist3d ::= LP gispolygon3d RP */
+{
 			yygotominor.yy47 = WKTPARSER_NEW QP_XArray<Polygon *>(
 				arg->txn->getDefaultAllocator());
 			yygotominor.yy47->push_back(yymsp[-1].minor.yy35);
-		} break;
-		case 23: /* gispolygon3d ::= gisnpointlist3d */
-		{
+		}
+        break;
+      case 23: /* gispolygon3d ::= gisnpointlist3d */
+{
 			yygotominor.yy35 = WKTPARSER_NEW Polygon(
 				-1, yymsp[0].minor.yy59, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy59->empty()) {
@@ -905,9 +917,10 @@ private:
 				yymsp[0].minor.yy59->pop_back();
 			}
 			WKTPARSER_DELETE(yymsp[0].minor.yy59);
-		} break;
-		case 26: /* gismultipoint3d ::= gispointlist3d */
-		{
+		}
+        break;
+      case 26: /* gismultipoint3d ::= gispointlist3d */
+{
 			yygotominor.yy28 = WKTPARSER_NEW MultiPoint(
 				-1, *yymsp[0].minor.yy30, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy30->empty()) {
@@ -915,49 +928,55 @@ private:
 				yymsp[0].minor.yy30->pop_back();
 			}
 			WKTPARSER_DELETE(yymsp[0].minor.yy30);
-		} break;
-		case 29: /* gispoint3d ::= signed signed signed */
-		{
+		}
+        break;
+      case 29: /* gispoint3d ::= signed signed signed */
+{
 			yygotominor.yy61 = WKTPARSER_NEW Point(-1, yymsp[-2].minor.yy8,
 				yymsp[-1].minor.yy8, yymsp[0].minor.yy8, *(arg->txn));
-		} break;
-		case 30: /* gisqsf ::= signed signed signed signed signed signed signed
-					signed signed signed signed signed signed */
-		{
+		}
+        break;
+      case 30: /* gisqsf ::= signed signed signed signed signed signed signed signed signed signed signed signed signed */
+{
 			yygotominor.yy2 = WKTPARSER_NEW QuadraticSurface(*(arg->txn),
 				TR_PV3KEY_NONE, 13, yymsp[-12].minor.yy8, yymsp[-11].minor.yy8,
 				yymsp[-10].minor.yy8, yymsp[-9].minor.yy8, yymsp[-8].minor.yy8,
 				yymsp[-7].minor.yy8, yymsp[-6].minor.yy8, yymsp[-5].minor.yy8,
 				yymsp[-4].minor.yy8, yymsp[-3].minor.yy8, yymsp[-2].minor.yy8,
 				yymsp[-1].minor.yy8, yymsp[0].minor.yy8);
-		} break;
-		case 31: /* signed ::= plus_num */
-		case 32: /* signed ::= minus_num */
-			yytestcase(yyruleno == 32);
-			{ yygotominor.yy8 = yymsp[0].minor.yy8; }
-			break;
-		case 33: /* plus_num ::= plus_opt number */
-		{
+		}
+        break;
+      case 31: /* signed ::= plus_num */
+      case 32: /* signed ::= minus_num */ yytestcase(yyruleno==32);
+{ yygotominor.yy8 = yymsp[0].minor.yy8; }
+        break;
+      case 33: /* plus_num ::= plus_opt number */
+{
 			yygotominor.yy8 = yymsp[0].minor.yy8;
-		} break;
-		case 34: /* minus_num ::= MINUS number */
-		{
+		}
+        break;
+      case 34: /* minus_num ::= MINUS number */
+{
 			yygotominor.yy8 = -yymsp[0].minor.yy8;
-		} break;
-		case 35: /* number ::= INTEGER|FLOAT */
-		{
+		}
+        break;
+      case 35: /* number ::= INTEGER|FLOAT */
+{
 			yygotominor.yy8 = atof(yymsp[0].minor.yy0.z);
-		} break;
-		case 36: /* plus_opt ::= PLUS */
-		{
+		}
+        break;
+      case 36: /* plus_opt ::= PLUS */
+{
 			PRINT("PLUS_OPT1");
-		} break;
-		case 37: /* plus_opt ::= */
-		{
+		}
+        break;
+      case 37: /* plus_opt ::= */
+{
 			PRINT("PLUS_OPT2");
-		} break;
-		default:
-			break;
+		}
+        break;
+      default:
+        break;
 		};
 		yygoto = yyRuleInfo[yyruleno].lhs;
 		yysize = yyRuleInfo[yyruleno].nrhs;
@@ -1012,9 +1031,11 @@ private:
 	void yy_syntax_error(int yymajor, /* The major type of the error token */
 		wktParser_YYMINORTYPE yyminor /* The minor type of the error token */
 		) {
+		UNUSED_VARIABLE(yymajor);
+		UNUSED_VARIABLE(yyminor);
 #define TOKEN (yyminor.yy0)
 
-		arg->err = 1;
+  arg->err = 1;
 	}
 
 	/*

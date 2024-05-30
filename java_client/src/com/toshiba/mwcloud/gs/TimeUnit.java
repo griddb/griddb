@@ -28,6 +28,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * 年単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in years.
 	 * </div>
 	 */
 	YEAR,
@@ -36,6 +37,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * 月単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in months.
 	 * </div>
 	 */
 	MONTH,
@@ -44,6 +46,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * 日単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in days.
 	 * </div>
 	 */
 	DAY,
@@ -52,6 +55,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * 時間単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in hours.
 	 * </div>
 	 */
 	HOUR,
@@ -60,6 +64,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * 分単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in minutes.
 	 * </div>
 	 */
 	MINUTE,
@@ -68,6 +73,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * 秒単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in seconds.
 	 * </div>
 	 */
 	SECOND,
@@ -76,6 +82,7 @@ public enum TimeUnit {
 	 * <div lang="ja">
 	 * ミリ秒単位であることを示します。
 	 * </div><div lang="en">
+	 * Indicates the time is in milliseconds.
 	 * </div>
 	 */
 	MILLISECOND,
@@ -85,6 +92,7 @@ public enum TimeUnit {
 	 * マイクロ秒単位であることを示します。
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Indicates the time is in microseconds.
 	 * @since 5.3
 	 * </div>
 	 */
@@ -95,6 +103,7 @@ public enum TimeUnit {
 	 * ナノ秒単位であることを示します。
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Indicates the time is in nanoseconds.
 	 * @since 5.3
 	 * </div>
 	 */

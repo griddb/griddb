@@ -141,7 +141,7 @@ public:
         ExecutionConstraint(int32_t mode, uint32_t delayStartInterval, uint32_t delayExecutionInterval) :
             mode_(mode), delayStartInterval_(delayStartInterval), delayExecutionInterval_(delayExecutionInterval) {}
 
-        static const int32_t getMode(const std::string &name) {
+        static int32_t getMode(const std::string &name) {
             if (name == "DELAY") {
                 return MODE_DELAY;
             }
@@ -156,7 +156,7 @@ public:
             }
         }
 
-        static const int32_t getDenyMode(const std::string& name) {
+        static int32_t getDenyMode(const std::string& name) {
             if (name == "ALL") {
                 return MODE_DENY;
             }
@@ -168,7 +168,7 @@ public:
             }
         }
 
-        static const int32_t getDefaultDenyMode() {
+        static int32_t getDefaultDenyMode() {
             return MODE_DENY;
         }
 
@@ -195,7 +195,7 @@ public:
     bool getExecutionConstraint(
         DatabaseId dbId, uint32_t& delayStartInterval, uint32_t& delayExecutionInterval, bool isSQL, Option* opton = NULL);
     void getExecutionConstraintList(DatabaseId dbId, picojson::value& result);
-    bool isEnableRequsetConstraint() {
+    bool isEnableRequestConstraint() {
         return useRequestConstraint_;
     }
 

@@ -37,18 +37,18 @@ const SystemPartId MAX_SYSTEM_PART_ID = MAX_NODE_AFFINITY_NUMBER;
 const SystemPartId UNDEF_SYSTEM_PART_ID = UNDEF_NODE_AFFINITY_NUMBER;
 
 struct KeyConstraint {
-	uint32_t maxTotalLength_;
+	size_t maxTotalLength_;
 	bool systemPartAllowed_;
 	bool largeContainerIdAllowed_;
 
 	KeyConstraint();
 	KeyConstraint(
-		uint32_t maxTotalLength,
-		bool systemPartAllowed,
-		bool largeContainerIdAllowed);
+			size_t maxTotalLength,
+			bool systemPartAllowed,
+			bool largeContainerIdAllowed);
 
-	static KeyConstraint getUserKeyConstraint(uint32_t maxTotalLength);
-	static KeyConstraint getSystemKeyConstraint(uint32_t maxTotalLength);
+	static KeyConstraint getUserKeyConstraint(size_t maxTotalLength);
+	static KeyConstraint getSystemKeyConstraint(size_t maxTotalLength);
 	static KeyConstraint getNoLimitKeyConstraint();
 };
 
@@ -56,23 +56,23 @@ struct FullContainerKeyComponents {
 	DatabaseId dbId_;
 
 	const char8_t *baseName_;
-	uint32_t baseNameSize_;
+	size_t baseNameSize_;
 
 	const char8_t *affinityString_;
-	uint32_t affinityStringSize_;
+	size_t affinityStringSize_;
 	NodeAffinityNumber affinityNumber_;
 
 	LargeContainerId largeContainerId_;
 
 	const char8_t *systemPart_;
-	uint32_t systemPartSize_;
+	size_t systemPartSize_;
 	SystemPartId systemPartId_;
 
 	FullContainerKeyComponents();
 	FullContainerKeyComponents(const FullContainerKeyComponents &another);
 	FullContainerKeyComponents& operator=(const FullContainerKeyComponents &another);
 
-	uint32_t getStringSize() const;
+	size_t getStringSize() const;
 
 	void clear();
 
@@ -97,7 +97,7 @@ public:
 	
 	FullContainerKey(util::StackAllocator &alloc,
 		const KeyConstraint &constraint,
-		DatabaseId dbId, const char8_t *str, uint32_t length);
+		DatabaseId dbId, const char8_t *str, size_t length);
 	
 	FullContainerKey(util::StackAllocator &alloc,
 		const KeyConstraint &constraint,
@@ -158,7 +158,7 @@ protected:
 
 
 	void parseAndValidate(
-		DatabaseId dbId, const char8_t *str, uint32_t length,
+		DatabaseId dbId, const char8_t *str, size_t length,
 		FullContainerKeyComponents &components, ContainerKeyBitArray &upperCaseBit) const;
 
 	void validate(const FullContainerKeyComponents &components) const;
@@ -183,8 +183,8 @@ protected:
 
 	void encodeVarInt(ContainerKeyOutStream &out, uint32_t val) const;
 	void encodeVarLong(ContainerKeyOutStream &out, uint64_t val) const;
-	void encodeString(ContainerKeyOutStream &out, const char8_t *str, uint32_t len) const;
-	void encodeBinary(ContainerKeyOutStream &out, const uint8_t *data, uint32_t len) const;
+	void encodeString(ContainerKeyOutStream &out, const char8_t *str, size_t len) const;
+	void encodeBinary(ContainerKeyOutStream &out, const void *data, size_t len) const;
 
 	uint32_t decodeVarInt(ContainerKeyInStream &in) const;
 	uint64_t decodeVarLong(ContainerKeyInStream &in) const;
@@ -196,42 +196,44 @@ protected:
 	static bool isSymbol(char8_t ch);
 
 	void createOriginalString(
-		char8_t const *src, uint32_t size, char8_t *dest,
+		char8_t const *src, size_t size, char8_t *dest,
 		const ContainerKeyBitArray &upperCaseBit, uint64_t startPos) const;
 
 	void validateDbId(DatabaseId dbId) const;
 	void validateBaseContainerName(
-		const char8_t *baseName, uint32_t baseNameLength, bool systemPartExists) const;
+		const char8_t *baseName, size_t baseNameLength, bool systemPartExists) const;
 	bool validateExtendedName(
-		const char8_t *str, uint32_t len, const char8_t *partName = "part") const;
+		const char8_t *str, size_t len, const char8_t *partName = "part") const;
 	void validateNumeric(
-		const char8_t *str, uint32_t len, const char8_t *partName = "part") const;
+		const char8_t *str, size_t len, const char8_t *partName = "part") const;
 	void validateAffinityNumber(NodeAffinityNumber affinityNumber) const;
 	void validateLargeContainerId(LargeContainerId largeContainerId) const;
 	void validateSystemPartId(SystemPartId systemPartId) const;
 
 	void validateAndSetNodeAffinity(
-		const char8_t *str, uint32_t len, FullContainerKeyComponents &component) const;
+		const char8_t *str, size_t len, FullContainerKeyComponents &component) const;
 	void validateAndSetLargeContainerId(
-		const char8_t *str, uint32_t len, FullContainerKeyComponents &component) const;
+		const char8_t *str, size_t len, FullContainerKeyComponents &component) const;
 	void validateAndSetSystemPart(
-		const char8_t *str, uint32_t len, FullContainerKeyComponents &component) const;
+		const char8_t *str, size_t len, FullContainerKeyComponents &component) const;
 
 	NodeAffinityNumber getNodeAffinityNumber(
-		const char8_t *affinityString, uint32_t affinityStringLength) const;
+		const char8_t *affinityString, size_t affinityStringLength) const;
 	LargeContainerId getLargeContainerId(
-		const char8_t *largeContainerIdString, uint32_t largeContainerIdStringLength) const;
+		const char8_t *largeContainerIdString, size_t largeContainerIdStringLength) const;
 	SystemPartId getSystemPartId(
-		const char8_t *systemPart, uint32_t systemPartLength) const;
+		const char8_t *systemPart, size_t systemPartLength) const;
 
 	int32_t compareOriginalString(
-		const char8_t *str1, uint32_t str1Length,
-		const char8_t *str2, uint32_t str2Length,
+		const char8_t *str1, size_t str1Length,
+		const char8_t *str2, size_t str2Length,
 		bool caseSensitive) const;
 	int32_t compareNormalizedString(
-		const char8_t *str1, uint32_t str1Length, const ContainerKeyBitArray &upperCaseBit1, uint64_t startPos1,
-		const char8_t *str2, uint32_t str2Length, const ContainerKeyBitArray &upperCaseBit2, uint64_t startPos2,
+		const char8_t *str1, size_t str1Length, const ContainerKeyBitArray &upperCaseBit1, uint64_t startPos1,
+		const char8_t *str2, size_t str2Length, const ContainerKeyBitArray &upperCaseBit2, uint64_t startPos2,
 		bool caseSensitive) const;
+
+	static int32_t compareLength(size_t len1, size_t len2);
 
 	static void dumpComponent(const FullContainerKeyComponents &component, const char8_t *msg);
 };
@@ -239,9 +241,10 @@ protected:
 
 class EmptyAllowedKey : private FullContainerKey {
 public:
-	static void validate(const KeyConstraint &constraint,
-		const char8_t *str, uint32_t length,
-		const char8_t *keyName);
+	static void validate(
+			const KeyConstraint &constraint,
+			const char8_t *str, size_t length,
+			const char8_t *keyName);
 
 protected:
 	EmptyAllowedKey(const KeyConstraint &constraint);
@@ -250,9 +253,10 @@ protected:
 
 class NoEmptyKey : private FullContainerKey {
 public:
-	static void validate(const KeyConstraint &constraint,
-		const char8_t *str, uint32_t length,
-		const char8_t *keyName);
+	static void validate(
+			const KeyConstraint &constraint,
+			const char8_t *str, size_t length,
+			const char8_t *keyName);
 
 protected:
 	NoEmptyKey(const KeyConstraint &constraint);
@@ -261,11 +265,12 @@ protected:
 
 class AlphaOrDigitKey : private FullContainerKey {
 public:
-	static void validate(const char8_t *str, uint32_t length, uint32_t maxLength,
-		const char8_t *keyName);
+	static void validate(
+			const char8_t *str, size_t length, size_t maxLength,
+			const char8_t *keyName);
 
 private:
-	AlphaOrDigitKey(uint32_t maxLength);
+	AlphaOrDigitKey(size_t maxLength);
 };
 
 #endif

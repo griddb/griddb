@@ -119,6 +119,8 @@ public class TimestampUtils {
 	 *
 	 * <p>An earlier time than the specified time can be obtained by specifying a negative value as {@code amount}.</p>
 	 *
+	 * <p>Microsecond/nanosecond precision is not supported.</p>
+	 *
 	 * <p>The current version uses the UTC timezone for calculation.</p>
 	 *
 	 * @param timestamp target time
@@ -161,6 +163,8 @@ public class TimestampUtils {
 	 * </div><div lang="en">
 	 * Adds a fixed value to the time using the specified time zone setting.
 	 *
+	 * <p>If unsupported timeUnit is specified</p>
+	 *
 	 * <p>Depending on the unit of time used for calculation, the time zone
 	 * setting may not be affected.</p>
 	 *
@@ -173,6 +177,7 @@ public class TimestampUtils {
 	 *
 	 * @throws NullPointerException when {@code null} is specified for
 	 * {@code timestamp}, {@code timeUnit}
+	 * @throws IllegalArgumentException If unsupported {@code timeUnit} is specified
 	 *
 	 * @since 4.3
 	 * </div>
@@ -267,15 +272,15 @@ public class TimestampUtils {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * Using the specified time zone setting, returns the string representing the
-	 * specified time, according to the TIMESTAMP value notation of TQL.
+	 * Using the specified time zone setting, returns the string representation 
+	 * of time, according to the normal-precision TIMESTAMP value notation of TQL.
 	 *
 	 * @param timestamp target time
-	 * @param zone time zone setting used for calculation
+	 * @param zone time zone setting used for calculation, or null
 	 *
 	 * @return corresponding string representation
 	 *
-	 * @throws NullPointerException when {@code null} is specified as argument
+	 * @throws NullPointerException If {@code null} is specified as a timestamp argument
 	 *
 	 * @see #format(Date)
 	 *
@@ -304,6 +309,19 @@ public class TimestampUtils {
 	 *
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Using the specified time zone setting, returns the string representation 
+	 * of time, according to the high-precision TIMESTAMP value notation.
+	 *
+	 * @param timestamp the target time
+	 * @param zone time zone setting used for calculation, or {@code null}
+	 *
+	 * @return the corresponding string representation
+	 *
+	 * @throws NullPointerException If {@code null} is specified as a 
+	 * {@code timestamp} argument
+	 *
+	 * @see #format(Date)
+	 *
 	 * @since 5.3
 	 * </div>
 	 */
@@ -324,7 +342,8 @@ public class TimestampUtils {
 	 * @throws ParseException 時刻の文字列表記と一致しない文字列が指定された場合
 	 * @throws NullPointerException 引数に{@code null}が指定された場合
 	 * </div><div lang="en">
-	 * Returns a {@link Date} object corresponding to the specified string, according to the TIMESTAMP value notation of TQL.
+	 * Returns {@link Date} corresponding to the specified string, according 
+	 * to the normal-precision TIMESTAMP value notation of TQL.
 	 *
 	 * @param source string representation of target time
 	 *
@@ -351,6 +370,15 @@ public class TimestampUtils {
 	 * @throws NullPointerException 引数に{@code null}が指定された場合
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Returns {@link Timestamp} corresponding to the specified string, according 
+	 * to the normal-precision or high-precision TIMESTAMP value notation.
+	 *
+	 * @param source string representation of the target time
+	 *
+	 * @return {@link Timestamp} corresponding to the specified string
+	 *
+	 * @throws ParseException If a string that does not match the string notation of time.
+	 * @throws NullPointerException If {@code null} is specified as an argument
 	 * @since 5.3
 	 * </div>
 	 */
@@ -396,7 +424,7 @@ public class TimestampUtils {
 	 * Using the specified time zone setting, returns the string representing the
 	 * specified time, according to the TIMESTAMP value notation of TQL.
 	 *
-	 * @param zone applicable time zone settings
+	 * @param zone applicable time zone setting, or {@code null}
 	 *
 	 * @return date format
 	 *
@@ -433,6 +461,26 @@ public class TimestampUtils {
 	 *
 	 * @since 5.3
 	 * </div><div lang="en">
+	 * Using the specified time zone setting and date/time precision, retrieves 
+	 * the date format according to the TIMESTAMP value notation of TQL.
+	 *
+	 * <p>Specification of date/time precision is supported only in the following cases.</p>
+	 * <ul>
+	 * <li>{@link TimeUnit#SECOND}</li>
+	 * <li>{@link TimeUnit#MILLISECOND}</li>
+	 * <li>{@link TimeUnit#MICROSECOND}</li>
+	 * <li>{@link TimeUnit#NANOSECOND}</li>
+	 * <li>{@code null} (interpreted as if {@link TimeUnit#MILLISECOND} 
+	 * is specified)</li>
+	 * </ul>
+	 *
+	 * @param zone applicable time zone setting, or {@code null}
+	 * @param timePrecision applicable date/time precision, or {@code null}
+	 *
+	 * @return date format
+	 *
+	 * @throws IllegalArgumentException If unsupported date/time precision is specified
+	 *
 	 * @since 5.3
 	 * </div>
 	 */

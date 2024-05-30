@@ -24,6 +24,7 @@ struct BindParm;
 class SQLHintInfo;
 class Query;
 
+
 struct SQLHint {
 	class Coder;
 
@@ -630,12 +631,12 @@ struct SQLPreparedPlan::OptProfile::JoinCost {
 	JoinCost();
 
 	UTIL_OBJECT_CODER_MEMBERS(
-			UTIL_OBJECT_CODER_OPTIONAL(filterLevel_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(filterDegree_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(filterWeakness_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(edgeLevel_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(edgeDegree_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(edgeWeakness_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(filterLevel_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(filterDegree_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(filterWeakness_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(edgeLevel_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(edgeDegree_, 0U),
+			UTIL_OBJECT_CODER_OPTIONAL(edgeWeakness_, 0U),
 			UTIL_OBJECT_CODER_OPTIONAL(approxSize_, -1));
 
 	uint32_t filterLevel_; 
@@ -942,6 +943,7 @@ public:
 		OPT_PUSH_DOWN_LIMIT,
 		OPT_REMOVE_REDUNDANCY,
 		OPT_REMOVE_INPUT_REDUNDANCY,
+		OPT_REMOVE_PARTITION_COND_REDUNDANCY,
 		OPT_ASSIGN_JOIN_PRIMARY_COND,
 		OPT_MAKE_SCAN_COST_HINTS,
 		OPT_MAKE_JOIN_PUSH_DOWN_HINTS,
@@ -1540,6 +1542,7 @@ private:
 	bool removeRedundancy(Plan &plan);
 	bool removeInputRedundancy(Plan &plan);
 	bool removeAggregationRedundancy(Plan &plan);
+	bool removePartitionCondRedundancy(Plan &plan);
 	bool assignJoinPrimaryCond(Plan &plan, bool &complexFound);
 	bool makeScanCostHints(Plan &plan);
 	bool makeJoinPushDownHints(Plan &plan);
@@ -2046,6 +2049,15 @@ private:
 	bool isNarrowingNode(const PlanNode &node);
 	static bool isNarrowingPredicate(
 			const Expr &expr, const uint32_t *inputId);
+
+	void reduceTablePartitionCond(
+			const Plan &plan, Expr &expr, const TableInfo &tableInfo,
+			const util::Vector<uint32_t> &affinityRevList,
+			int32_t subContainerId);
+	const Expr* reduceTablePartitionCondSub(
+			const Expr &expr, const TableInfo &tableInfo,
+			const util::Vector<uint32_t> &affinityRevList,
+			int32_t subContainerId);
 
 	bool findIndexedPredicate(
 			const Plan &plan, const PlanNode &node, uint32_t inputId,
@@ -3181,6 +3193,11 @@ public:
 			util::Vector<int64_t> *affinityList,
 			util::Vector<uint32_t> *subList,
 			const Plan::ValueList *parameterList, bool &placeholderAffected);
+
+	static bool isReduceableTablePartitionCondition(
+			const Expr &expr, const TableInfo &tableInfo,
+			const util::Vector<uint32_t> &affinityRevList,
+			int32_t subContainerId);
 
 	static bool getTablePartitionKeyList(
 			const TableInfo &tableInfo,

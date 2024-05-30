@@ -155,6 +155,9 @@ Partition::Partition(
 		lock_(chunkBuffer->mutex()),
 		statsSet_(statsSet)
 {
+	UNUSED_VARIABLE(chunkMemoryPool);
+	UNUSED_VARIABLE(initialBufferSize);
+
 	try {
 		int32_t stripeSize = configTable.getUInt32(CONFIG_TABLE_DS_DB_FILE_SPLIT_STRIPE_SIZE);
 		int32_t numFiles = configTable.getUInt32(CONFIG_TABLE_DS_DB_FILE_SPLIT_COUNT);
@@ -189,7 +192,7 @@ Partition::Partition(
 					configTable, std::move(locker), logStackAlloc_,
 					*xWALBuffer, *cpWALBuffer_,
 					checkpointRange_, ossCpLog.str().c_str(),
-					ossXLog.str().c_str(), pId, statsSet_.logMgrStats_);
+					ossXLog.str().c_str(), pId, statsSet_.logMgrStats_, uuid_);
 		}
 		chunkBuffer->setDataFile(pId, *dataFile_);
 		chunkManager_ = UTIL_NEW ChunkManager(
@@ -254,8 +257,6 @@ void Partition::reinit(PartitionList& ptList) {
 				configTable_.get<const char8_t*>(CONFIG_TABLE_DS_DB_PATH);
 		const char* const logPath =
 				configTable_.get<const char8_t*>(CONFIG_TABLE_DS_TRANSACTION_LOG_PATH);
-		const char* const tmpPath =
-				configTable_.get<const char8_t*>(CONFIG_TABLE_DS_SYNC_TEMP_PATH);
 
 		{
 			util::NormalOStringStream oss;
@@ -289,7 +290,7 @@ void Partition::reinit(PartitionList& ptList) {
 					configTable_, std::move(locker), logStackAlloc_,
 					*xWALBuffer, *cpWALBuffer_,
 					checkpointRange_, ossCpLog.str().c_str(),
-					ossXLog.str().c_str(), pId_, statsSet_.logMgrStats_);
+					ossXLog.str().c_str(), pId_, statsSet_.logMgrStats_, uuid_);
 
 			defaultLogManager_->init(0, true, false);
 			defaultLogManager_->setLSN(0);
@@ -316,11 +317,17 @@ void Partition::reinit(PartitionList& ptList) {
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, ""));
 	}
 }
+#include "sync_service.h"
 /*!
 	@brief 初期化処理
 */
 void Partition::initialize(ManagerSet &resourceSet) {
 	managerSet_ = &resourceSet;
+	bool uuidInfoFlag = managerSet_->config_->get<bool>(CONFIG_TABLE_DS_AUTO_ARCHIVE_OUTPUT_UUID_INFO);
+	if (uuidInfoFlag) {
+		uuid_ = managerSet_->syncSvc_->getRedoManager().getUuid();
+		defaultLogManager_->setUuid(uuid_);
+	}
 }
 
 /*!
@@ -443,11 +450,11 @@ void Partition::recover(
 					": (pId=" << pId_ << ", targetLSN=" << recoveryTargetLsn <<
 					", redoStartLSN=" << defaultLogManager_->getLSN() << ")");
 		}
+		initializeLogFormatVersion(defaultLogManager_->getLogFormatVersion());
 		activate();
 		{
 			LogIterator<MutexLocker>& it = std::get<1>(its);
 			std::unique_ptr<Log> log;
-			LogSequentialNumber lsn = UNDEF_LSN;
 			while (true) {
 				if (recoveryTargetLsn > 0
 						&& recoveryTargetLsn == defaultLogManager_->getLSN()) {
@@ -506,9 +513,10 @@ void Partition::restore(const uint8_t* logListBinary, uint32_t size) {
 	chunkManager_->reinit();
 	util::DateTime redoStartTime;
 	Timestamp redoStartEmTime = 0;
+	size_t pos = 0;
 	redoLogList(
 			NULL, REDO_MODE_LONG_TERM_SYNC, redoStartTime, redoStartEmTime,
-			logListBinary, size);
+			logListBinary, size, pos, NULL, 0);
 }
 
 /*!
@@ -583,7 +591,7 @@ uint32_t Partition::undo(util::StackAllocator& alloc) {
 
 		if (!isActive()) {
 			assert(undoTxnContextIds.size() == 0);
-			return undoTxnContextIds.size();
+			return static_cast<uint32_t>(undoTxnContextIds.size());
 		}
 		for (size_t i = 0; i < undoTxnContextIds.size(); i++) {
 			TransactionContext &txn =
@@ -616,9 +624,9 @@ uint32_t Partition::undo(util::StackAllocator& alloc) {
 						ret.set(static_cast<DSOutputMes*>(dataStore_->exec(&txn, &keyStoreValue, &input)));
 					}
 					TransactionManager::ContextSource dummySource; 
-					util::XArray<uint8_t>* log = NULL;
-					log = appendDataStoreLog(txn,
-							dummySource, txn.getLastStatementId(), keyStoreValue.storeType_, ret.get()->dsLog_);
+					appendDataStoreLog(
+							txn, dummySource, txn.getLastStatementId(),
+							keyStoreValue.storeType_, ret.get()->dsLog_);
 				}
 				else {
 					transactionManager->remove(txn);
@@ -638,12 +646,33 @@ uint32_t Partition::undo(util::StackAllocator& alloc) {
 									  << ", txnCount="
 									  << undoTxnContextIds.size() << ")");
 		}
-		return undoTxnContextIds.size();
+		return static_cast<uint32_t>(undoTxnContextIds.size());
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR(e, "Undo failed. (pId=" << pId_ << ", reason="
 													  << GS_EXCEPTION_MESSAGE(e)
 													  << ")");
+	}
+}
+
+/*!
+	@brief LogFormatVersion初期設定
+	@note 基本はログファイルから得たLogFormatVersion。
+		V5.6以降: ZSTD圧縮を使用していてそのLogFormatVersion以下だった場合上書き
+*/
+void Partition::initializeLogFormatVersion(uint16_t xlogFormatVersion) {
+	uint16_t logFormatVersion = xlogFormatVersion;
+	const int32_t compressionMode = configTable_.get<int32_t>(
+			CONFIG_TABLE_DS_STORE_COMPRESSION_MODE);
+	if (compressionMode == ChunkCompressionTypes::BLOCK_COMPRESSION_ZSTD
+			&& logFormatVersion < LogManagerConst::getV56zstdFormatVersion()) {
+		logFormatVersion = LogManagerConst::getV56zstdFormatVersion();
+	}
+	defaultLogManager_->setLogFormatVersion(logFormatVersion);
+	if (pId_ == 0) {
+		GS_TRACE_INFO(
+				PARTITION, GS_TRACE_RM_RECOVERY_INFO,
+				"initializeLogFormatVersion: version=" << logFormatVersion);
 	}
 }
 
@@ -703,6 +732,8 @@ bool Partition::isActive() {
 }
 
 void Partition::finalizeRecovery(bool commit) {
+	UNUSED_VARIABLE(commit);
+
 	setStatus(Status::ActivePartition);
 }
 
@@ -919,7 +950,6 @@ void Partition::endCheckpoint0(CheckpointPhase phase) {
 void Partition::endCheckpoint(EndCheckpointMode x) {
 	try {
 		const bool byCP = true;
-		int64_t logVersion = defaultLogManager_->getLogVersion();
 		switch (x) {
 		case CP_END_FLUSH_DATA:
 			flushData();
@@ -1144,10 +1174,7 @@ bool Partition::redo(RedoMode mode, Log* log) {
 				static_cast<uint32_t>(LogManagerConst::getBaseFormatVersion()) <<
 				")" );
 		}
-		defaultLogManager_->setLogFormatVersion(logFormatVersion);
-		GS_TRACE_DEBUG(
-			PARTITION, GS_TRACE_RM_RECOVERY_INFO,
-			"setLogForamatVersion: pId=" << pId_ << ",version=" << logFormatVersion);
+		initializeLogFormatVersion(logFormatVersion);
 		return true;
 	}
 	case LogType::EOFLog:
@@ -1164,13 +1191,15 @@ bool Partition::redo(RedoMode mode, Log* log) {
 */
 bool Partition::redoLogList(
 		util::StackAllocator* alloc, RedoMode mode,
-		const util::DateTime &redoStartTime, 
-		Timestamp redoStartEmTime,
-		const uint8_t* logListBinary, size_t totalLen) {
+		const util::DateTime &redoStartTime, Timestamp redoStartEmTime,
+		const uint8_t* logListBinary, size_t totalLen, size_t &pos,
+		util::Stopwatch* watch, uint32_t limitInterval) {
+	UNUSED_VARIABLE(alloc);
+	UNUSED_VARIABLE(watch);
+	UNUSED_VARIABLE(limitInterval);
 
-	size_t pos = 0;
 	const uint8_t* logTop = logListBinary;
-	while (pos < totalLen) {
+	while (pos < totalLen) { 
 		util::StackAllocator::Scope scope(storeStackAlloc_);
 
 		uint64_t logSize  = *reinterpret_cast<uint64_t*>(const_cast<uint8_t*>(
@@ -1262,20 +1291,20 @@ bool Partition::redoLogList(
 			break;
 		case LogType::CheckpointStartLog:  
 			{
-			uint16_t logFormatVersion =
-					static_cast<uint16_t>(log.getFormatVersion());
-			if (logFormatVersion == 0) {
-				logFormatVersion = LogManagerConst::getBaseFormatVersion();
-			}
-			if (!LogManagerConst::isAcceptableFormatVersion(logFormatVersion)) {
-				GS_THROW_USER_ERROR(GS_ERROR_RM_REDO_LOG_VERSION_NOT_ACCEPTABLE,
-						"(logFormatVersion=" <<
-						static_cast<uint32_t>(logFormatVersion) <<
-						", baseFormatVersion=" <<
-						static_cast<uint32_t>(LogManagerConst::getBaseFormatVersion()) <<
-						")" );
-			}
-			defaultLogManager_->setLogFormatVersion(logFormatVersion);
+				uint16_t logFormatVersion =
+						static_cast<uint16_t>(log.getFormatVersion());
+				if (logFormatVersion == 0) {
+					logFormatVersion = LogManagerConst::getBaseFormatVersion();
+				}
+				if (!LogManagerConst::isAcceptableFormatVersion(logFormatVersion)) {
+					GS_THROW_USER_ERROR(GS_ERROR_RM_REDO_LOG_VERSION_NOT_ACCEPTABLE,
+							"(logFormatVersion=" <<
+							static_cast<uint32_t>(logFormatVersion) <<
+							", baseFormatVersion=" <<
+							static_cast<uint32_t>(LogManagerConst::getBaseFormatVersion()) <<
+							")" );
+				}
+				initializeLogFormatVersion(logFormatVersion);
 			}
 			break;
 		case LogType::CheckpointEndLog:
@@ -1332,7 +1361,7 @@ void Partition::genTempLogManager() {
 		LogManager<MutexLocker> logManager(
 				configTable_, std::move(locker), logStackAlloc_,
 				*localXWALBuffer, *localCPWALBuffer, 1,
-				tmpPath_, tmpPath_, pId_, statsSet_.logMgrStats_);
+				tmpPath_, tmpPath_, pId_, statsSet_.logMgrStats_, uuid_);
 		const bool byCP = false;
 		logManager.init(logVersion, true, byCP);
 
@@ -1395,7 +1424,7 @@ uint64_t Partition::copyChunks(
 			cxt.logManager_ = UTIL_NEW LogManager<MutexLocker>(
 					configTable_, std::move(mutexLocker), logStackAlloc_,
 					*localXWALBuffer, *localCPWALBuffer, 1,
-					dataPath, xLogPath, pId_, statsSet_.logMgrStats_);
+					dataPath, xLogPath, pId_, statsSet_.logMgrStats_, uuid_);
 			cxt.logManager_->setSuffix(LogManagerConst::INCREMENTAL_FILE_SUFFIX);
 			const bool byCP = false;
 			cxt.logManager_->init(logVersion, true, byCP);
@@ -1451,9 +1480,6 @@ void Partition::redoTxnLog(Log* log) {
 	int64_t dataSize = log->getDataSize();
 	const uint8_t* data = static_cast<const uint8_t*>(log->getData());
 	if (dataSize > 0 && data) {
-		util::ArrayByteInStream in = util::ArrayByteInStream(
-			util::ArrayInStream(data, dataSize));
-
 		TransactionId maxTxnId = 0;
 		uint32_t numContext;
 		const ClientId *clientIds;
@@ -1588,7 +1614,6 @@ PartitionList::PartitionList(
 	try {
 		const char* const DATA_FOLDER = configTable.get<const char8_t*>(CONFIG_TABLE_DS_DB_PATH);
 		const char* const LOG_FOLDER = configTable.get<const char8_t*>(CONFIG_TABLE_DS_TRANSACTION_LOG_PATH);
-		const char* const TMP_FOLDER = configTable.get<const char8_t*>(CONFIG_TABLE_DS_SYNC_TEMP_PATH);
 
 
 		const uint32_t partitionGroupCount = pgConfig_.getPartitionGroupCount();
@@ -1597,8 +1622,6 @@ PartitionList::PartitionList(
 
 		uint64_t storeMemoryLimitMB =
 				configTable.getUInt32(CONFIG_TABLE_DS_STORE_MEMORY_LIMIT);
-		int64_t walMemoryLimit = 1024 * 1024;
-		int64_t affinityMemoryLimit = 1024;
 		uint64_t chunkBufferLimit =
 				storeMemoryLimitMB * 1024 * 1024 / dataStoreBlockSize;
 		uint64_t initialBufferSize = chunkBufferLimit;
@@ -1636,9 +1659,12 @@ PartitionList::PartitionList(
 		compressorParam.fileSystemBlockSize_ = static_cast<int32_t>(fileSystemBlockSize);
 		compressorParam.minSpaceSavings_ = CompressorParam::DEFAULT_MIN_SPACE_SAVINGS;
 
-		for (int32_t pgId = 0; pgId < partitionGroupCount; ++pgId) {
+		for (int32_t pgId = 0;
+				static_cast<uint32_t>(pgId) < partitionGroupCount; ++pgId) {
 			ChunkBuffer* chunkBuffer = UTIL_NEW ChunkBuffer(
-					pgId, dataStoreBlockSize, initialBufferSize,
+					pgId,
+					static_cast<int32_t>(dataStoreBlockSize),
+					static_cast<int32_t>(initialBufferSize),
 					compressorParam,
 					pgConfig_.getGroupBeginPartitionId(pgId),
 					pgConfig_.getGroupEndPartitionId(pgId),
@@ -1651,11 +1677,15 @@ PartitionList::PartitionList(
 			ism_->regist(pgId, chunkBuffer, initialBufferSize);
 		}
 		for (size_t pId = 0; pId < partitionCount_; ++pId) {
-			PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
-			Partition* pt = UTIL_NEW Partition(configTable, pId, *ism_,
+			const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(
+					static_cast<PartitionId>(pId));
+			Partition* pt = UTIL_NEW Partition(
+					configTable, static_cast<int32_t>(pId), *ism_,
 					resultSetPool, *chunkMemoryPool_, chunkBufferList_[pgId],
-					DATA_FOLDER, LOG_FOLDER, initialBufferSize, dataStoreBlockSize,
-					stats_->toPartitionStatsSet(pId));
+					DATA_FOLDER, LOG_FOLDER,
+					static_cast<int32_t>(initialBufferSize),
+					static_cast<int32_t>(dataStoreBlockSize),
+					stats_->toPartitionStatsSet(static_cast<PartitionId>(pId)));
 			ptList_.push_back(pt);
 		}
 	}
@@ -1669,7 +1699,7 @@ PartitionList::~PartitionList() {
 		delete itr;
 	}
 	for (size_t pgId = 0; pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
-		ism_->unregistChunkBuffer(pgId);
+		ism_->unregistChunkBuffer(static_cast<int32_t>(pgId));
 	}
 	delete chunkMemoryPool_;
 	delete ism_;
@@ -2077,6 +2107,8 @@ void PartitionListStats::TotalEntry::apply(StatTable &stat) const {
 
 void PartitionListStats::TotalEntry::merge(
 		FileStatTable &dataFileStats, const PartitionEntry &ptEntry) {
+	UNUSED_VARIABLE(ptEntry);
+
 	dataFileStats.get(fileStats_);
 }
 

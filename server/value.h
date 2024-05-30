@@ -552,7 +552,10 @@ public:
 		@brief Get array length
 	*/
 	uint32_t getArrayLength(
-		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) const {
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			AllocateStrategy &strategy) const {
+		UNUSED_VARIABLE(txn);
+
 		if ((!isArray()) || (data_.object_.value_ == NULL)) return 0;
 		switch (type_) {
 		case COLUMN_TYPE_STRING_ARRAY: {

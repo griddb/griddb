@@ -224,10 +224,11 @@ void Query::dumpSelectionExpr(
 */
 void Query::evalConditionExpr(ContainerRowWrapper *x) {
 	if (pWhereExpr_ != NULL) {
-		std::cout << "EVAL_RESULT="
-				  << pWhereExpr_->eval(
-						 txn_, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
-				  << std::endl;
+		std::cout << "EVAL_RESULT=" <<
+				static_cast<int32_t>(pWhereExpr_->eval(
+						txn_, objectManager_, strategy_, x, functionMap_,
+						TRI_TRUE)) <<
+				std::endl;
 	}
 }
 
@@ -244,10 +245,11 @@ void Query::dumpConditionExpr(
 		pWhereExpr_->dumpTree(txn, objectManager_, strategy_, os, x, functionMap_);
 		os << std::endl;
 		try {
-			os << "EVAL_RESULT="
-			   << pWhereExpr_->eval(txn, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
-
-			   << std::endl;
+			os << "EVAL_RESULT=" <<
+					static_cast<int32_t>(pWhereExpr_->eval(
+							txn, objectManager_, strategy_, x, functionMap_,
+							TRI_TRUE)) <<
+					std::endl;
 		}
 		catch (util::Exception &e) {
 			e.format(os);
@@ -271,9 +273,11 @@ void Query::dumpConditionExprDNF(
 		e->dumpTree(txn, objectManager_, strategy_, os, x, functionMap_);
 		os << std::endl;
 		try {
-			os << "EVAL_RESULT="
-			   << e->eval(txn, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
-			   << std::endl;
+			os << "EVAL_RESULT=" <<
+					static_cast<int32_t>(e->eval(
+							txn, objectManager_, strategy_, x, functionMap_,
+							TRI_TRUE)) <<
+					std::endl;
 		}
 		catch (util::Exception &e) {
 			e.format(os);
@@ -299,9 +303,11 @@ void Query::dumpConditionExprOptimized(
 		e->dumpTree(txn, objectManager_, strategy_, os, x, functionMap_);
 		os << std::endl;
 		try {
-			os << "EVAL_RESULT="
-			   << e->eval(txn, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
-			   << std::endl;
+			os << "EVAL_RESULT=" <<
+					static_cast<int32_t>(e->eval(
+							txn, objectManager_, strategy_, x, functionMap_,
+							TRI_TRUE)) <<
+					std::endl;
 		}
 		catch (util::Exception &e) {
 			e.format(os);

@@ -607,7 +607,7 @@ public:
 		} 
 		else {
 			node = this->keymap_[key];
-			int refCount = node->refCount_;
+			const int64_t refCount = node->refCount_;
 			LruCacheBase<Node,Key,Value,Allocator>::detach(node);
 			node->deallocateValue(this->alloc_);
 			LruCacheBase<Node,Key,Value,Allocator>::releaseNode(node);
