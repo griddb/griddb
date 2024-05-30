@@ -43,6 +43,7 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/uuid
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/omaha
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zstd
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample/program
@@ -104,6 +105,7 @@ install -c -m 640 3rd_party/picojson/org/include/README.mkdn                %{bu
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt              %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 install -c -m 640 3rd_party/uuid/uuid/COPYING                               %{buildroot}%{griddb_instdir}/3rd_party/uuid
 install -c -m 640 3rd_party/fletcher32_simd/fletcher32_simd/LICENSE         %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
+install -c -m 640 3rd_party/zstd/LICENSE                        %{buildroot}%{griddb_instdir}/3rd_party/zstd
 
 
 
@@ -328,6 +330,7 @@ fi
 %dir %{griddb_instdir}/3rd_party/omaha
 %dir %{griddb_instdir}/3rd_party/zigzag_encoding
 %dir %{griddb_instdir}/3rd_party/fletcher32_simd
+%dir %{griddb_instdir}/3rd_party/zstd
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/sample
 %dir %{griddb_instdir}/docs/sample/program
@@ -382,6 +385,7 @@ fi
 %{griddb_instdir}/3rd_party/omaha/COPYING
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
 %{griddb_instdir}/3rd_party/fletcher32_simd/LICENSE
+%{griddb_instdir}/3rd_party/zstd/LICENSE
 
 %{griddb_instdir}/README.md
 %{griddb_instdir}/docs/sample/program/Sample1.java
