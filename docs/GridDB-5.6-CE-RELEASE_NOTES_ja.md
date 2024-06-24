@@ -80,3 +80,6 @@ PARTITION BY RANGE(パーティショニングキーの列名) EVERY(分割幅�
 
 あらかじめ集計対象のコンテナと出力先のコンテナを作成し、作成した集計対象のコンテナに対して、時系列データを登録します。登録した時系列データに対して集計を行い、出力先のコンテナに登録を行います。集計処理はGridDB CLI(gs_sh)のバッチモードのスクリプトファイルを用いて実現します。自動集計はCLIのスクリプトファイルを定期実行して実現します。定期実行については、Linuxのcronを利用します。
 
+詳細は、「機能リファレンス」の[時系列データ自動集計](https://github.com/griddb/docs-ja/blob/master/manuals/md_reference_feature/md_reference_feature.md#時系列データ自動集計)をご参考願います。
+
+
