@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Informasi Darurat Bencana</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { text-align: center; }
+        .contact { margin-bottom: 20px; }
+        .emergency-steps { margin-bottom: 20px; }
+        .notifications { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Informasi Darurat Bencana</h1>
+    
+    <div class="contact">
+        <h2>Nomor Darurat</h2>
+        <ul>
+            <li>Polisi: 110</li>
+            <li>Pemadam Kebakaran: 113</li>
+            <li>BMKG: (021) 6546316 / (021) 6546317</li>
+        </ul>
+    </div>
+
+    <div class="emergency-steps">
+        <h2>Langkah-Langkah Kegawatdaruratan</h2>
+        <h3>Gempa Bumi</h3>
+        <ol>
+            <li>Tetap tenang dan jangan panik.</li>
+            <li>Segera berlindung di bawah meja atau benda yang kuat.</li>
+            <li>Jika berada di luar, menjauh dari bangunan, pohon, dan tiang listrik.</li>
+        </ol>
+        
+        <h3>Tsunami</h3>
+        <ol>
+            <li>Segera evakuasi ke tempat yang lebih tinggi.</li>
+            <li>Ikuti jalur evakuasi yang telah ditentukan.</li>
+            <li>Jangan kembali sebelum ada pemberitahuan resmi aman dari pihak berwenang.</li>
+        </ol>
+        
+        <h3>Angin Puting Beliung</h3>
+        <ol>
+            <li>Masuk ke dalam ruangan dan menjauh dari jendela.</li>
+            <li>Matikan perangkat listrik dan cabut kabel dari stop kontak.</li>
+            <li>Tetap di dalam ruangan sampai keadaan aman.</li>
+        </ol>
+
+        <h3>Gunung Berapi</h3>
+        <ol>
+            <li>Ikuti instruksi dari otoritas setempat mengenai evakuasi.</li>
+            <li>Pakai masker atau kain basah untuk melindungi pernapasan dari abu vulkanik.</li>
+            <li>Jangan mendekati daerah aliran lahar.</li>
+        </ol>
+    </div>
+
+    <div class="notifications">
+        <h2>Notifikasi BMKG</h2>
+        <p id="notification">Menunggu data dari BMKG...</p>
+    </div>
+
+    <script>
+        // Skrip untuk mendapatkan notifikasi dari BMKG
+        // Catatan: Perlu menggunakan API BMKG yang tersedia
+        async function getBMKGNotification() {
+            try {
+                // Ganti URL berikut dengan endpoint API BMKG yang sesuai
+                let response = await fetch('https://example.com/api/bmkg'); // Ini adalah placeholder. Gunakan URL yang benar.
+                let data = await response.json();
+                document.getElementById('notification').innerText = data.message;
+            } catch (error) {
+                document.getElementById('notification').innerText = 'Gagal mendapatkan data dari BMKG';
+            }
+        }
+
+        // Panggil fungsi setiap beberapa detik untuk memperbarui notifikasi
+        setInterval(getBMKGNotification, 60000); // Update setiap 60 detik
+    </script>
+</body>
+</html>
