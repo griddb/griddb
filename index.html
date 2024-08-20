@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تطبيق الأفلام والمسلسلات</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>تطبيق الأفلام والمسلسلات</h1>
+    </header>
+
+    <main>
+        <!-- قسم الأفلام -->
+        <section class="movies-section">
+            <h2>الأفلام</h2>
+            <div class="movie-container">
+                <!-- قائمة الأفلام -->
+            </div>
+            <div class="upload-section">
+                <input type="file" id="movieFileInput" accept="video/*">
+                <button id="uploadMovieButton">تحميل فيلم</button>
+            </div>
+        </section>
+
+        <!-- قسم المسلسلات -->
+        <section class="series-section">
+            <h2>المسلسلات</h2>
+            <div class="series-container">
+                <!-- قائمة المسلسلات -->
+            </div>
+            <div class="upload-section">
+                <input type="file" id="seriesFileInput" accept="video/*">
+                <button id="uploadSeriesButton">تحميل مسلسل</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="scripts.js"></script>
+</body>
+</html>
