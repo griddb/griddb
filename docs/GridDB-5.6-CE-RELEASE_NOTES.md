@@ -65,3 +65,5 @@ If the column of TIMESTAMP (including TIMESTAMP with specified precision) is spe
 
 Time-Series Data Aggregation is realized with script files for GridDB CLI.
 Automatic Time-Series Data Aggregation is realized by executing the script files regularly.
+
+Please refer to ["Automatic aggregation of time-series data"](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_FeaturesReference.md#automatic-aggregation-of-time-series-data) in GridDB Features Reference for details.
