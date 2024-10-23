@@ -1,0 +1,120 @@
+/* Importando la fuente romántica */
+@import url('https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap');
+
+/* Aplicando la fuente romántica al cuerpo del texto */
+body {
+    margin: 0; /* Elimina el margen por defecto */
+    font-family: 'Great Vibes', cursive; /* Aplicando la fuente romántica */
+    background-color: #001; /* Color de fondo */
+}
+
+.sky {
+    position: relative;
+    width: 100vw; /* Ancho completo de la ventana */
+    height: 100vh; /* Alto completo de la ventana */
+    overflow: hidden; /* Oculta el desbordamiento */
+}
+
+.stars {
+    position: absolute;
+    top: 0; /* Posición en la parte superior */
+    left: 0; /* Posición a la izquierda */
+    width: 100%; /* Ancho completo */
+    height: 100%; /* Alto completo */
+    background: url('https://www.transparenttextures.com/patterns/stardust.png'); /* Fondo de estrellas */
+    z-index: 1; /* Coloca las estrellas detrás de la luna */
+    animation: twinkle 4s infinite, moveStars 60s linear infinite; /* Animación de parpadeo y movimiento más lento */
+}
+
+.moon {
+    position: absolute;
+    top: 50%; /* Centro vertical */
+    left: 50%; /* Centro horizontal */
+    width: 200px; /* Tamaño de la luna */
+    height: 200px; /* Tamaño de la luna */
+    background-color: #fff; /* Color de la luna */
+    border-radius: 50%; /* Forma circular */
+    box-shadow: 0 0 30px rgba(255, 255, 255, 0.8); /* Sombra de la luna */
+    transform: translate(-50%, -50%); /* Centrando la luna */
+    background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/25/Moon_icon.svg/240px-Moon_icon.svg.png'); /* Imagen de la luna */
+    background-size: cover; /* Tamaño de la imagen */
+    z-index: 2; /* Coloca la luna delante de las estrellas */
+    animation: pulse 3s infinite alternate; /* Animación de pulso */
+}
+
+.moon::after {
+    content: '';
+    position: absolute;
+    top: 25%; /* Ajusta la posición del cráter */
+    left: 30%; /* Ajusta la posición del cráter */
+    width: 25px; /* Tamaño del cráter */
+    height: 25px; /* Tamaño del cráter */
+    border-radius: 50%; /* Forma circular del cráter */
+    background: #ccc; /* Color del cráter */
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5); /* Sombra del cráter */
+}
+
+.moon::before {
+    content: '';
+    position: absolute;
+    top: 60%; /* Ajusta la posición de otro cráter */
+    left: 15%; /* Ajusta la posición de otro cráter */
+    width: 15px; /* Tamaño del cráter */
+    height: 15px; /* Tamaño del cráter */
+    border-radius: 50%; /* Forma circular del cráter */
+    background: #ccc; /* Color del cráter */
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5); /* Sombra del cráter */
+}
+.text {
+    position: absolute;
+    bottom: 20%; /* Mueve el texto más abajo */
+    left: 50%; /* Centro horizontal */
+    transform: translate(-50%, 0); /* Mantiene el centro horizontal */
+    font-size: 70px; /* Tamaño de la fuente */
+    color: #fff; /* Color del texto */
+    text-align: center; /* Alineación del texto */
+    z-index: 3; /* Coloca el texto delante de otros elementos */
+    text-shadow: 
+        0 0 5px rgba(255, 255, 255, 0.8), /* Sombra blanca para dar efecto de brillo */
+        0 0 10px rgba(255, 255, 255, 0.6), /* Brillo adicional */
+        0 0 15px rgba(255, 255, 255, 0.4), /* Más brillo */
+        0 0 20px rgba(255, 255, 255, 0.2); /* Sombra más difusa */
+    animation: glow 1.5s infinite alternate; /* Añade una animación de resplandor */
+}
+
+@keyframes glow {
+    0% {
+        text-shadow: 
+            0 0 5px rgba(255, 255, 255, 0.8),
+            0 0 10px rgba(255, 255, 255, 0.6),
+            0 0 15px rgba(255, 255, 255, 0.4),
+            0 0 20px rgba(255, 255, 255, 0.2);
+    }
+    100% {
+        text-shadow: 
+            0 0 10px rgba(255, 255, 255, 1), /* Más brillo al final */
+            0 0 20px rgba(255, 255, 255, 0.8),
+            0 0 30px rgba(255, 255, 255, 0.6),
+            0 0 40px rgba(255, 255, 255, 0.4);
+    }
+}
+
+
+@keyframes twinkle {
+    0% { opacity: 0.5; } /* Opacidad al 50% */
+    100% { opacity: 1; } /* Opacidad al 100% */
+}
+
+@keyframes pulse {
+    0% { transform: translate(-50%, -50%) scale(1); } /* Escala inicial */
+    100% { transform: translate(-50%, -50%) scale(1.05); } /* Escala aumentada */
+}
+
+@keyframes moveStars {
+    0% {
+        background-position: 0 0;
+    }
+    100% {
+        background-position: 0 100%;
+    }
+}
