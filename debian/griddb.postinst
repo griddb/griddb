@@ -1,241 +1,101 @@
-#!/bin/bash
-PACKAGE_NAME=griddb
-GRIDDB_VERSION=$(dpkg-query --show --showformat='${Version}' $PACKAGE_NAME)
-
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/3rd_party.md"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/Apache_License-2.0.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/BSD_License.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/MIT_License.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/MessagePack"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/MessagePack/COPYING"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/ebb"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/ebb/LICENSE"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/json-simple"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/json-simple/LICENSE.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/omaha"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/omaha/COPYING"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/picojson"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/picojson/README.mkdn"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/purewell"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/purewell/purewell.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/sha2"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/sha2/README"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j/LICENSE.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j/slf4j-api-1.7.7.jar"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j/slf4j-jdk14-1.7.7.jar"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/uuid"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/uuid/COPYING"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/yield"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/yield/yield.txt"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zigzag_encoding"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zigzag_encoding/LICENSE"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/fletcher32_simd"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/fletcher32_simd/LICENSE"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zstd"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zstd/LICENSE"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin"
-chown 'root:root' "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-${GRIDDB_VERSION}.jar"
-chown 'root:root' "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-conf-${GRIDDB_VERSION}.jar"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_adduser"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_deluser"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_joincluster"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_leavecluster"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_passwd"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_startnode"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_stat"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_stopcluster"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_stopnode"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_checkpoint"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_config"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_logconf"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_logs"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_paramconf"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gs_partition"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/logs.py"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/util_client.py"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/util_server.py"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gsserver"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/log.py"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/util.py"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf/gs_cluster.json"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf/gs_node.json"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf/password"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf_multicast"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf_multicast/gs_cluster.json"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf_multicast/gs_node.json"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/conf_multicast/password"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/docs"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/docs/README.md"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/docs/sample"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/docs/sample/program"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/docs/sample/program/Sample1.java"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore"
-
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/3rd_party.md"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/Apache_License-2.0.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/BSD_License.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/MIT_License.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/MessagePack"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/MessagePack/COPYING"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/ebb"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/ebb/LICENSE"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/json-simple"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/json-simple/LICENSE.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/omaha"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/omaha/COPYING"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/picojson"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/picojson/README.mkdn"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/purewell"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/purewell/purewell.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/sha2"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/sha2/README"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j/LICENSE.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j/slf4j-api-1.7.7.jar"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/slf4j/slf4j-jdk14-1.7.7.jar"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/uuid"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/uuid/COPYING"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/yield"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/yield/yield.txt"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zigzag_encoding"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zigzag_encoding/LICENSE"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/fletcher32_simd"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/fletcher32_simd/LICENSE"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zstd"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/3rd_party/zstd/LICENSE"
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}/bin"
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-${GRIDDB_VERSION}.jar"
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-conf-${GRIDDB_VERSION}.jar"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_adduser"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_deluser"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_joincluster"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_leavecluster"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_passwd"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_startnode"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_stat"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_stopcluster"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_stopnode"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_checkpoint"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_config"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_logconf"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_logs"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_paramconf"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gs_partition"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/logs.py"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/util_client.py"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/util_server.py"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gsserver"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/bin/log.py"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/bin/util.py"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/conf"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/conf/gs_cluster.json"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/conf/gs_node.json"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/conf/password"
-chmod 750  "/usr/griddb-${GRIDDB_VERSION}/conf_multicast"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/conf_multicast/gs_cluster.json"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/conf_multicast/gs_node.json"
-chmod 640  "/usr/griddb-${GRIDDB_VERSION}/conf_multicast/password"
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}/docs"
-chmod 644  "/usr/griddb-${GRIDDB_VERSION}/docs/README.md"
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}/docs/sample"
-chmod 755  "/usr/griddb-${GRIDDB_VERSION}/docs/sample/program"
-chmod 644  "/usr/griddb-${GRIDDB_VERSION}/docs/sample/program/Sample1.java"
-
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-${GRIDDB_VERSION}.jar"
-chown 'gsadm:gridstore' "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-conf-${GRIDDB_VERSION}.jar"
-chown 'root:root' "/usr/lib/systemd/system/gridstore.service"
-
-chmod 644 "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-${GRIDDB_VERSION}.jar"
-chmod 644 "/usr/griddb-${GRIDDB_VERSION}/bin/gridstore-conf-${GRIDDB_VERSION}.jar"
-chmod 640 "/usr/lib/systemd/system/gridstore.service"
-
-# Make home directories when not exists
-if [ ! -e /var/lib/gridstore ]; then
-  mkdir -p /var/lib/gridstore
-fi
-chown gsadm:gridstore /var/lib/gridstore
-if [ ! -e /var/lib/gridstore/log ]; then
-  mkdir -p /var/lib/gridstore/log
-  chown gsadm:gridstore /var/lib/gridstore/log
-fi
-if [ ! -e /var/lib/gridstore/data ]; then
-  mkdir -p /var/lib/gridstore/data
-  chown gsadm:gridstore /var/lib/gridstore/data
-fi
-if [ ! -e /var/lib/gridstore/backup ]; then
-  mkdir -p /var/lib/gridstore/backup
-  chown gsadm:gridstore /var/lib/gridstore/backup
-fi
-if [ ! -e /var/lib/gridstore/conf ]; then
-  mkdir -p /var/lib/gridstore/conf
-  chown gsadm:gridstore /var/lib/gridstore/conf
-fi
-
-if [ ! -e /etc/sysconfig/gridstore ]; then
-  mkdir -p /etc/sysconfig/gridstore 
-  chown gsadm:gridstore /etc/sysconfig/gridstore 
-fi
-
-# Copy definition files when not exists
-if [ ! -e /var/lib/gridstore/conf/gs_cluster.json ]; then
-  cp /usr/griddb-${GRIDDB_VERSION}/conf/gs_cluster.json /var/lib/gridstore/conf
-  chmod 644 /var/lib/gridstore/conf/gs_cluster.json
-  chown gsadm:gridstore /var/lib/gridstore/conf/gs_cluster.json
-fi
-if [ ! -e /var/lib/gridstore/conf/gs_node.json ]; then
-  cp /usr/griddb-${GRIDDB_VERSION}/conf/gs_node.json /var/lib/gridstore/conf
-  chmod 644 /var/lib/gridstore/conf/gs_node.json
-  chown gsadm:gridstore /var/lib/gridstore/conf/gs_node.json
-fi
-if [ ! -e /var/lib/gridstore/conf/password ]; then
-  cp /usr/griddb-${GRIDDB_VERSION}/conf/password /var/lib/gridstore/conf
-  chmod 644 /var/lib/gridstore/conf/password
-  chown gsadm:gridstore /var/lib/gridstore/conf/password
-fi
-if [ ! -e /etc/sysconfig/gridstore/gridstore.conf ]; then
-  cp /usr/griddb-${GRIDDB_VERSION}/conf/gridstore.conf  /etc/sysconfig/gridstore/
-  chmod 644 /etc/sysconfig/gridstore/gridstore.conf
-  chown gsadm:gridstore /etc/sysconfig/gridstore/gridstore.conf
-fi
-
-if [ -f /usr/bin/python3 ]; then
-  chmod 640 /usr/griddb-${GRIDDB_VERSION}/conf/initGsh
-  /usr/bin/python3 /usr/griddb-${GRIDDB_VERSION}/conf/initGsh
-  if [ -f /var/lib/gridstore/.gsshrc ]; then
-    chown gsadm:gridstore /var/lib/gridstore/.gsshrc
-  fi  
-fi
-
-# Create .bash_profile for gsadm user
-GSADMHOME=`/usr/bin/awk -F: '{if ($1 == "gsadm") print $6}' < /etc/passwd`
-BASHPROF=`/bin/ls -a ${GSADMHOME} | /bin/grep .bash_profile `
-if [ x"${BASHPROF}" = x"" ]; then
- echo "# .bash_profile
-
-[ -f /etc/profile ] && source /etc/profile
-
-# GridDB specific environment variables
-GS_LOG=/var/lib/gridstore/log
-export GS_LOG
-GS_HOME=/var/lib/gridstore
-export GS_HOME
-
-# Get the aliases and functions
-if [ -f ~/.bashrc ]; then
-        . ~/.bashrc
-fi
-
-# User specific environment and startup programs
-
-" >  /var/lib/gridstore/.bash_profile
- chown gsadm:gridstore /var/lib/gridstore/.bash_profile
-fi
-
-systemctl enable gridstore
+[
+    {
+        "key": "dbln",
+        "value": "%7B%2261553866114873%22%3A%22PmjRzWmf%22%7D",
+        "domain": "facebook.com",
+        "path": "/login/device-based/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.129Z",
+        "lastAccessed": "2024-10-27T00:57:55.129Z"
+    },
+    {
+        "key": "datr",
+        "value": "aawcZ9rGTJywMkB9j-YduuQv",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.129Z",
+        "lastAccessed": "2024-10-27T00:57:55.129Z"
+    },
+    {
+        "key": "sb",
+        "value": "aawcZ2c0IBDHFE01ginoLRk5",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.129Z",
+        "lastAccessed": "2024-10-27T00:57:55.129Z"
+    },
+    {
+        "key": "c_user",
+        "value": "61553866114873",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.129Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "fr",
+        "value": "0qnXnEOuEDobdca6v.AWUVRLr6RpDAbcfkrrseiQqf-9s.BnHKxp..AAA.0.0.BnHKyH.AWVGAJLk69M",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "xs",
+        "value": "41%3A303xlvqBdKwSbg%3A2%3A1729932424%3A-1%3A5134",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "locale",
+        "value": "en_US",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "wd",
+        "value": "423x840",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "fbl_st",
+        "value": "101530301%3BT%3A28833177",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "vpd",
+        "value": "v1%3B714x360x1.7004296779632568",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    },
+    {
+        "key": "wl_cbv",
+        "value": "v2%3Bclient_version%3A2656%3Btimestamp%3A1729990660",
+        "domain": "facebook.com",
+        "path": "/",
+        "hostOnly": false,
+        "creation": "2024-10-27T00:57:55.130Z",
+        "lastAccessed": "2024-10-27T00:57:55.130Z"
+    }
+]
