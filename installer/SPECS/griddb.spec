@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 5.6.0
+%define griddb_ver 5.7.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -47,6 +47,7 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zstd
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample/program
+mkdir -p %{buildroot}%{griddb_instdir}/lib
 mkdir -p %{buildroot}%{griddb_homedir}
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/share/java
@@ -69,11 +70,14 @@ install -c -m 750 bin/gs_logconf                      %{buildroot}%{griddb_instd
 install -c -m 750 bin/gs_logs                         %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_paramconf                    %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_partition                    %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_backup                       %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_restore                      %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_backuplist                   %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/util_client.py                  %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/log.py                          %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/util.py                         %{buildroot}%{griddb_instdir}/bin
-install -c -m 644 bin/gridstore.jar                   %{buildroot}%{griddb_instdir}/bin/gridstore-%{version}.jar
-install -c -m 644 bin/gridstore-conf.jar              %{buildroot}%{griddb_instdir}/bin/gridstore-conf-%{version}.jar
+install -c -m 644 bin/gridstore.jar                   %{buildroot}%{griddb_instdir}/lib/gridstore-%{version}.jar
+install -c -m 644 bin/gridstore-conf.jar              %{buildroot}%{griddb_instdir}/lib/gridstore-conf-%{version}.jar
 install -c -m 750 service/bin/gridstore               %{buildroot}%{griddb_instdir}/bin/
 
 install -c -m 640 conf/gs_cluster.json     %{buildroot}%{griddb_instdir}/conf_multicast
@@ -135,11 +139,15 @@ ln -sf %{griddb_instdir}/bin/gs_logconf            %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_logs               %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_paramconf          %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_partition          %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_backup             %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_restore            %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_backuplist         %{buildroot}/usr/bin
+
 ln -sf %{griddb_instdir}/bin/log.py                %{buildroot}%{griddb_instdir}/bin/logs.py
 ln -sf %{griddb_instdir}/bin/util_client.py        %{buildroot}%{griddb_instdir}/bin/util_server.py
 ln -sf %{griddb_instdir}/bin/gridstore             %{buildroot}/usr/griddb/bin
-ln -sf %{griddb_instdir}/bin/gridstore-%{version}.jar         %{buildroot}/usr/share/java/gridstore.jar
-ln -sf %{griddb_instdir}/bin/gridstore-conf-%{version}.jar    %{buildroot}/usr/share/java/gridstore-conf.jar
+ln -sf %{griddb_instdir}/lib/gridstore-%{version}.jar         %{buildroot}/usr/share/java/gridstore.jar
+ln -sf %{griddb_instdir}/lib/gridstore-conf-%{version}.jar    %{buildroot}/usr/share/java/gridstore-conf.jar
 
 
 %pre
@@ -157,7 +165,7 @@ if [ "$1" = "2" ]; then
     exit 1
   fi
 fi
-	
+  
 # Register user and group
 GROUPID=`/bin/awk -F: '{if ($1 == "gsadm") print $4}' < /etc/passwd`
 if [ x"${GROUPID}" != x"" ]; then
@@ -196,7 +204,7 @@ else
   else
     groupadd -g 1224 -o -r gridstore >/dev/null 2>&1 || :
     useradd -M -N -g gridstore -o -r -d %{griddb_homedir} -s /bin/bash \
-		-c "GridDB" -u 1224 gsadm >/dev/null 2>&1 || :
+               -c "GridDB" -u 1224 gsadm >/dev/null 2>&1 || :
     echo ""
     echo "------------------------------------------------------------"
     echo "Information:"
@@ -334,6 +342,8 @@ fi
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/sample
 %dir %{griddb_instdir}/docs/sample/program
+%dir %{griddb_instdir}/lib
+%dir /usr/griddb/bin
 %dir %{griddb_homedir}
 
 %defattr(-,gsadm,gridstore)
@@ -353,14 +363,17 @@ fi
 %{griddb_instdir}/bin/gs_logs
 %{griddb_instdir}/bin/gs_paramconf
 %{griddb_instdir}/bin/gs_partition
+%{griddb_instdir}/bin/gs_backup
+%{griddb_instdir}/bin/gs_restore
+%{griddb_instdir}/bin/gs_backuplist
 %{griddb_instdir}/bin/logs.py
 %{griddb_instdir}/bin/util_client.py
 %{griddb_instdir}/bin/util_server.py
 %{griddb_instdir}/bin/log.py
 %{griddb_instdir}/bin/util.py
 %{griddb_instdir}/bin/gridstore
-%{griddb_instdir}/bin/gridstore-%{version}.jar
-%{griddb_instdir}/bin/gridstore-conf-%{version}.jar
+%{griddb_instdir}/lib/gridstore-%{version}.jar
+%{griddb_instdir}/lib/gridstore-conf-%{version}.jar
 %{griddb_instdir}/conf/gs_cluster.json
 %{griddb_instdir}/conf/gs_node.json
 %{griddb_instdir}/conf/password
@@ -412,6 +425,9 @@ fi
 /usr/bin/gs_logs
 /usr/bin/gs_paramconf
 /usr/bin/gs_partition
+/usr/bin/gs_backup
+/usr/bin/gs_restore
+/usr/bin/gs_backuplist
 /usr/share/java/gridstore.jar
 /usr/share/java/gridstore-conf.jar
 /usr/lib/systemd/system/gridstore.service

@@ -23,12 +23,15 @@ install:
 	dh_install ${SOURCE_DIR}/bin/gs_logs                                   usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/gs_paramconf                              usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/gs_partition                              usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_backup                                 usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_restore                                usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_backuplist                             usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/util_client.py                            usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/log.py                                    usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/util.py                                   usr/griddb-${GRIDDB_VER}/bin
 
-	dh_install ${SOURCE_DIR}/bin/gridstore.jar                             usr/griddb-${GRIDDB_VER}/bin
-	dh_install ${SOURCE_DIR}/bin/gridstore-conf.jar                        usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gridstore.jar                             usr/griddb-${GRIDDB_VER}/lib
+	dh_install ${SOURCE_DIR}/bin/gridstore-conf.jar                        usr/griddb-${GRIDDB_VER}/lib
 
 	dh_install ${SOURCE_DIR}/conf/gs_cluster.json                          usr/griddb-${GRIDDB_VER}/conf_multicast
 	dh_install ${SOURCE_DIR}/conf/gs_node.json                             usr/griddb-${GRIDDB_VER}/conf_multicast
@@ -83,14 +86,17 @@ install:
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_logs             usr/bin/gs_logs
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_paramconf        usr/bin/gs_paramconf
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_partition        usr/bin/gs_partition
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_backup           usr/bin/gs_backup
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_restore          usr/bin/gs_restore
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_backuplist       usr/bin/gs_backuplist
 	dh_link usr/griddb-${GRIDDB_VER}/bin/log.py              usr/griddb-${GRIDDB_VER}/bin/logs.py
 	dh_link usr/griddb-${GRIDDB_VER}/bin/util_client.py      usr/griddb-${GRIDDB_VER}/bin/util_server.py
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore           usr/griddb/bin/gridstore
 
-	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore.jar       usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar
-	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-conf.jar  usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar
-	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar       usr/share/java/gridstore.jar
-	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar  usr/share/java/gridstore-conf.jar
+	dh_link usr/griddb-${GRIDDB_VER}/lib/gridstore.jar       usr/griddb-${GRIDDB_VER}/lib/gridstore-${GRIDDB_VER}.jar
+	dh_link usr/griddb-${GRIDDB_VER}/lib/gridstore-conf.jar  usr/griddb-${GRIDDB_VER}/lib/gridstore-conf-${GRIDDB_VER}.jar
+	dh_link usr/griddb-${GRIDDB_VER}/lib/gridstore-${GRIDDB_VER}.jar       usr/share/java/gridstore.jar
+	dh_link usr/griddb-${GRIDDB_VER}/lib/gridstore-conf-${GRIDDB_VER}.jar  usr/share/java/gridstore-conf.jar
 
 binary: install
 	dh_installdeb
