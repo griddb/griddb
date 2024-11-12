@@ -12,7 +12,7 @@
 
 ## Quick start (Using source code)
   We have confirmed the operation with Linux(x64).
-  - CentOS 7.9 (gcc 4.8.5), RockyLinux 9.3(gcc 11), Ubuntu 22.04(gcc 11)
+  - Ubuntu 22.04(gcc 11), RockyLinux 9.4(gcc 11)
 
 Note:
 - Please install Python3 in advance.
@@ -60,7 +60,7 @@ Note:
 ## Quick start (Using RPM or DEB)
 
   We have confirmed the operation with Linux(x64).
-  - CentOS 7.9, RockyLinux 9.3, Ubuntu 22.04
+  - Ubuntu 22.04, RockyLinux 9.4
 
 Note:
 - Please install Python3 in advance.
@@ -127,6 +127,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V5.3 Release Notes](docs/GridDB-5.3-CE-RELEASE_NOTES.md)
   - [V5.5 Release Notes](docs/GridDB-5.5-CE-RELEASE_NOTES.md)
   - [V5.6 Release Notes](docs/GridDB-5.6-CE-RELEASE_NOTES.md)
+  - [V5.7 Release Notes](docs/GridDB-5.7-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
