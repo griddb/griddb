@@ -1142,7 +1142,6 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 		if (getAttribute() == CONTAINER_ATTR_SUB) {
 		}
 	}
-
 	checkContainerOption(messageSchema, copyColumnMap, isCompletelySameSchema);
 	bool changeSchemaStatus = false;
 	if (isCompletelySameSchema && !isNullableChange && !isVersionChange) {
@@ -1152,7 +1151,7 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 		schemaState = DataStoreV4::ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE;
 	}
 	else if (isCompletelySameSchema) {
-		schemaState = DataStoreV4::PROPERLY_DIFFERENCE;
+		schemaState = DataStoreV4::PROPERTY_DIFFERENCE;
 		changeSchemaStatus = true;
 	}
 	else if (matchCount == getColumnNum() && posMatchCount == matchCount) {
@@ -1180,6 +1179,7 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 		}
 		messageSchema->setFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
 	}
+
 }
 
 void BaseContainer::validateForRename(TransactionContext &txn,
@@ -1385,6 +1385,79 @@ void BaseContainer::indexInsertImpl(
 	}
 }
 
+bool BaseContainer::checkRowArray(
+		TransactionContext &txn, RowId startRowId, uint32_t limitMillis,
+		util::Stopwatch &watch, RowId &lastRowId,
+		RowArrayCheckerResult &result) {
+	lastRowId = startRowId;
+	const uint64_t suspendLimit = 1000;
+
+	StackAllocAutoPtr<BtreeMap> rowIdMap(
+			txn.getDefaultAllocator(), getRowIdMap(txn));
+
+	uint32_t firstVarColumnNum;
+	uint32_t firstRowFixedColumnSize;
+	result.latestColumnCount_ = getColumnNum();
+	columnSchema_->getFirstSchema(
+			result.initialColumnCount_, firstVarColumnNum, firstRowFixedColumnSize);
+
+	BtreeMap::BtreeCursor btreeCursor;
+	RowArray rowArray(txn, this);
+
+	bool totalSuspended = false;
+	for (;; lastRowId++) {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		util::XArray<OId> oIdList(txn.getDefaultAllocator());
+
+		TermCondition cond(
+				getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::GE, getRowIdColumnId(), &lastRowId,
+				sizeof(lastRowId));
+		BtreeMap::SearchContext sc(
+				txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
+		sc.setSuspendLimit(suspendLimit);
+
+		StackAllocAutoPtr<BtreeMap> rowIdMap(
+			txn.getDefaultAllocator(), getRowIdMap(txn));
+		rowIdMap.get()->search(txn, sc, oIdList, ORDER_UNDEFINED);
+
+		bool checked = false;
+		for (util::XArray<OId>::iterator it = oIdList.begin();
+				it != oIdList.end(); it++) {
+			if (checked && watch.elapsedMillis() > limitMillis) {
+				totalSuspended = true;
+				break;
+			}
+
+			rowArray.load(txn, *it, this, OBJECT_READ_ONLY);
+			rowArray.tail();
+			lastRowId = rowArray.getRowId();
+
+			if (lastRowId < startRowId) {
+				continue;
+			}
+
+			checked = true;
+			result.rowArrayCount_++;
+
+			if (result.initialColumnCount_ == 0 &&
+					rowArray.getColumnNum() != result.latestColumnCount_) {
+				result.columnMismatchCount_++;
+			}
+		}
+
+		if (totalSuspended || !sc.isSuspended()) {
+			break;
+		}
+	}
+
+	if (!totalSuspended) {
+		lastRowId = UNDEF_ROWID;
+	}
+
+	return totalSuspended;
+}
+
 /*!
 	@brief Change new Column layout
 */
@@ -1536,8 +1609,8 @@ void BaseContainer::changeSchemaRecord(TransactionContext &txn,
 				for (uint32_t columnId = 0; columnId < copyColumnMap.size();
 					 columnId++) {
 					uint32_t oldColumnId = copyColumnMap[columnId];
-					ColumnInfo &oldColumnInfo = getColumnInfo(oldColumnId);
 					if (oldColumnId != UNDEF_COLUMNID) {
+						ColumnInfo& oldColumnInfo = getColumnInfo(oldColumnId);
 						row.getFieldImage(txn, oldColumnInfo, columnId,
 							&outputMessageRowStore);
 					}
@@ -1607,8 +1680,8 @@ void BaseContainer::changeSchemaRecord(TransactionContext &txn,
 					for (uint32_t columnId = 0; columnId < copyColumnMap.size();
 						 columnId++) {
 						uint32_t oldColumnId = copyColumnMap[columnId];
-						ColumnInfo &oldColumnInfo = getColumnInfo(oldColumnId);
 						if (oldColumnId != UNDEF_COLUMNID) {
+							ColumnInfo& oldColumnInfo = getColumnInfo(oldColumnId);
 							row.getFieldImage(txn, oldColumnInfo, columnId,
 								&outputMessageRowStore);
 						}
@@ -2295,10 +2368,15 @@ void BaseContainer::updateIndexData(TransactionContext& txn, const IndexData &in
 	indexSchema_->updateIndexData(txn, indexData);
 }
 
-
-void BaseContainer::convertRowArraySchema(TransactionContext &txn, RowArray &rowArray, bool isMvcc) {
+void BaseContainer::convertRowArraySchema(TransactionContext &txn, RowArray &rowArray, bool isMvcc, RowId searchRowId, BtreeMap::SearchContext* sc) {
 	RowId orgRowId = rowArray.getRowId();
 	OId orgOId = rowArray.getBaseOId();
+	RowId currentRowId = UNDEF_ROWID;
+	bool isTail = false;
+	if (searchRowId != UNDEF_ROWID) {
+		currentRowId = rowArray.getRowId();
+		isTail = rowArray.end();
+	}
 	util::XArray<std::pair<RowId, OId> > splitRAList(txn.getDefaultAllocator());
 	util::XArray<std::pair<OId, OId> > moveOIdList(txn.getDefaultAllocator());
 	bool isRelease = rowArray.convertSchema(txn, splitRAList, moveOIdList);
@@ -2316,6 +2394,30 @@ void BaseContainer::convertRowArraySchema(TransactionContext &txn, RowArray &row
 			}
 		}
 		updateValueMaps(txn, moveOIdList);
+	}
+	if (searchRowId != UNDEF_ROWID && splitRAList.size() > 0) {
+		OId afterOId = rowArray.getBaseOId();
+		if (orgOId != afterOId || isTail) {
+			OId targetOId = UNDEF_OID;
+			if (targetOId == UNDEF_OID) {
+				RowId afterRowId = rowArray.getRowId();
+				if (currentRowId != afterRowId || isTail) {
+					assert(sc);
+					StackAllocAutoPtr<BtreeMap> rowIdMap(
+						txn.getDefaultAllocator(), getRowIdMap(txn));
+					util::XArray<OId> oIdList(txn.getDefaultAllocator());
+					rowIdMap.get()->search(txn, *sc, oIdList, ORDER_DESCENDING);
+					if (oIdList.size() > 0) {
+						targetOId = oIdList[0];
+					}
+				}
+			}
+			assert(targetOId != UNDEF_OID);
+			if (targetOId != UNDEF_OID) {
+				rowArray.load(txn, targetOId, this, OBJECT_FOR_UPDATE);
+				rowArray.searchNextRowId(searchRowId);
+			}
+		}
 	}
 }
 

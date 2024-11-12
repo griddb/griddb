@@ -3478,7 +3478,7 @@ inline int32_t BtreeMap::keyCmp(TransactionContext &, ObjectManagerV4 &, Allocat
 
 
 template <typename S>
-bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
+inline bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 	const S *e, BaseIndex::Setting &setting) {
 	UNUSED_VARIABLE(txn);
 	UNUSED_VARIABLE(objectManager);

@@ -22,22 +22,22 @@
 #include "uuid_utils.h"
 
 std::ostream &operator<<(std::ostream &stream, const ClientId &id) {
-	stream << std::hex << static_cast<const uint32_t>(id.uuid_[0])
-		   << static_cast<const uint32_t>(id.uuid_[1])
-		   << static_cast<const uint32_t>(id.uuid_[2])
-		   << static_cast<const uint32_t>(id.uuid_[3]) << "-"
-		   << static_cast<const uint32_t>(id.uuid_[4])
-		   << static_cast<const uint32_t>(id.uuid_[5]) << "-"
-		   << static_cast<const uint32_t>(id.uuid_[6])
-		   << static_cast<const uint32_t>(id.uuid_[7]) << "-"
-		   << static_cast<const uint32_t>(id.uuid_[8])
-		   << static_cast<const uint32_t>(id.uuid_[9]) << "-"
-		   << static_cast<const uint32_t>(id.uuid_[10])
-		   << static_cast<const uint32_t>(id.uuid_[11])
-		   << static_cast<const uint32_t>(id.uuid_[12])
-		   << static_cast<const uint32_t>(id.uuid_[13])
-		   << static_cast<const uint32_t>(id.uuid_[14])
-		   << static_cast<const uint32_t>(id.uuid_[15]) << std::dec << ":"
+	stream << std::hex << static_cast<uint32_t>(id.uuid_[0])
+		   << static_cast<uint32_t>(id.uuid_[1])
+		   << static_cast<uint32_t>(id.uuid_[2])
+		   << static_cast<uint32_t>(id.uuid_[3]) << "-"
+		   << static_cast<uint32_t>(id.uuid_[4])
+		   << static_cast<uint32_t>(id.uuid_[5]) << "-"
+		   << static_cast<uint32_t>(id.uuid_[6])
+		   << static_cast<uint32_t>(id.uuid_[7]) << "-"
+		   << static_cast<uint32_t>(id.uuid_[8])
+		   << static_cast<uint32_t>(id.uuid_[9]) << "-"
+		   << static_cast<uint32_t>(id.uuid_[10])
+		   << static_cast<uint32_t>(id.uuid_[11])
+		   << static_cast<uint32_t>(id.uuid_[12])
+		   << static_cast<uint32_t>(id.uuid_[13])
+		   << static_cast<uint32_t>(id.uuid_[14])
+		   << static_cast<uint32_t>(id.uuid_[15]) << std::dec << ":"
 		   << id.sessionId_;
 	return stream;
 }

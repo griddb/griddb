@@ -231,7 +231,7 @@ public:
 	}
 
 	void updateClusterStatus(
-		ClusterStatusTransition status, bool isLeave = false);
+		ClusterStatusTransition status, bool isLeave);
 
 	bool checkRecoveryCompleted() {
 		return (statusInfo_.currentStatus_
@@ -277,6 +277,16 @@ public:
 
 	void setRepairPartition() {
 		clusterInfo_.isRepairPartition_ = true;
+	}
+
+	bool isConfigurationChange() {
+		bool retVal = clusterInfo_.isConfigurationChange_;
+		clusterInfo_.isConfigurationChange_ = false;
+		return retVal;
+	}
+
+	void setConfigurationChange() {
+		clusterInfo_.isConfigurationChange_ = true;
 	}
 
 	bool isAddOrDownNode() {
@@ -1220,6 +1230,47 @@ public:
 		bool isAddNewNode_;
 	};
 
+	class LongtermSyncControlInfo : public ClusterManagerInfo {
+	public:
+		LongtermSyncControlInfo(util::StackAllocator& alloc, NodeId nodeId, PartitionTable* pt)
+			: ClusterManagerInfo(alloc, nodeId), pt_(pt), keepLogInterval_(-1), keepLogLsnDifference_(-1) {}
+
+		LongtermSyncControlInfo(util::StackAllocator& alloc, NodeId nodeId, PartitionTable* pt, int32_t interval, int32_t lsn)
+			: ClusterManagerInfo(alloc, nodeId), pt_(pt), keepLogInterval_(interval), keepLogLsnDifference_(lsn) {}
+
+		bool check() {
+			return true;
+		}
+		
+		PartitionTable::SubPartitionTable& getSubPartitionTable() {
+			return subPartitionTable_;
+		}
+
+		int32_t getKeepLogInterval() {
+			return keepLogInterval_;
+		}
+
+		int32_t getLsnDifference() {
+			return keepLogLsnDifference_;
+		}
+
+		void setKeepLogInterval(int32_t interval) {
+			keepLogInterval_ = interval;
+		}
+		
+		void setKeepLogLsnDifference(int32_t lsn) {
+			keepLogLsnDifference_ = lsn;
+		}
+
+		MSGPACK_DEFINE(subPartitionTable_, keepLogInterval_, keepLogLsnDifference_);
+
+	private:
+		PartitionTable* pt_;
+		PartitionTable::SubPartitionTable subPartitionTable_;
+		int32_t keepLogInterval_;
+		int32_t keepLogLsnDifference_;
+	};
+
 	/*!
 		@brief Represents the information of UpdatePartition event
 	*/
@@ -1416,8 +1467,8 @@ public:
 	void getHeartbeatCheckInfo(
 		HeartbeatCheckInfo& heartbeatCheckInfo);
 
-	void getUpdatePartitionInfo(
-		UpdatePartitionInfo& updatePartitionInfo);
+	bool getUpdatePartitionInfo(
+		UpdatePartitionInfo& updatePartitionInfo, bool &isStablePartition);
 
 	void setUpdatePartitionInfo(
 		UpdatePartitionInfo& updatePartitionInfo);
@@ -1522,6 +1573,8 @@ public:
 	}
 private:
 
+	void updateSecondMasterCore();
+
 	void setClusterName(const std::string& clusterName) {
 		util::LockGuard<util::Mutex> lock(clusterLock_);
 		clusterInfo_.clusterName_ = clusterName;
@@ -1589,11 +1642,9 @@ private:
 
 	void detectMultiMaster();
 
-	void setSecondMaster(
-		NodeAddress& secondMasterNode);
+	void setSecondMaster(NodeAddress& secondMasterNode);
 
-	void updateSecondMaster(
-		NodeId target, int64_t startupTime);
+	void updateSecondMaster(NodeId target, int64_t startupTime);
 
 	void setShutdownPending() {
 		statusInfo_.isShutdownPending_ = true;
@@ -1608,35 +1659,33 @@ private:
 
 		ClusterConfig(const ConfigTable& config) {
 			heartbeatInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_CS_HEARTBEAT_INTERVAL));
+				config.get<int32_t>(CONFIG_TABLE_CS_HEARTBEAT_INTERVAL));
 
 			notifyClusterInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_CS_NOTIFICATION_INTERVAL));
+				config.get<int32_t>(CONFIG_TABLE_CS_NOTIFICATION_INTERVAL));
+
+			notifyClusterInitialInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
+				config.get<int32_t>(CONFIG_TABLE_CS_NOTIFICATION_INITIAL_INTERVAL));
 
 			notifyClientInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_TXN_NOTIFICATION_INTERVAL));
+				config.get<int32_t>(CONFIG_TABLE_TXN_NOTIFICATION_INTERVAL));
 
 			checkLoadBalanceInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_CS_LOADBALANCE_CHECK_INTERVAL));
+				config.get<int32_t>(CONFIG_TABLE_CS_LOADBALANCE_CHECK_INTERVAL));
 
 			shortTermTimeoutInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL));
+				config.get<int32_t>(CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL));
 
 			blockClearInterval_ = DEFAULT_CLEAR_BLOCK_INTERVAL;
-
-			ruleLimitInterval_
-				= shortTermTimeoutInterval_ + heartbeatInterval_ * 2;
-			checkDropInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_CS_DROP_CHECK_INTERVAL));
-
-			abnormalAutoShutdown_ = config.get<bool>(
-				CONFIG_TABLE_CS_ABNORMAL_AUTO_SHUTDOWN);
+			int32_t ruleLimitInterval = config.get<int32_t>(CONFIG_TABLE_CS_CHECK_RULE_INTERVAL);
+			if (ruleLimitInterval == -1) {
+				ruleLimitInterval_ = shortTermTimeoutInterval_ + heartbeatInterval_ * 2;
+			}
+			else {
+				setRuleLimitInterval(ruleLimitInterval);
+			}
+			setCheckDropInterval(config.get<int32_t>(CONFIG_TABLE_CS_DROP_CHECK_INTERVAL));
+			abnormalAutoShutdown_ = config.get<bool>(CONFIG_TABLE_CS_ABNORMAL_AUTO_SHUTDOWN);
 		}
 
 		int32_t getHeartbeatInterval() const {
@@ -1645,6 +1694,10 @@ private:
 
 		int32_t getNotifyClusterInterval() const {
 			return notifyClusterInterval_;
+		}
+
+		int32_t getNotifyClusterInitialInterval() const {
+			return notifyClusterInitialInterval_;
 		}
 
 		int32_t getNotifyClientInterval() const {
@@ -1660,7 +1713,7 @@ private:
 		}
 
 		void setCheckDropInterval(int32_t interval) {
-			checkDropInterval_ = interval;
+			checkDropInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
 		}
 
 		const std::string getSetClusterName() const {
@@ -1689,12 +1742,7 @@ private:
 		}
 
 		void setRuleLimitInterval(int32_t interval) {
-			if (interval * 1000 > INT32_MAX) {
-				ruleLimitInterval_ = INT32_MAX;
-			}
-			else {
-				ruleLimitInterval_ = interval * 1000;
-			}
+			ruleLimitInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
 		}
 
 		int32_t getRuleLimitInterval() {
@@ -1717,6 +1765,7 @@ private:
 		int32_t checkDropInterval_;
 		std::string setClusterName_;
 		bool abnormalAutoShutdown_;
+		int32_t notifyClusterInitialInterval_;
 	};
 
 	/*!
@@ -1811,7 +1860,9 @@ public:
 			isRepairPartition_(false),
 			pt_(pt),
 			isAddOrDownNode_(false),
-			mode_(NOTIFICATION_MULTICAST) {
+			mode_(NOTIFICATION_MULTICAST),
+			isConfigurationChange_(false)
+		{
 		}
 
 		bool isStable() {
@@ -1835,7 +1886,6 @@ public:
 			isAutoGoal_ = true;
 			isUpdatePartition_ = false;
 			isRepairPartition_ = false;
-			downNodeList_.clear();
 			isInitialCluster_ = true;
 			isAddOrDownNode_ = false;
 		}
@@ -1862,10 +1912,10 @@ public:
 		bool isUpdatePartition_;
 		bool isRepairPartition_;
 		PartitionTable* pt_;
-		std::set<NodeId> downNodeList_;
 		NodeAddress partition0NodeAddr_;  
 		bool isAddOrDownNode_;
 		ClusterNotificationMode mode_;
+		bool isConfigurationChange_;
 	};
 
 	ClusterInfo& getClusterInfo() {
@@ -1876,6 +1926,12 @@ public:
 		util::StackAllocator& alloc, PartitionTable::TableType tableType);
 
 private:
+
+	void clearSecondMaster() {
+		clusterInfo_.secondMasterNodeId_ = UNDEF_NODEID;
+		clusterInfo_.secondMasterStartupTime_ = 0;
+		clusterInfo_.secondMasterNodeAddress_.clear();
+	}
 
 	void setupPartitionContext(PartitionTable::PartitionContext& context);
 
@@ -1969,6 +2025,7 @@ private:
 	int64_t expectedCheckTime_;
 	StandbyInfo standbyInfo_;
 	CheckpointService* cpSvc_;
+	ManagerSet* mgrSet_;
 };
 
 template <class T>

@@ -35,7 +35,7 @@ const uint64_t VAR_SIZE_8BYTE_THRESHOLD = UINT64_C(1) << 62;
 
 const uint32_t NEXT_OBJECT_LINK_INFO_SIZE = 8;  
 const uint32_t LINK_VARIABLE_COLUMN_DATA_SIZE =
-	static_cast<const uint32_t>(sizeof(uint32_t) + sizeof(uint64_t));  
+	static_cast<uint32_t>(sizeof(uint32_t) + sizeof(uint64_t));  
 const uint32_t AFFINITY_STRING_MAX_LENGTH =
 	8;  
 const char *const DEFAULT_AFFINITY_STRING =
@@ -719,7 +719,7 @@ enum class PutStatus {
 	NOT_EXECUTED,
 	CREATE,
 	UPDATE,
-	CHANGE_PROPERLY,
+	CHANGE_PROPERTY,
 };
 
 enum DSOperationType {

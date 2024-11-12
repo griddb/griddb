@@ -112,6 +112,70 @@ public:
 		const std::string &recoveryTargetPartition, bool forLongArchive);
 
 	/*!
+		@brief リカバリターゲットリストからPGIDを1つ取得
+		@note リカバリターゲットリストが空ならUNDEF_PARTITIONGROUPIDを返す
+		@note 関数内部で排他する
+	*/
+	PartitionGroupId nextRecoveryTargetPartitionGroup();
+
+	/*!
+		@brief 並列リカバリ準備完了チェック
+		@note 準備完了したらtrue
+		@note id>0のリカバリ処理ワーカスレッドは、準備完了を待って開始する
+	*/
+	bool isParallelRecoveryReady() {
+		return parallelRecoveryReady_;
+	}
+
+	/*!
+		@brief 並列リカバリ準備完了フラグを立てる
+		@note false->trueのみ
+	*/
+	void setParallelRecoveryReady() {
+		parallelRecoveryReady_ = true;
+	}
+
+	/*!
+		@brief リカバリエラー発生チェック
+		@note リカバリエラーが発生していたらtrue
+		@note 呼び出し側は、リカバリエラーが発生していたら速やかに中断
+	*/
+	bool isErrorOccured() {
+		return recoveryErrorOccured_;
+	}
+
+	/*!
+		@brief リカバリエラー発生フラグを立てる
+		@note 起動失敗なので復帰手段はなし
+	*/
+	void setErrorOccured() {
+		recoveryErrorOccured_ = true;
+	}
+
+	/*!
+		@brief 並列リカバリ中のバッファ再配分
+		@note 内部で排他
+	*/
+	void adjustMemory(PartitionId pId, int32_t workerId);
+
+	/*!
+		@brief リカバリ完了パーティション数を+1
+		@note atomic変数使用で複数スレッドからのコールに対応
+	*/
+	void incrementRecoverdPartitionCount() {
+		const uint32_t partitionCount = pgConfig_.getPartitionCount();
+		++recoverdPartitionCount_;
+		progressPercent_ = static_cast<uint32_t>(
+					(recoverdPartitionCount_ + 1.0) / partitionCount * 90);
+	}
+
+	/*!
+		@brief 進捗表示
+		@note 内部で排他
+	*/
+	void displayRecoveryProgress();
+
+	/*!
 		@brief リカバリ進捗率取得
 		@note 内部は0-100(%)。返すのはdouble(0.00 - 1.00)
 	*/
@@ -243,6 +307,44 @@ public:
 
 private:
 	/*!
+			@brief Thread for RecoveryWorker
+	 */
+	class RecoveryWorkerThread : public util::Thread {
+	public:
+		RecoveryWorkerThread(
+				RecoveryManager *recoveryManager,
+				int32_t id,
+				bool enabled,
+				PartitionGroupConfig& pgConfig,
+				PartitionList *partitionList,
+				bool releaseUnusedFileBlocks,
+				ClusterSnapshotRestoreInfo& csRestoreInfo);
+
+		bool isEnabled() const;
+		void initialize();
+
+		void tryStart();
+		virtual void run();
+
+		void shutdown();
+		void waitForShutdown();
+
+	private:
+		virtual void start(
+			util::ThreadRunner *runner = NULL,
+			const util::ThreadAttribute *attr = NULL);
+
+		RecoveryManager *recoveryMgr_;
+		int32_t workerId_;
+		volatile bool runnable_;
+		const bool enabled_;
+		PartitionGroupConfig pgConfig_;
+		PartitionList *partitionList_;
+		bool releaseUnusedFileBlocks_;
+		ClusterSnapshotRestoreInfo& clusterSnapshotRestoreInfo_;
+	};
+
+	/*!
 		@brief Check restore files.
 	*/
 	void checkRestoreFile();
@@ -283,6 +385,11 @@ private:
 	std::vector<PartitionId> recoveryPartitionId_;
 	bool recoveryTargetPartitionMode_;
 
+	int32_t recoveryConcurrency_;
+	util::Atomic<bool> parallelRecoveryReady_;
+	util::Atomic<bool> recoveryErrorOccured_;
+	util::Atomic<uint32_t> recoverdPartitionCount_;
+
 	bool releaseUnusedFileBlocks_;
 
 	std::vector<PartitionId> syncChunkPId_;
@@ -294,6 +401,12 @@ private:
 	SystemService *sysSvc_;
 	TransactionManager *txnMgr_;
 	PartitionList *partitionList_;
+
+	std::vector<RecoveryWorkerThread*> recoveryWorkerThreadList_;
+	std::deque<PartitionGroupId> recoveryTargetPartitionGroupList_;
+	util::Mutex targetListMutex_;  
+	util::Mutex redistibuteMutex_;  
+	util::Mutex displayMutex_;  
 };
 
 #endif 

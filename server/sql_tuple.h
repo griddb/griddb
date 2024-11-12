@@ -28,11 +28,6 @@
 #include "sql_common.h"
 
 
-
-
-
-
-
 class LocalTempStore;
 class ResourceGroup;
 class TupleList {
@@ -1004,7 +999,6 @@ public:
 
 	static const uint32_t CONTIGUOUS_BLOCK_THRESHOLD = 1;
 
-	Writer();
 
 	explicit Writer(TupleList &tupleList);
 
@@ -1188,7 +1182,7 @@ public:
 
 	static const BlockId UNDEF_BLOCKID;
 
-	Reader();
+
 	Reader(TupleList &tupleList, AccessOrder order);
 	Reader(TupleList &tupleList, const TupleList::Reader::Image &image);
 	~Reader();
@@ -1252,7 +1246,7 @@ private:
 		void* addr_;    
 	};
 
-	typedef std::deque< LatchedBlockInfo, util::StdAllocator<
+	typedef util::Deque< LatchedBlockInfo, util::StdAllocator<
 	  LatchedBlockInfo, LocalTempStore::LTSVariableSizeAllocator> > LatchedBlockInfoList;
 
 	Reader(const Reader&);

@@ -715,6 +715,7 @@ void TimeSeries::updateRow(TransactionContext &txn, uint32_t rowSize,
 		searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 		if (!oIdList.empty()) {
 			RowArray rowArray(txn, this);
+
 			bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
 			if (isOldSchema) {
 				RowScope rowScope(*this, TO_NORMAL);
@@ -1773,7 +1774,11 @@ void TimeSeries::putRowInternal(
 		}
 		if (isOldSchema) {
 			RowScope rowScope(*this, TO_NORMAL);
-			convertRowArraySchema(txn, rowArray, false); 
+			TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::LE, getRowIdColumnId(), &rowKey,
+				sizeof(rowKey));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 1);
+			convertRowArraySchema(txn, rowArray, false, rowKey, &sc);
 		}
 	}
 	if (mode == UNDEFINED_STATUS) {
@@ -1797,7 +1802,7 @@ void TimeSeries::putRowInternal(
 			}
 			if (isOldSchema) {
 				RowScope rowScope(*this, TO_NORMAL);
-				convertRowArraySchema(txn, rowArray, false); 
+				convertRowArraySchema(txn, rowArray, false, rowKey, &sc); 
 			}
 		}
 		else {
@@ -2519,8 +2524,8 @@ void TimeSeries::getContainerOptionInfo(
 		reinterpret_cast<uint8_t *>(&compressionInfoNum), sizeof(uint32_t));
 }
 
-util::String TimeSeries::getBibContainerOptionInfo(TransactionContext &) {
-	return "";
+util::String TimeSeries::getBibContainerOptionInfo(TransactionContext &txn) {
+	return util::String("", txn.getDefaultAllocator());
 }
 
 void TimeSeries::checkContainerOption(

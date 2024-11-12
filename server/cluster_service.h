@@ -582,6 +582,7 @@ class TimerNotifyClusterHandler : public ClusterHandler {
 public:
 	TimerNotifyClusterHandler() {}
 	void operator()(EventContext& ec, Event& ev);
+	void execute(EventContext& ec, Event& ev);
 
 private:
 	bool doProviderEvent(EventContext& ec, Event& ev);
@@ -790,7 +791,6 @@ private:
 	TimerCheckClusterHandler timerCheckClusterHandler_;
 	TimerNotifyClusterHandler timerNotifyClusterHandler_;
 	TimerNotifyClientHandler timerNotifyClientHandler_;
-
 	SQLTimerNotifyClientHandler timerSQLNotifyClientHandler_;
 	TimerRequestSQLCheckTimeoutHandler timerRequestSQLCheckTimeoutHandler_;
 	NewSQLPartitionRefreshHandler newSQLPartitionRefreshHandler_;
@@ -944,14 +944,16 @@ struct ClusterOptionalInfo {
 	static const int32_t SSL_ADDRESS_LIST = 5;
 	static const int32_t STABLE_GOAL = 6;
 	static const int32_t STANDBY_MODE = 7;
-	static const int32_t PARAM_MAX = 8;
+	static const int32_t START_LSN_LIST = 8;
+	static const int32_t PARAM_MAX = 9;
 
 	static const int8_t INACTIVE = 0;
 	static const int8_t ACTIVE = 1;
 
 	ClusterOptionalInfo(util::StackAllocator& alloc, PartitionTable* pt) :
 		alloc_(alloc), setList_(PARAM_MAX, INACTIVE, alloc), pt_(pt),
-		dropPartitionNodeInfo_(alloc), ssl_port_(UNDEF_SSL_PORT), stableGoalValue_(-1), standbyMode_(false) {
+		dropPartitionNodeInfo_(alloc), ssl_port_(UNDEF_SSL_PORT), stableGoalValue_(-1),
+		standbyMode_(false) {
 	}
 
 	bool isActive(int32_t type) {
@@ -1024,6 +1026,17 @@ struct ClusterOptionalInfo {
 		return stableGoalValue_;
 	}
 
+	void setStartLsnList(PartitionTable* pt) {
+		startLsnList_.resize(pt->getPartitionNum());
+		for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
+			startLsnList_[pId] = pt->getStartLSN(pId);
+		}
+	}
+
+	std::vector<LogSequentialNumber>& getStartLsnList() {
+		return startLsnList_;
+	}
+
 	util::StackAllocator& alloc_;
 	util::Vector<uint8_t> setList_;
 	PartitionTable* pt_;
@@ -1035,6 +1048,7 @@ struct ClusterOptionalInfo {
 	std::string stableGoalData_;
 	int64_t stableGoalValue_;
 	bool standbyMode_;
+	std::vector<LogSequentialNumber> startLsnList_;
 };
 
 class EventTracer {

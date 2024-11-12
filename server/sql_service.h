@@ -144,6 +144,8 @@ class SQLRequestHandler : public SQLServiceHandler {
 	}
 
 public:
+	explicit SQLRequestHandler(util::AllocatorLimitter &workMemoryLimitter);
+
 	/*!
 		@brief ステートメント種別
 	*/
@@ -178,6 +180,8 @@ private:
 	void decode(util::ByteStream<util::ArrayInStream>& in,
 		RequestInfo& requestInfo);
 	void replySuccess(Event& ev, NodeDescriptor& nd);
+
+	util::AllocatorLimitter &workMemoryLimitter_;
 };
 
 /*!
@@ -227,6 +231,8 @@ public:
 	static const int32_t SQL_V5_6_MSG_VERSION;
 	static const int32_t SQL_MSG_VERSION;
 	static const bool SQL_MSG_BACKWARD_COMPATIBLE;
+
+	static const int32_t DEFAULT_RESOURCE_CONTROL_LEVEL;
 
 	/*!
 		@brief コンストラクタ
@@ -536,7 +542,45 @@ public:
 		return eventMonitor_;
 	}
 
+	util::AllocatorLimitter* getTotalMemoryLimitter() {
+		return totalMemoryLimitter_;
+	}
+
+	util::AllocatorLimitter& getWorkMemoryLimitter() {
+		return workMemoryLimitter_;
+	}
+
+	bool isFailOnTotalMemoryLimit() {
+		const int32_t level = resolveResourceControlLevel();
+		return failOnTotalMemoryLimit_ && isTotalMemoryLimittable(level);
+	}
+
 private:
+	int32_t resolveResourceControlLevel() {
+		return (resourceControlLevel_ == 0 ?
+				DEFAULT_RESOURCE_CONTROL_LEVEL : resourceControlLevel_);
+	}
+
+	static bool isTotalMemoryLimittable(int32_t resourceControlLevel) {
+		return resourceControlLevel > 1;
+	}
+
+	void setTotalMemoryLimit(uint64_t limit);
+	void setWorkMemoryLimitRate(double rate);
+	void setFailOnTotalMemoryLimit(bool enabled);
+	void setResourceControlLevel(int32_t level);
+
+	void setUpMemoryLimits();
+
+	void applyTotalMemoryLimit();
+	void applyFailOnTotalMemoryLimit();
+
+	size_t resolveTotalMemoryLimit();
+
+	util::AllocatorLimitter* resolveTotalMemoryLimitter();
+
+	static uint64_t doubleToBits(double src);
+	static double bitsToDouble(uint64_t src);
 
 	EventEngine ee_;
 	const EventEngine::Source eeSource_;
@@ -560,6 +604,10 @@ private:
 	util::Atomic <uint64_t> clientSequenceNo_;
 
 	util::Atomic <int64_t> nosqlSyncId_;
+
+	util::AllocatorLimitter *totalMemoryLimitter_;
+	util::AllocatorLimitter workMemoryLimitter_;
+
 	/*!
 		@brief EventEngine config設定
 	*/
@@ -610,6 +658,15 @@ private:
 	int32_t tableSchemaCacheSize_;
 
 	int64_t jobMemoryLimit_;
+
+	uint64_t storeMemoryLimit_;
+	uint64_t workMemoryLimit_;
+
+	util::Atomic<uint64_t> totalMemoryLimit_;
+	util::Atomic<uint64_t> workMemoryLimitRate_;
+	util::Atomic<bool> failOnTotalMemoryLimit_;
+	util::Atomic<int32_t> resourceControlLevel_;
+
 	bool isProfiler_;
 	int32_t checkCounter_;
 
@@ -641,6 +698,13 @@ private:
 		StatUpdator();
 		SQLService* service_;
 	} statUpdator_;
+
+	static class MemoryLimitErrorHandler : public util::AllocationErrorHandler {
+	public:
+		virtual ~MemoryLimitErrorHandler();
+		virtual void operator()(util::Exception &e);
+	} memoryLimitErrorHandler_;
+
 };
 
 

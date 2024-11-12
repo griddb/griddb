@@ -26,6 +26,7 @@
 #include "cluster_event_type.h"
 
 #include "lru_cache.h"
+
 #include <numeric>
 
 typedef int64_t EventMonotonicTime;
@@ -166,6 +167,7 @@ public:
 	}
 
 	static inline std::string getTimeStr(int64_t timeval, bool trim = false) {
+		if (timeval == -1) timeval = 0;
 		util::NormalOStringStream oss;
 		oss.clear();
 		util::DateTime dtime(timeval);
@@ -175,6 +177,9 @@ public:
 
 	static const int32_t secLimit = INT32_MAX / 1000;
 	static inline int32_t changeTimeSecondToMilliSecond(int32_t sec) {
+		if (sec < 0) {
+			return sec;
+		}
 		if (sec > secLimit) {
 			return INT32_MAX;
 		}
@@ -314,7 +319,6 @@ public:
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 #define GS_TRACE_CLUSTER_INFO(s) \
 	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
-
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 typedef std::pair<int32_t, bool> ServiceTypeInfo;

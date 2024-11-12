@@ -514,7 +514,7 @@ void JobManager::cancel(
 Job::Job(JobId& jobId, JobInfo* jobInfo, JobManager* jobManager,
 	SQLVariableSizeGlobalAllocator& globalVarAlloc) :
 	jobManager_(jobManager),
-	jobStackAlloc_(*getStackAllocator()),
+	jobStackAlloc_(*getStackAllocator(NULL)),
 	scope_(NULL),
 	globalVarAlloc_(globalVarAlloc),
 	noCondition_(globalVarAlloc_),
@@ -713,7 +713,10 @@ JobManager::Job::Task::Task(Job* job, TaskInfo* taskInfo) :
 	scanBufferHitCount_(0),
 	scanBufferMissHitCount_(0),
 	scanBufferSwapReadSize_(0),
-	scanBufferSwapWriteSize_(0)
+	scanBufferSwapWriteSize_(0),
+	memoryLimitter_(
+			util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK, "taskLimitter"),
+			job->jobManager_->getSQLService()->getTotalMemoryLimitter())
 {
 	if (taskInfo->inputList_.size() == 0) {
 		immediate_ = true;
@@ -736,8 +739,8 @@ JobManager::Job::Task::Task(Job* job, TaskInfo* taskInfo) :
 		loadBalance_ = job_->getAssignPId();
 	}
 	taskInfo->loadBalance_ = loadBalance_;
-	processorStackAlloc_ = job_->getStackAllocator();
-	processorVarAlloc_ = job_->getLocalVarAllocator();
+	processorStackAlloc_ = job_->getStackAllocator(&memoryLimitter_);
+	processorVarAlloc_ = job_->getLocalVarAllocator(memoryLimitter_);
 	scope_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
 		util::StackAllocator::Scope(*processorStackAlloc_);
 	cxt_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_) SQLContext(
@@ -745,12 +748,15 @@ JobManager::Job::Task::Task(Job* job, TaskInfo* taskInfo) :
 		processorStackAlloc_, processorVarAlloc_, jobManager_->getStore(),
 		jobManager_->getProcessorConfig());
 
-	setupContextBase(cxt_, jobManager_);
+	setupContextBase(cxt_, jobManager_, &memoryLimitter_);
 	setupContextTask();
 	setupProfiler(taskInfo);
 
 	interruptionHandler_.cxt_ = cxt_;
 	cxt_->setInterruptionHandler(&interruptionHandler_);
+
+	memoryLimitter_.setFailOnExcess(
+			job->jobManager_->getSQLService()->isFailOnTotalMemoryLimit());
 }
 
 JobManager::Job::Task::~Task() try
@@ -827,7 +833,7 @@ void Job::encodeProcessor(
 			SQLContext cxt(&globalVarAlloc_, NULL, &alloc,
 				&varAlloc, jobManager_->getStore(),
 				jobManager_->getProcessorConfig());
-			Task::setupContextBase(&cxt, jobManager_);
+			Task::setupContextBase(&cxt, jobManager_, NULL);
 			option.planNodeId_ = static_cast<uint32_t>(pos);
 			SQLProcessor* processor = factory.create(
 				cxt, option, jobInfo->taskInfoList_[pos]->inputTypeList_);
@@ -1163,13 +1169,7 @@ int64_t Job::getVarTotalSize(TaskId taskId, bool isDeploy) {
 }
 
 int64_t Job::Task::getAllocateMemory() {
-	util::AllocatorStats stats;
-	for (size_t i = 0; i < SQLVarSizeAllocator::TraitsType::FIXED_ALLOCATOR_COUNT; i++) {
-		processorVarAlloc_->base(i)->getStats(stats);
-	}
-	processorVarAlloc_->getStats(stats);
-	processorStackAlloc_->getStats(stats);
-	return stats.values_[util::AllocatorStats::STAT_TOTAL_SIZE];
+	return memoryLimitter_.getUsageSize();
 }
 
 bool Job::Task::getProfiler(
@@ -1616,6 +1616,12 @@ bool Job::pipeOrFinish(Task* task, TaskId inputId,
 	JobManager::ControlType controlType, TupleList::Block* block, ChunkBufferStatsSQLScope* scope) {
 	try {
 		SQLContext& cxt = *task->cxt_;
+
+		util::AllocatorLimitter::Scope limitterScope(
+				task->memoryLimitter_, cxt.getEventContext()->getAllocator());
+		util::AllocatorLimitter::Scope varLimitterScope(
+				task->memoryLimitter_, cxt.getEventContext()->getVariableSizeAllocator());
+
 		bool remaining;
 		if (controlType == FW_CONTROL_PIPE) {
 			TRACE_TASK_START(task, inputId, controlType);
@@ -2215,7 +2221,8 @@ void Task::createProcessor(util::StackAllocator& alloc,
 }
 
 void Job::Task::setupContextBase(
-	SQLContext* cxt, JobManager* jobManager) {
+		SQLContext* cxt, JobManager* jobManager,
+		util::AllocatorLimitter *limitter) {
 	cxt->setClusterService(jobManager->getClusterService());
 	cxt->setPartitionTable(jobManager->getPartitionTable());
 	TransactionService* txnSvc = jobManager->getTransactionService();
@@ -2227,6 +2234,7 @@ void Job::Task::setupContextBase(
 	cxt->setPartitionList(jobManager->getExecutionManager()->getManagerSet()->partitionList_);
 	cxt->setExecutionManager(jobManager->getExecutionManager());
 	cxt->setJobManager(jobManager);
+	cxt->setAllocatorLimitter(limitter);
 }
 
 void Job::Task::setupContextTask() {
@@ -3031,6 +3039,46 @@ bool Job::isImmediateReply(EventContext* ec, ServiceType serviceType) {
 		== ec->getWorkerId());
 }
 
+int64_t StatTaskProfilerInfo::getMemoryUse() const {
+	return allocateMemory_;
+}
+
+int64_t StatTaskProfilerInfo::getSqlStoreUse() const {
+	return activeBlockCount_ * LocalTempStore::DEFAULT_BLOCK_SIZE;
+}
+
+int64_t StatTaskProfilerInfo::getDataStoreAccess(
+		SQLExecutionManager &executionManager) const {
+	const uint32_t chunkSize = PartitionList::Config::getChunkSize(
+			*executionManager.getManagerSet()->config_);
+
+	const int64_t accessCount = scanBufferHitCount_ + scanBufferMissHitCount_;
+	return accessCount * chunkSize;
+}
+
+int64_t StatJobProfilerInfo::getMemoryUse() const {
+	return allocateMemory_;
+}
+
+int64_t StatJobProfilerInfo::getSqlStoreUse() const {
+	int64_t value = 0;
+	for (util::Vector<StatTaskProfilerInfo>::const_iterator it = taskProfs_.begin();
+			it != taskProfs_.end(); ++it) {
+		value += it->getSqlStoreUse();
+	}
+	return value;
+}
+
+int64_t StatJobProfilerInfo::getDataStoreAccess(
+		SQLExecutionManager &executionManager) const {
+	int64_t value = 0;
+	for (util::Vector<StatTaskProfilerInfo>::const_iterator it = taskProfs_.begin();
+			it != taskProfs_.end(); ++it) {
+		value += it->getDataStoreAccess(executionManager);
+	}
+	return value;
+}
+
 void TaskProfilerInfo::init(util::StackAllocator& alloc, size_t size, bool enableTimer) {
 	profiler_.rows_ = ALLOC_NEW(alloc) util::Vector<int64_t>(size, 0, alloc);
 	profiler_.customData_ = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
@@ -3143,14 +3191,18 @@ void JobManager::removeExecution(
 	}
 }
 
-util::StackAllocator* Job::getStackAllocator() {
-	return jobManager_->getExecutionManager()->getStackAllocator();
+util::StackAllocator* Job::getStackAllocator(
+		util::AllocatorLimitter *limitter) {
+	return jobManager_->getExecutionManager()->getStackAllocator(limitter);
 }
 
-SQLVarSizeAllocator* Job::getLocalVarAllocator() {
-	return ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
+SQLVarSizeAllocator* Job::getLocalVarAllocator(
+		util::AllocatorLimitter &limitter) {
+	SQLVarSizeAllocator *alloc = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
 		SQLVarSizeAllocator(util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK,
 			"TaskVarAllocator"));
+	alloc->setLimit(util::AllocatorStats::STAT_GROUP_TOTAL_LIMIT, &limitter);
+	return alloc;
 }
 
 void Job::releaseStackAllocator(util::StackAllocator* alloc) {

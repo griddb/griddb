@@ -1394,7 +1394,7 @@ void ParamTable::initializeSchema(const ParamTable &table) {
 
 		Entry &entry = entryMap_.insert(std::pair<ParamId, Entry>(
 				it->first, Entry(alloc_))).first->second;
-		entry = it->second;
+		entry.assign(it->second);
 		entry.value_ = NULL;
 	}
 }
@@ -1569,7 +1569,8 @@ void ParamTable::accept(
 	while (!idSet.empty());
 
 	for (EntryMap::iterator it = tmpMap.begin(); it != tmpMap.end(); ++it) {
-		Entry &entry = entryMap_[it->first];
+		Entry &entry = entryMap_.insert(
+				std::make_pair(it->first, Entry(alloc_))).first->second;
 		ParamValue *&value = entry.value_;
 		UTIL_OBJECT_POOL_DELETE(valuePool_, value);
 		value = it->second.value_;
@@ -1601,6 +1602,32 @@ ParamTable::Entry::Entry(const Allocator &alloc) :
 		referredList_(alloc),
 		group_(false),
 		modified_(false) {
+}
+
+void ParamTable::Entry::assign(const Entry &another) {
+	Allocator alloc = name_.get_allocator();
+
+	parentId_ = another.parentId_;
+	baseId_ = another.baseId_;
+	name_ = another.name_.c_str();
+	assignNameMap(another.subNameMap_, subNameMap_);
+	value_ = another.value_;
+	annotation_ = another.annotation_;
+	handler_ = another.handler_;
+	sourceInfo_ = another.sourceInfo_.c_str();
+	referredList_.assign(
+			another.referredList_.begin(), another.referredList_.end());
+	group_ = another.group_;
+	modified_ = another.modified_;
+}
+
+void ParamTable::Entry::assignNameMap(const NameMap &src, NameMap &dest) {
+	Allocator alloc = dest.get_allocator();
+
+	dest.clear();
+	for (NameMap::const_iterator it = src.begin(); it != src.end(); ++it) {
+		dest.insert(std::make_pair(String(it->first.c_str(), alloc), it->second));
+	}
 }
 
 ParamTable::EntryMapCleaner::EntryMapCleaner(
@@ -1887,6 +1914,7 @@ ConfigTable::Constraint& ConfigTable::Constraint::add(
 			UTIL_OBJECT_POOL_NEW(valuePool_) ParamValue(*filtered, alloc_),
 			valuePool_);
 	CandidateInfo info = { String("", alloc_), paramValue.get(), srcUnit };
+
 	candidateList_.push_back(info);
 	paramValue.release();
 

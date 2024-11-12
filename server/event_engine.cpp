@@ -2442,11 +2442,11 @@ void EventEngine::Listener::run() {
 void EventEngine::Listener::handlePollEvent(
 		util::IOPollBase*, util::IOPollEvent) {
 
-	util::Socket socket;
-	util::SocketAddress address;
-
 	for (;;) {
 		try {
+			util::Socket socket;
+			util::SocketAddress address;
+
 			if (!listenerSocket_.accept(&socket, &address)) {
 				break;
 			}

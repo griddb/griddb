@@ -2987,6 +2987,18 @@ void SQLExecution::assignDistributedTarget(
 	resultSet.setDistributedTargetStatus(uncovered, reduced);
 }
 
+FullContainerKey* SQLExecution::predicateToContainerKeyByTQL(
+		TransactionContext &txn, DataStoreV4 &dataStore,
+		const Query &query, DatabaseId dbId, ContainerId metaContainerId,
+		PartitionId partitionCount, util::String &dbNameStr,
+		bool &fullReduced, PartitionId &reducedPartitionId) {
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	return SQLCompiler::predicateToContainerKeyByTQL(
+			alloc, txn, dataStore, query, dbId, metaContainerId,
+			partitionCount, dbNameStr, fullReduced, reducedPartitionId);
+}
+
 bool SQLExecution::checkJobVersionId(
 		uint8_t versionId, bool isFetch, JobId* jobId) {
 	UNUSED_VARIABLE(jobId);
@@ -3851,11 +3863,19 @@ void SQLExecution::ClientInfo::init(util::StackAllocator& alloc) {
 	connOption_.setHandlingClientId(clientId_);
 }
 
-util::StackAllocator* SQLExecutionManager::getStackAllocator() {
-	util::LockGuard<util::Mutex> guard(stackAllocatorLock_);
-	return ALLOC_VAR_SIZE_NEW(globalVarAlloc_) util::StackAllocator(
-		util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK,
-			"SQLExecutionAllocator"), &fixedAllocator_);
+util::StackAllocator* SQLExecutionManager::getStackAllocator(
+		util::AllocatorLimitter *limitter) {
+	util::StackAllocator *alloc;
+	{
+		util::LockGuard<util::Mutex> guard(stackAllocatorLock_);
+		alloc = ALLOC_VAR_SIZE_NEW(globalVarAlloc_) util::StackAllocator(
+			util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK,
+				"SQLExecutionAllocator"), &fixedAllocator_);
+	}
+	if (limitter != NULL) {
+		alloc->setLimit(util::AllocatorStats::STAT_GROUP_TOTAL_LIMIT, limitter);
+	}
+	return alloc;
 }
 
 void SQLExecutionManager::releaseStackAllocator(util::StackAllocator* alloc) {
@@ -4212,7 +4232,7 @@ uint8_t SQLExecution::SQLExecutionContext::getCurrentJobVersionId() {
 }
 
 util::StackAllocator* SQLExecution::wrapStackAllocator() {
-	return executionManager_->getStackAllocator();
+	return executionManager_->getStackAllocator(NULL);
 }
 
 void SQLExecutionManager::refreshSchemaCache() {

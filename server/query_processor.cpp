@@ -137,12 +137,13 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 	}
 }
 
-void QueryProcessor::executeMetaTQL(
+bool QueryProcessor::executeMetaTQL(
 		TransactionContext &txn, MetaContainer &container,
 		MetaProcessorSource &processorSource, ResultSize limit,
-		const TQLInfo &tqlInfo, ResultSet &resultSet) {
+		const TQLInfo &tqlInfo, ResultSet &resultSet,
+		util::XArray<uint8_t> &suspendedData) {
 	QueryForMetaContainer query(txn, container, tqlInfo, limit, NULL);
-	query.doQuery(txn, processorSource, resultSet);
+	return query.doQuery(txn, processorSource, resultSet, suspendedData);
 }
 
 /*!

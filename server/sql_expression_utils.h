@@ -230,8 +230,10 @@ public:
 	static bool predicateToExtContainerName(
 			SQLValues::ValueContext &cxt, const ExprFactory &factory,
 			const Expression *pred, uint32_t dbNameColumn,
-			uint32_t containerNameColumn, TupleValue *dbName,
-			TupleValue &containerName, bool &placeholderAffected);
+			uint32_t containerNameColumn, uint32_t partitionNameColumn,
+			TupleValue *dbName, TupleValue &containerName,
+			std::pair<TupleValue, TupleValue> *containerNameElems,
+			bool &placeholderAffected);
 	static bool predicateToContainerId(
 			SQLValues::ValueContext &cxt, const ExprFactory &factory,
 			const Expression *pred, uint32_t partitionIdColumn,

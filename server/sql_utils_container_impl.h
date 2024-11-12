@@ -185,6 +185,15 @@ public:
 			DSExpression::Operation opType, uint32_t columnId,
 			const void *value, uint32_t valueSize);
 
+	static FullContainerKey* predicateToContainerKey(
+			SQLValues::ValueContext &cxt, TransactionContext &txn,
+			DataStoreV4 &dataStore, const Expression *pred,
+			const ContainerLocation &location, PartitionId partitionCount,
+			bool forCore, util::String &dbNameStr, bool &fullReduced,
+			PartitionId &reducedPartitionId);
+
+	static ContainerHashMode getDefaultContainerHashMode();
+
 private:
 	enum RowsTargetType {
 		TYPE_NO_ROWS,
@@ -222,9 +231,6 @@ private:
 			const IndexScanInfo &info, SearchResult *&result);
 	bool finishIndexSearch(
 			OpContext &cxt, IndexSearchContext *sc, bool &done);
-
-	ContainerId getNextContainerId() const;
-	void setNextContainerId(ContainerId containerId);
 
 	ContainerRowScanner* tryCreateScanner(
 			OpContext &cxt, const Projection &proj,
@@ -293,18 +299,22 @@ private:
 			const SearchResult &result, ContainerRowScanner &scanner);
 
 	MetaProcessor* prepareMetaProcessor(
-			OpContext &cxt, TransactionContext &txn, ContainerId nextContainerId,
-			const Expression *pred, MetaProcessorSource *&source);
+			OpContext &cxt, TransactionContext &txn, const Expression *pred,
+			MetaProcessorSource *&source);
 	MetaProcessorSource* prepareMetaProcessorSource(
 			OpContext &cxt, TransactionContext &txn, const Expression *pred,
-			const FullContainerKey *&containerKey);
+			const FullContainerKey *&containerKey, bool &fullReduced);
 
-	static FullContainerKey* predicateToContainerKey(
+	static FullContainerKey* predicateToContainerKeySub(
 			SQLValues::ValueContext &cxt, TransactionContext &txn,
 			DataStoreV4 &dataStore, const Expression *pred,
-			const ContainerLocation &location, util::String &dbNameStr);
+			const ContainerLocation &location,
+			const PartitionId *partitionCount, bool forCore,
+			util::String &dbNameStr, bool &fullReduced,
+			PartitionId &reducedPartitionId);
 
-	static const MetaContainerInfo& resolveMetaContainerInfo(ContainerId id);
+	static MetaContainerInfo::CommonColumnInfo resolveMetaContainerInfo(
+			ContainerId id, bool forCore);
 
 	void updateAllContextRef(OpContext &cxt);
 	void clearAllContextRef();
@@ -360,7 +370,7 @@ struct SQLContainerImpl::CursorImpl::Data {
 	Data(SQLValues::VarAllocator &varAlloc, Accessor &accessor);
 
 	uint32_t outIndex_;
-	ContainerId nextContainerId_;
+	MetaProcessor::ScanPosition metaScanPos_;
 
 	int64_t totalSearchCount_;
 	uint64_t lastPartialExecSize_;
@@ -2629,6 +2639,10 @@ struct SQLContainerImpl::TQLTool {
 
 	static SyntaxExpr genConstExpr(
 			util::StackAllocator &alloc, const TupleValue &value);
+
+	static SyntaxExpr exprListToTree(
+			util::StackAllocator &alloc, SQLType::Id type,
+			SyntaxExprRefList &list);
 
 	template<typename T>
 	static SyntaxExprRefList* genExprList(

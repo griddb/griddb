@@ -400,6 +400,9 @@ public:
 	util::TimeZone getTimeZone() const;
 	void setTimeZone(const util::TimeZone &zone);
 
+	util::AllocatorLimitter* getAllocatorLimitter();
+	void setAllocatorLimitter(util::AllocatorLimitter *allocLimitter);
+
 private:
 
 	SQLContext(const SQLContext&);
@@ -442,6 +445,7 @@ private:
 	bool setGroup_;
 	LocalTempStore::GroupId groupId_;
 	bool isAdministrator_;
+	util::AllocatorLimitter *allocLimitter_;
 };
 
 /**
@@ -467,6 +471,7 @@ public:
 	typedef SQLPreparedPlan Plan;
 
 	class Factory;
+	class Holder;
 	class Profiler;
 	class ProfilerManager;
 	struct ValueUtils;
@@ -654,6 +659,20 @@ private:
 	util::AllocUniquePtr<picojson::value> result_;
 	util::AllocUniquePtr<StreamData> streamData_;
 	bool forAnalysis_;
+};
+
+class SQLProcessor::Holder {
+public:
+	explicit Holder(SQLProcessor &processor);
+	~Holder();
+
+	SQLProcessor& get();
+
+private:
+	Holder(const Holder&);
+	Holder& operator=(const Holder&);
+
+	SQLProcessor &processor_;
 };
 
 class SQLProcessor::Profiler::CoderBase {
@@ -857,6 +876,9 @@ private:
 };
 
 struct SQLProcessor::DQLTool {
+public:
+	static bool isDQL(SQLType::Id type);
+
 private:
 	typedef SQLProcessorConfig::Manager::SimulationEntry SimulationEntry;
 
@@ -871,8 +893,6 @@ private:
 			const SimulationEntry &entry, picojson::value &value);
 
 	static void getInterruptionProfile(picojson::value &value);
-
-	static bool isDQL(SQLType::Id type);
 
 	static void customizeDefaultConfig(SQLProcessorConfig &config);
 };

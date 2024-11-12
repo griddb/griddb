@@ -42,7 +42,21 @@ public:
 
 	class RowHandler;
 	class Context;
+	class ScanPosition;
 	struct SQLMetaUtils;
+
+	struct RowSuspendedInfo {
+		RowSuspendedInfo();
+
+		int64_t rowArrayCount_;
+		int64_t columnMismatchCount_;
+	};
+
+	struct Stats {
+		Stats();
+
+		int64_t scannedRowCount_;
+	};
 
 	MetaProcessor(
 			TransactionContext &txn, MetaContainerId id, bool forCore);
@@ -53,11 +67,15 @@ public:
 
 	bool isSuspended() const;
 
-	ContainerId getNextContainerId() const;
-	void setNextContainerId(ContainerId containerId);
+	ScanPosition getNextScanPosition() const;
+	void setNextScanPosition(const ScanPosition &pos);
 
 	void setContainerLimit(uint64_t limit);
 	void setContainerKey(const FullContainerKey *containerKey);
+
+	void setFullReduced(bool fullReduced);
+
+	Stats getStats() const;
 
 private:
 	typedef util::Vector<bool> ValueCheckList;
@@ -74,6 +92,9 @@ private:
 	class SocketHandler;
 	class ContainerStatsHandler;
 	class ClusterPartitionHandler;
+	class StatementResHandler;
+	class TaskResHandler;
+
 	class PartitionHandler;
 	class ViewHandler; 
 	class SQLHandler;
@@ -83,6 +104,31 @@ private:
 	class KeyRefHandler;
 
 	class ContainerRefHandler; 
+	class ContainerDetailStatsHandler;
+
+	struct ScanPositionData {
+		ScanPositionData();
+
+		ContainerId getStartContainerId() const;
+		bool isSuspendedAtContainer() const;
+		bool isSuspendedAtRow() const;
+
+		void stepContainerListing(ContainerId lastContainerId);
+
+		void suspendAtRow(
+				ContainerId lastContainerId, RowId lastRowId,
+				const RowSuspendedInfo &info);
+		bool resumeAtRow(
+				ContainerId lastContainerId, RowId &lastRowId,
+				RowSuspendedInfo &info);
+
+		void finishScan();
+
+		ContainerId containerId_;
+		RowId rowId_;
+		RowSuspendedInfo suspendedInfo_;
+		Stats stats_;
+	};
 
 	MetaProcessor(const MetaProcessor &another);
 	MetaProcessor& operator=(const MetaProcessor &another);
@@ -94,9 +140,11 @@ private:
 
 	const MetaContainerInfo &info_;
 
-	ContainerId nextContainerId_;
+	ScanPositionData nextScanPos_;
 	uint64_t containerLimit_;
+	uint32_t limitMillis_;
 	const FullContainerKey *containerKey_;
+	bool fullReduced_;
 };
 
 struct MetaProcessor::ValueUtils {
@@ -115,11 +163,12 @@ struct MetaProcessor::ValueUtils {
 struct MetaProcessor::ValueListSource {
 	ValueListSource(
 			ValueList &valueList, ValueCheckList &valueCheckList,
-			const MetaContainerInfo &info);
+			const MetaContainerInfo &info, Stats &stats);
 
 	ValueList &valueList_;
 	ValueCheckList &valueCheckList_;
 	const MetaContainerInfo &info_;
+	Stats &stats_;
 };
 
 template<typename T>
@@ -153,6 +202,16 @@ public:
 
 	void stepContainerListing(ContainerId lastContainerId);
 
+	void suspendAtRow(
+			ContainerId lastContainerId, RowId lastRowId,
+			const RowSuspendedInfo &info);
+	bool resumeAtRow(
+			ContainerId lastContainerId, RowId &lastRowId,
+			RowSuspendedInfo &info);
+
+	util::Stopwatch& getStopwatch();
+	uint32_t getLimitMillis();
+
 private:
 	Context(const Context &another);
 	Context& operator=(const Context &another);
@@ -166,6 +225,7 @@ private:
 	ValueListSource valueListSource_;
 
 	RowHandler &coreRowHandler_;
+	util::Stopwatch watch_;
 };
 
 struct MetaProcessor::SQLMetaUtils {
@@ -258,6 +318,14 @@ protected:
 	void getNames(
 			TransactionContext &txn, BaseContainer &container,
 			const char8_t *&dbName, const char8_t *&containerName) const;
+
+	static util::String getBaseContainerName(
+			util::StackAllocator &alloc, const FullContainerKey &containerKey);
+	static util::String getDataPartitionName(
+			util::StackAllocator &alloc, const FullContainerKey &containerKey);
+	static util::String getDataPartitionNameDetail(
+			util::StackAllocator &alloc, ContainerId largeContainerId,
+			NodeAffinityNumber affinityNumber);
 
 	Value makeString(util::StackAllocator &alloc, const char8_t *src) const;
 
@@ -475,6 +543,25 @@ private:
 	static const char *chunkCategoryList[];
 };
 
+class MetaProcessor::StatementResHandler :
+		public MetaProcessor::StoreCoreHandler {
+public:
+	explicit StatementResHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer* container) const;
+};
+
+class MetaProcessor::TaskResHandler : public MetaProcessor::StoreCoreHandler {
+public:
+	explicit TaskResHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer* container) const;
+};
+
 class MetaProcessor::KeyRefHandler : public MetaProcessor::RefHandler {
 public:
 	KeyRefHandler(
@@ -493,6 +580,30 @@ public:
 
 protected:
 	virtual bool filter(TransactionContext &txn, const ValueList &valueList);
+};
+
+class MetaProcessor::ContainerDetailStatsHandler :
+	public MetaProcessor::StoreCoreHandler {
+public:
+	explicit ContainerDetailStatsHandler(Context& cxt);
+
+	virtual void operator()(
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* container) const;
+};
+
+struct MetaProcessor::ScanPosition {
+public:
+	ScanPosition();
+	explicit ScanPosition(const ScanPositionData &data);
+
+	const ScanPositionData& getData() const;
+
+	template<typename In> void decode(In &in);
+	template<typename Out> void encode(Out &out) const;
+
+private:
+	ScanPositionData data_;
 };
 
 struct MetaProcessorSource {
@@ -936,5 +1047,24 @@ public:
 private:
 	DataStoreV4 &dataStore_;
 };
+
+
+template<typename In>
+void MetaProcessor::ScanPosition::decode(In &in) {
+	in >> data_.containerId_;
+	in >> data_.rowId_;
+	in >> data_.suspendedInfo_.rowArrayCount_;
+	in >> data_.suspendedInfo_.columnMismatchCount_;
+	in >> data_.stats_.scannedRowCount_;
+}
+
+template<typename Out>
+void MetaProcessor::ScanPosition::encode(Out &out) const {
+	out << data_.containerId_;
+	out << data_.rowId_;
+	out << data_.suspendedInfo_.rowArrayCount_;
+	out << data_.suspendedInfo_.columnMismatchCount_;
+	out << data_.stats_.scannedRowCount_;
+}
 
 #endif

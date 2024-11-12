@@ -536,9 +536,10 @@ public:
 	uint32_t getColumnId();
 	const ColumnInfo *getColumnInfo();
 
-	void getIndexBitmapAndInfo(TransactionContext &txn,
-		BaseContainer &container, Query &queryObj, uint32_t &mapBitmap,
-		ColumnInfo *&columnInfo, Operation &detectedOp, bool notFlag);
+	void getIndexBitmapAndInfo(
+			TransactionContext &txn, BaseContainer &container, Query &queryObj,
+			uint32_t &mapBitmap, ColumnInfo *&columnInfo,
+			Operation &detectedOp, bool notFlag, bool withPartialMatch);
 
 	void select(TransactionContext &txn, Collection &collection,
 		util::XArray<PointRowId> &resultRowIdList, bool isSorted,

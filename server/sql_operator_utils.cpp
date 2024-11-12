@@ -1587,14 +1587,16 @@ SQLOps::OpAllocatorManager::DEFAULT_INSTANCE = initializeDefault();
 SQLOps::OpAllocatorManager::OpAllocatorManager(
 		const util::StdAllocator<void, void> &alloc, bool composite,
 		OpAllocatorManager *sharedManager,
-		SQLValues::VarAllocator *localVarAllocRef) :
+		SQLValues::VarAllocator *localVarAllocRef,
+		util::AllocatorLimitter *limitter) :
 		alloc_(alloc),
 		composite_(composite),
 		subList_(alloc),
 		sharedManager_(sharedManager),
 		localVarAllocRef_(localVarAllocRef),
 		cachedBuffer_(NULL),
-		baseAlloc_(NULL) {
+		baseAlloc_(NULL),
+		limitter_(limitter) {
 	assert(!composite || localVarAllocRef == NULL);
 
 	if (sharedManager == NULL) {
@@ -1636,7 +1638,8 @@ SQLOps::OpAllocatorManager& SQLOps::OpAllocatorManager::getSubManager(
 
 	OpAllocatorManager *&sub = subList_[workerId];
 	if (sub == NULL) {
-		sub = ALLOC_NEW(alloc_) OpAllocatorManager(alloc_, false, NULL, NULL);
+		sub = ALLOC_NEW(alloc_) OpAllocatorManager(
+				alloc_, false, NULL, NULL, cxt.getAllocatorLimitter());
 	}
 	else {
 		sub->prepareAllocators();
@@ -1675,14 +1678,20 @@ util::StackAllocator& SQLOps::OpAllocatorManager::create(
 				SQLValues::VarAllocator::TraitsType::getFixedSize(2) /
 				blockSizeBase;
 
-		return *(ALLOC_NEW(*localAlloc_) util::StackAllocator(
+		util::AllocUniquePtr<util::StackAllocator> ptr(ALLOC_UNIQUE(
+				*localAlloc_, util::StackAllocator,
 				util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK, "sqlOp"),
 				&base, &option));
+		ptr->setLimit(
+				util::AllocatorStats::STAT_GROUP_TOTAL_LIMIT, limitter_);
+		return *ptr.release();
 	}
 	else {
 		util::StackAllocator *alloc = cachedAllocList_->back();
 		assert(alloc != NULL);
 
+		alloc->setLimit(
+				util::AllocatorStats::STAT_GROUP_TOTAL_LIMIT, limitter_);
 		cachedAllocList_->pop_back();
 		return *alloc;
 	}
@@ -1699,6 +1708,10 @@ void SQLOps::OpAllocatorManager::release(util::StackAllocator *alloc) {
 	util::StackAllocator::Tool::forceReset(*alloc);
 	alloc->setFreeSizeLimit(0);
 	alloc->trim();
+
+	alloc->setLimit(
+			util::AllocatorStats::STAT_GROUP_TOTAL_LIMIT,
+			static_cast<util::AllocatorLimitter*>(NULL));
 
 	util::AllocUniquePtr<util::StackAllocator> ptr(alloc, *localAlloc_);
 	cachedAllocList_->push_back(ptr.get());
@@ -1816,7 +1829,7 @@ SQLOps::OpAllocatorManager::initializeDefault() throw() {
 	assert(instance.get() == NULL);
 	try {
 		instance = UTIL_MAKE_LOCAL_UNIQUE(
-				instance, OpAllocatorManager, alloc, true, NULL, NULL);
+				instance, OpAllocatorManager, alloc, true, NULL, NULL, NULL);
 	}
 	catch (...) {
 	}

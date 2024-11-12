@@ -28,6 +28,8 @@
 #include "util/container.h"
 #include "util/trace.h"
 
+#include "sql_common.h" //
+
 #include <deque>
 #include <list>
 #include <vector>
@@ -37,7 +39,7 @@
 #endif
 
 #include "event_engine.h"
-#include "sql_common.h"
+
 
 UTIL_TRACER_DECLARE(SQL_TEMP_STORE);
 
@@ -637,7 +639,7 @@ private:
 #endif
 	typedef BlockInfoMap::iterator BlockInfoMapItr;
 
-	typedef std::deque< BaseBlockInfo, util::StdAllocator<
+	typedef util::Deque< BaseBlockInfo, util::StdAllocator<
 	  BaseBlockInfo, LocalTempStore::LTSVariableSizeAllocator> > BaseBlockInfoArray;
 
 	typedef std::set< LocalTempStore::BlockId, std::less<LocalTempStore::BlockId>,

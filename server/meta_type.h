@@ -57,6 +57,7 @@ struct MetaContainerInfo {
 
 		ColumnId dbNameColumn_;
 		ColumnId containerNameColumn_;
+		ColumnId partitionNameColumn_;
 		ColumnId partitionIndexColumn_;
 		ColumnId containerIdColumn_;
 		ColumnId dbIdColumn_;
@@ -96,6 +97,9 @@ struct MetaType {
 		TYPE_SOCKET,
 		TYPE_CONTAINER_STATS,
 		TYPE_CLUSTER_PARTITION,
+		TYPE_CONTAINER_RA_STATS,
+		TYPE_STATEMENT_RES,
+		TYPE_TASK_RES,
 		END_TYPE,
 
 		START_TYPE_SQL = 100000,
@@ -118,6 +122,7 @@ struct MetaType {
 	enum CommonMetaType {
 		COMMON_DATABASE_NAME,
 		COMMON_CONTAINER_NAME,
+		COMMON_PARTITION_NAME,
 		COMMON_PARTITION_INDEX,
 		COMMON_CONTAINER_ID,
 		COMMON_DATABASE_ID,
@@ -350,6 +355,59 @@ struct MetaType {
 		DATABASE_DATABASE_NAME,
 		END_DATABASE
 	};
+
+	enum ContainerRaStatsMeta {
+		CONTAINER_RA_STATS_DATABASE_ID,
+		CONTAINER_RA_STATS_DATABASE_NAME,
+		CONTAINER_RA_STATS_CONTAINER_NAME,
+		CONTAINER_RA_STATS_PARTITION_NAME,
+		CONTAINER_RA_STATS_LATEST_COLUMN_COUNT,
+		CONTAINER_RA_STATS_INITIAL_COLUMN_COUNT,
+		CONTAINER_RA_STATS_ROW_ARRAY_COUNT,
+		CONTAINER_RA_STATS_COLUMN_MISMATCH_COUNT,
+		END_CONTAINER_RA_STATS
+	};
+
+	enum StatementResMeta {
+		STATEMENT_RES_REQEST_ID,
+		STATEMENT_RES_NODE_ADDRESS,
+		STATEMENT_RES_NODE_PORT,
+		STATEMENT_RES_CONNECTION_ADDRESS,
+		STATEMENT_RES_CONNECTION_PORT,
+		STATEMENT_RES_USER_NAME,
+		STATEMENT_RES_APPLICATION_NAME,
+		STATEMENT_RES_STAEMENT_TYPE,
+		STATEMENT_RES_START_TIME,
+		STATEMENT_RES_ACTUAL_TIME,
+		STATEMENT_RES_MEMORY_USE,
+		STATEMENT_RES_SQL_STORE_USE,
+		STATEMENT_RES_DATA_STORE_ACCESS,
+		STATEMENT_RES_NETWORK_TRANSFER_SIZE,
+		STATEMENT_RES_NETWORK_TIME,
+		STATEMENT_RES_AVAILABLE_CONCURRENCY,
+		STATEMENT_RES_RESOURCE_RESTRICTIONS,
+		STATEMENT_RES_STATEMENT,
+		END_STATEMENT_RES
+	};
+
+	enum TaskResMeta {
+		TASK_RES_REQEST_ID,
+		TASK_RES_JOB_ORDINAL,
+		TASK_RES_TASK_ORDINAL,
+		TASK_RES_NODE_ADDRESS,
+		TASK_RES_NODE_PORT,
+		TASK_RES_TASK_TYPE,
+		TASK_RES_LEAD_TIME,
+		TASK_RES_ACTUAL_TIME,
+		TASK_RES_MEMORY_USE,
+		TASK_RES_SQL_STORE_USE,
+		TASK_RES_DATA_STORE_ACCESS,
+		TASK_RES_NETWORK_TRANSFER_SIZE,
+		TASK_RES_NETWORK_TIME,
+		TASK_RES_PLAN,
+		END_TASK_RES
+	};
+
 	enum StringConstants {
 		STR_CONTAINER_NAME,
 		STR_CONTAINER_OPTIONAL_TYPE,
@@ -469,6 +527,30 @@ struct MetaType {
 		STR_SQL_TASK_COUNT,
 		STR_SQL_PENDING_JOB_COUNT,
 		STR_SQL_SEND_MESSAGE_SIZE,
+		STR_LATEST_COLUMN_COUNT,
+		STR_INITIAL_COLUMN_COUNT,
+		STR_ROW_ARRAY_COUNT,
+		STR_COLUMN_MISMATCH_COUNT,
+
+		STR_REQEST_ID,
+		STR_CONNECTION_ADDRESS,
+		STR_CONNECTION_PORT,
+		STR_STAEMENT_TYPE,
+		STR_LEAD_TIME,
+		STR_ACTUAL_TIME,
+		STR_MEMORY_USE,
+		STR_SQL_STORE_USE,
+		STR_DATA_STORE_ACCESS,
+		STR_NETWORK_TRANSFER_SIZE,
+		STR_NETWORK_TIME,
+		STR_AVAILABLE_CONCURRENCY,
+		STR_RESOURCE_RESTRICTIONS,
+		STR_STATEMENT,
+
+		STR_JOB_ORDINAL,
+		STR_TASK_ORDINAL,
+		STR_TASK_TYPE,
+		STR_PLAN,
 
 		END_STR
 	};
@@ -484,13 +566,15 @@ struct MetaType::Coders {
 	static const util::NameCoderEntry<SocketMeta> LIST_SOCKET[];
 	static const util::NameCoderEntry<ContainerStatsMeta> LIST_CONTAINER_STATS[];
 	static const util::NameCoderEntry<ClusterPartitionMeta> LIST_CLUSTER_PARTITION[];
+	static const util::NameCoderEntry<ContainerRaStatsMeta> LIST_CONTAINER_RA_STATS[];
+	static const util::NameCoderEntry<StatementResMeta> LIST_STATEMENT_RES[];
+	static const util::NameCoderEntry<TaskResMeta> LIST_TASK_RES[];
 	static const util::NameCoderEntry<PartitionMeta> LIST_PARTITION[];
 	static const util::NameCoderEntry<ViewMeta> LIST_VIEW[];
 	static const util::NameCoderEntry<SQLMeta> LIST_SQL[];
 	static const util::NameCoderEntry<PartitionStatsMeta> LIST_PARTITION_STATS[];
 	static const util::NameCoderEntry<DatabaseStatsMeta> LIST_DATABASE_STATS[];
 	static const util::NameCoderEntry<DatabaseMeta> LIST_DATABASE[];
-
 
 	static const util::NameCoder<ContainerMeta, END_CONTAINER> CODER_CONTAINER;
 	static const util::NameCoder<ColumnMeta, END_COLUMN> CODER_COLUMN;
@@ -501,6 +585,9 @@ struct MetaType::Coders {
 	static const util::NameCoder<SocketMeta, END_SOCKET> CODER_SOCKET;
 	static const util::NameCoder<ContainerStatsMeta, END_CONTAINER_STATS> CODER_CONTAINER_STATS;
 	static const util::NameCoder<ClusterPartitionMeta, END_CLUSTER_PARTITION> CODER_CLUSTER_PARTITION;
+	static const util::NameCoder<ContainerRaStatsMeta, END_CONTAINER_RA_STATS> CODER_CONTAINER_RA_STATS;
+	static const util::NameCoder<StatementResMeta, END_STATEMENT_RES> CODER_STATEMENT_RES;
+	static const util::NameCoder<TaskResMeta, END_TASK_RES> CODER_TASK_RES;
 	static const util::NameCoder<PartitionMeta, END_PARTITION> CODER_PARTITION;
 	static const util::NameCoder<ViewMeta, END_VIEW> CODER_VIEW;
 	static const util::NameCoder<SQLMeta, END_SQL> CODER_SQL;
@@ -528,6 +615,7 @@ struct MetaType::CoreColumns {
 
 		Entry asDbName() const;
 		Entry asContainerName() const;
+		Entry asPartitionName() const;
 		Entry asPartitionIndex() const;
 		Entry asContainerId() const;
 		Entry asDbId() const;
@@ -547,6 +635,9 @@ struct MetaType::CoreColumns {
 	static const Entry<SocketMeta> COLUMNS_SOCKET[]; 
 	static const Entry<ContainerStatsMeta> COLUMNS_CONTAINER_STATS[];
 	static const Entry<ClusterPartitionMeta> COLUMNS_CLUSTER_PARTITION[]; 
+	static const Entry<ContainerRaStatsMeta> COLUMNS_CONTAINER_RA_STATS[];
+	static const Entry<StatementResMeta> COLUMNS_STATEMENT_RES[];
+	static const Entry<TaskResMeta> COLUMNS_TASK_RES[];
 	static const Entry<PartitionMeta> COLUMNS_PARTITION[];
 	static const Entry<ViewMeta> COLUMNS_VIEW[]; 
 	static const Entry<SQLMeta> COLUMNS_SQL[]; 
@@ -577,6 +668,9 @@ struct MetaType::RefColumns {
 	static const Entry<SocketMeta> COLUMNS_SOCKET[]; 
 	static const Entry<ContainerStatsMeta> COLUMNS_CONTAINER_STATS[];
 	static const Entry<ClusterPartitionMeta> COLUMNS_CLUSTER_PARTITION[]; 
+	static const Entry<ContainerRaStatsMeta> COLUMNS_CONTAINER_RA_STATS[];
+	static const Entry<StatementResMeta> COLUMNS_STATEMENT_RES[];
+	static const Entry<TaskResMeta> COLUMNS_TASK_RES[];
 	static const Entry<PartitionMeta> COLUMNS_PARTITION[];
 	static const Entry<ViewMeta> COLUMNS_VIEW[]; 
 	static const Entry<SQLMeta> COLUMNS_SQL[]; 

@@ -34,6 +34,8 @@ class ClusterManager;
 class ConfigTable;
 class PartitionTable;
 class EventEngine;
+class KeepLogManager;
+struct ManagerSet;
 
 typedef int32_t NodeId;
 typedef std::string RackZoneIdString;
@@ -52,6 +54,10 @@ const int32_t PARTITION_ASSIGNMENT_RULE_ROUNDROBIN = 1;
 const int32_t PARTITION_ASSIGNMENT_RULE_STABLE_GOAL = 2;
 const int32_t PARTITION_ASSIGNMENT_RULE_PARTIAL_STABLE_GOAL = 3;
 const int32_t PARTITION_ASSIGNMENT_RULE_COMMAND_SET_GOAL = 4;
+
+static const int32_t OWNER_BACKUP_GAP_CLASSIC = 1000;
+static const int32_t OWNER_BACKUP_GAP_DEFAULT = 1000;
+static const int32_t OWNER_BACKUP_GAP_LARGE = 3000;
 
 struct AddressInfo;
 typedef std::vector<AddressInfo> AddressInfoList;
@@ -706,6 +712,28 @@ public:
 			}
 		}
 
+		void getRoleSet(std::set<NodeId>& roleSet) {
+			if (ownerNodeId_ != UNDEF_NODEID) {
+				roleSet.insert(ownerNodeId_);
+				for (size_t pos = 0; pos < backups_.size(); pos++) {
+					roleSet.insert(backups_[pos]);
+				}
+			}
+		}
+
+		void getRoleSet(PartitionTable* pt, std::set<NodeId>& roleSet) {
+			if (ownerNodeId_ != UNDEF_NODEID) {
+				if (pt->getHeartbeatTimeout(ownerNodeId_) != UNDEF_TTL) {
+					roleSet.insert(ownerNodeId_);
+				}
+				for (size_t pos = 0; pos < backups_.size(); pos++) {
+					if (pt->getHeartbeatTimeout(backups_[pos]) != UNDEF_TTL) {
+						roleSet.insert(backups_[pos]);
+					}
+				}
+			}
+		}
+
 		PartitionId getPartitionId() {
 			return pId_;
 		}
@@ -928,10 +956,10 @@ public:
 			return publicNodeAddressList_;
 		}
 
-		void set(PartitionTable* pt) {
+		void set(PartitionTable* pt, TableType  tableType =  PartitionTable::PT_CURRENT_OB) {
 			for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
 				PartitionRole tmpRole;
-				pt->getPartitionRole(pId, tmpRole);
+				pt->getPartitionRole(pId, tmpRole, tableType);
 				set(pt, pId, tmpRole);
 			}
 		}
@@ -1039,7 +1067,8 @@ public:
 			isAutoGoal_(true),
 			currentTime_(0),
 			isConfigurationChange_(false),
-			backupNum_(0)
+			backupNum_(0),
+			 stablePartition_(false)
 		{}
 
 		void setRuleLimitTime(int64_t limitTime) {
@@ -1056,6 +1085,14 @@ public:
 
 		bool isConfigurationChange() {
 			return isConfigurationChange_;
+		}
+
+		void setStablePartition() {
+			stablePartition_ = true;
+		}
+
+		bool getStablePartition() {
+			return stablePartition_;
 		}
 
 		util::StackAllocator& getAllocator() {
@@ -1076,6 +1113,7 @@ public:
 		int64_t currentTime_;
 		bool isConfigurationChange_;
 		int32_t backupNum_;
+		bool stablePartition_;
 	};
 
 	/** **
@@ -1204,6 +1242,10 @@ public:
 			return enableInitialGenerate_;
 		}
 
+		void setInitialGenerate(bool enable) {
+			enableInitialGenerate_ = enable;
+		}
+
 		virtual bool load();
 		virtual bool vaildateFormat() { return true; };
 
@@ -1257,6 +1299,19 @@ public:
 			}
 		};
 
+		int32_t getPolicy() {
+			return policy_;
+		}
+
+		void setPolicy(int32_t policy) {
+			policy_ = policy;
+		}
+
+		void setEnable(bool enable) {
+			enable_ = enable;
+		}
+
+
 		void initialCheck();
 
 	private:
@@ -1271,6 +1326,16 @@ public:
 	PartitionTable(const ConfigTable& configTable, const char* confPath);
 
 	~PartitionTable();
+
+	void initialize(ManagerSet* mgrSet);
+
+	bool enableParallelSync() {
+		return (parallelSyncNum_ > 1);
+	}
+
+	bool enableParallelChunkSync() {
+		return (parallelChunkSyncNum_ > 0);
+	}
 
 	void copyGoal(util::Vector<PartitionRole>& roleList, TableType target = PT_CURRENT_GOAL) {
 		switch (target) {
@@ -1343,6 +1408,36 @@ public:
 
 	bool isCatchup(PartitionId pId, NodeId targetNodeId = 0);
 
+	void setPrevCatchup(PartitionId pId, NodeId nodeId) {
+		prevCatchupPId_ = pId;
+		prevCatchupNodeId_ = nodeId;
+		PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+		if (parallelCatchupList_.size() > pgId) {
+			parallelCatchupList_[pgId].reset();
+		}
+	}
+
+	void resetCatchup() {
+		if (prevCatchupPId_ != UNDEF_PARTITIONID) {
+			PartitionGroupId pgId = pgConfig_.getPartitionGroupId(prevCatchupPId_);
+			if (parallelCatchupList_.size() > pgId) {
+				parallelCatchupList_[pgId].reset();
+			}
+		}
+		prevCatchupPId_ = UNDEF_PARTITIONID;
+		prevCatchupNodeId_ = UNDEF_NODEID;
+	}
+
+	void resetCatchup(PartitionId pId) {
+		if (pId < 0 || pId >= getPartitionNum()) {
+			return;
+		}
+		PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+		if (parallelCatchupList_.size() > pgId) {
+			parallelCatchupList_[pgId].reset();
+		}
+	}
+
 	size_t getBackupSize(util::StackAllocator& alloc, PartitionId pId) {
 		util::XArray<NodeId> backups(alloc);
 		getBackup(pId, backups);
@@ -1375,6 +1470,9 @@ public:
 			addressInfoList.emplace_back(nodes_[nodeId].publicAddressInfo_);
 		}
 	}
+	void setImmediateCheck(bool flag) {
+		immediateCheck_ = flag;
+	}
 
 	void getRackZoneInfoList(RackZoneInfoList& rackZoneInfoList);
 
@@ -1383,6 +1481,30 @@ public:
 	void setRackZoneId(const char* rackZoneIdName, NodeId nodeId = 0);
 	void setStandbyMode(bool standby, NodeId nodeId);
 	bool getStandbyMode(NodeId nodeId);
+
+	void setStartTime(int64_t startTime, NodeId nodeId) {
+		if (nodeId >= MAX_NODE_NUM) {
+			return;
+		}
+		nodes_[nodeId].startTime_ = startTime;
+	}
+
+	int64_t getStartTime(NodeId nodeId) {
+		if (nodeId >= MAX_NODE_NUM) {
+			return -1;
+		}
+		return nodes_[nodeId].startTime_;
+	}
+
+	bool needPartitionCheck() {
+		bool check = needCheck_;
+		needCheck_ = false;
+		return check;
+	}
+
+	void setPartitionCheck() {
+		needCheck_ = true;
+	}
 
 	void getRackZoneIdList(util::Vector<int32_t>& rackZoneIdList);
 
@@ -1685,13 +1807,15 @@ public:
 	}
 
 	template <class T>
-	void getOrderingLiveNodeIdList(T& liveNodeIdList) {
-		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
-		for (const auto& elem: nodeOrderingSet_) {
-			NodeId nodeId = elem.second;
-			if (nodeId < nodeNum_ && nodes_[nodeId].heartbeatTimeout_ != UNDEF_TTL) {
-				liveNodeIdList.push_back(nodeId);
+	void getOrderingLiveNodeIdList(util::StackAllocator& alloc, T& liveNodeIdList) {
+		util::Set<std::pair<std::string, NodeId>> nodeOrderingSet(alloc);
+		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
+			if (nodes_[nodeId].heartbeatTimeout_ != UNDEF_TTL) {
+				nodeOrderingSet.insert(std::make_pair(nodes_[nodeId].getNodeAddress().toString(), nodeId));
 			}
+		}
+		for (const auto& elem: nodeOrderingSet) {
+			liveNodeIdList.push_back(elem.second);
 		}
 	}
 	
@@ -1816,6 +1940,34 @@ public:
 		stableGoal_.enableInitialGenerate_ = flag;
 	}
 
+	util::Mutex& getDumpLock() {
+		return dumpLock_;
+	}
+
+	void setParallelSyncNum(int32_t syncNum) {
+		parallelSyncNum_ = syncNum;
+	}
+
+	void setParallelChunkSyncNum(int32_t syncNum) {
+		parallelChunkSyncNum_ = syncNum;
+	}
+
+	int32_t getParallelSyncNum() {
+		return parallelSyncNum_;
+	}
+
+	int32_t getParallelChunkSyncNum() {
+		return parallelChunkSyncNum_;
+	}
+
+	void setLogSyncLsnDifference(LogSequentialNumber lsn) {
+		logSyncLsnDifference_ = lsn;
+	}
+
+	LogSequentialNumber getLogSyncLsnDifference() {
+		return logSyncLsnDifference_;
+	}
+
 	/*!
 		@brief Get node address
 	*/
@@ -1914,7 +2066,7 @@ public:
 	}
 
 	std::string dumpNodes();
-	std::string dumpPartitions(util::StackAllocator& alloc, TableType type, bool isSummary = false);
+	std::string dumpPartitions(util::StackAllocator& alloc, TableType type, KeepLogManager* keepLogManager=NULL);
 	std::string dumpPartitionsList(util::StackAllocator& alloc, TableType type);
 	std::string dumpPartitionsNew(util::StackAllocator& alloc, TableType type,
 		SubPartitionTable* subTable = NULL);
@@ -2085,7 +2237,9 @@ private:
 			sslPort_(UNDEF_SSL_PORT),
 			rackZoneIdName_(""),
 			rackZoneId_(UNDEF_RACKZONEID),
-			standbyMode_(false) {}
+			standbyMode_(false),
+			startTime_(INT64_MAX)
+		{}
 
 		~NodeInfo() {
 			if (nodeBaseInfo_) {
@@ -2145,6 +2299,7 @@ private:
 		std::string rackZoneIdName_;
 		RackZoneId rackZoneId_;
 		bool standbyMode_;
+		int64_t startTime_;
 	};
 
 	class BlockQueue {
@@ -2194,7 +2349,7 @@ private:
 			roleStatus_(PT_NONE),
 			partitionRevision_(1),
 			chunkCount_(0),
-			errorStatus_(PT_OTHER_NORMAL), prevRoleStatus_(PT_NONE) {}
+			errorStatus_(PT_OTHER_NORMAL), prevRoleStatus_(PT_NONE), pending_(false) {}
 
 		LogSequentialNumber lsn_;
 		LogSequentialNumber startLsn_;
@@ -2204,6 +2359,7 @@ private:
 		int64_t chunkCount_;
 		int32_t errorStatus_;
 		PartitionRoleStatus prevRoleStatus_;
+		bool pending_;
 
 		void clear() {
 			startLsn_ = 0;
@@ -2261,7 +2417,13 @@ private:
 
 		void setErrorStatus(NodeId nodeId, int32_t status) {
 			checkSize(nodeId);
+			int32_t prev = currentPartitionInfos_[nodeId].errorStatus_;
+			if (prev != PT_ERROR_NORMAL && status == PT_ERROR_NORMAL && !currentPartitionInfos_[nodeId].pending_) {
+				currentPartitionInfos_[nodeId].pending_ = true;
+				return;
+			}
 			currentPartitionInfos_[nodeId].errorStatus_ = status;
+			currentPartitionInfos_[nodeId].pending_ = false;
 		}
 
 		int32_t getErrorStatus(NodeId nodeId) {
@@ -2367,9 +2529,10 @@ private:
 	};
 
 	struct ReplicaInfo {
-		ReplicaInfo(PartitionId pId, uint32_t count) : pId_(pId), count_(count) {}
+		ReplicaInfo(PartitionId pId, uint32_t count, uint32_t load) : pId_(pId), count_(count), load_(load){}
 		PartitionId pId_;
 		uint32_t count_;
+		uint32_t load_;
 	};
 
 	class PartitionConfig {
@@ -2730,7 +2893,7 @@ private:
 		partitions_[pId].partitionInfo_.available_ = available;
 	}
 
-	bool checkTargetPartition(PartitionId pId, int32_t backupNum, bool& catchupWait);
+	bool checkTargetPartition(PartitionId pId, int32_t backupNum, bool& catchupWait, PartitionContext& context);
 
 	void clearPartitionRole(PartitionId pId);
 
@@ -2739,12 +2902,31 @@ private:
 	bool applyRemoveRule(PartitionContext& context);
 	bool applySwapRule(PartitionContext& context);
 
-	void getReplicaLossPIdList(util::StackAllocator& alloc, util::Vector<ReplicaInfo>& resolvePIdList);
+	struct ApplyContext {
+		ApplyContext(PartitionContext& cxt, util::Vector<ReplicaInfo> &resolvePartitionList);
+		util::StackAllocator& alloc_;
+		SubPartitionTable &subPartitionTable_;
+		util::Vector<ReplicaInfo>& resolvePartitionList_;
+		util::Vector<PartitionGroupId> catchupPGIdList_;
+		int32_t syncMaxNum_;
+		int32_t chunkSyncMaxNum_;
+		int32_t currentSyncCount_;
+		int32_t currentChunkSyncCount_;
+	};
+	void setParallelCatchup(ApplyContext& cxt);
+
+	void getReplicaLossPIdList(util::StackAllocator& alloc, util::Vector<ReplicaInfo>& resolvePIdList, bool checkLoad);
 	void getCurrentCatchupPIdList(util::Vector<PartitionId>& catchupPIdList);
 	void checkRepairPartition(PartitionContext& context);
 
 	static bool cmpReplica(const ReplicaInfo& a, const ReplicaInfo& b) {
-		return (a.count_ < b.count_);
+		if (a.count_ < b.count_) {
+			return true;
+		}
+		if (a.count_ > b.count_) {
+			return false;
+		}
+		return (a.load_ < b.load_);
 	};
 
 	void assignGoalTable(util::StackAllocator& alloc, util::XArray<NodeId>& nodeIdList,
@@ -2754,6 +2936,12 @@ private:
 		util::Vector<PartitionRole>& roleList);
 
 	void preparePlanGoal();
+
+	void addCandBackup(PartitionId pId, NodeIdList& nodeList, PartitionContext& context, NodeId owner, util::XArray<NodeId> &activeNodeList);
+
+	bool checkTransitionLimitTime(PartitionContext& cxt) {
+		return (!immediateCheck_ || (immediateCheck_  && cxt.currentTime_ >= nextApplyRuleLimitTime_));
+	}
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
 	util::StackAllocator globalStackAlloc_;
@@ -2782,6 +2970,26 @@ private:
 	BlockQueue goalBlockQueue_;
 	PartitionId prevCatchupPId_;
 	NodeId prevCatchupNodeId_;
+	struct ParallelCatchup {
+		PartitionId pId_;
+		NodeId nodeId_;
+		ParallelCatchup() : pId_(UNDEF_PARTITIONID), nodeId_(UNDEF_NODEID) {}
+		ParallelCatchup(PartitionId pId, NodeId nodeId) : pId_(pId), nodeId_(nodeId) {}
+		void reset() {
+			pId_ = UNDEF_PARTITIONID;
+			nodeId_ = UNDEF_NODEID;
+		}
+		bool operator<(const ParallelCatchup& right) const {
+			if (pId_ < right.pId_) {
+				return true;
+			}
+			if (pId_ > right.pId_) {
+				return false;
+			}
+			return (nodeId_ < right.nodeId_);
+		}
+	};
+	std::vector< ParallelCatchup> parallelCatchupList_;
 
 	Partition* partitions_;
 	CurrentPartitions* currentPartitions_;
@@ -2812,6 +3020,16 @@ private:
 	StableGoalPartition stableGoal_;
 	int32_t reserveNum_;
 	int32_t currentGoalAssignmentRule_;
+	bool needCheck_;
+	const PartitionGroupConfig pgConfig_;
+	int32_t parallelSyncNum_;
+	int32_t parallelChunkSyncNum_;
+	bool immediateCheck_;
+	ManagerSet* mgrSet_;
+	util::Mutex dumpLock_;
+	int32_t prevCatchupWaitCount_;
+	int32_t logSyncLsnDifference_;
+	bool applyNodeBalance_;
 };
 
 typedef PartitionTable::PartitionStatus PartitionStatus;

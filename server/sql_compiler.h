@@ -24,6 +24,10 @@ struct BindParm;
 class SQLHintInfo;
 class Query;
 
+class TransactionContext;
+class FullContainerKey;
+class DataStoreV4;
+
 
 struct SQLHint {
 	class Coder;
@@ -988,6 +992,12 @@ public:
 			const Query &query, bool &uncovered,
 			util::Vector<int64_t> *affinityList,
 			util::Vector<uint32_t> *subList);
+	static FullContainerKey* predicateToContainerKeyByTQL(
+			util::StackAllocator &alloc, TransactionContext &txn,
+			DataStoreV4 &dataStore, const Query &query, DatabaseId dbId,
+			ContainerId metaContainerId, PartitionId partitionCount,
+			util::String &dbNameStr, bool &fullReduced,
+			PartitionId &reducedPartitionId);
 
 	static bool isDBOnlyMatched(
 			const QualifiedName &name1, const QualifiedName &name2);
@@ -2394,7 +2404,7 @@ private:
 			const Plan &plan, const PlanNode &node,
 			SQLTableInfo::Id tableInfoId, const MetaContainerInfo &metaInfo,
 			uint32_t &partitionColumn, uint32_t &tableNameColumn,
-			uint32_t &tableIdColumn);
+			uint32_t &tableIdColumn, uint32_t &partitionNameColumn);
 
 	void genDriverTables(
 			const Expr *&whereExpr, Plan &plan, const SystemTableInfo &info);
@@ -3180,9 +3190,15 @@ public:
 	static bool predicateToMetaTarget(
 			TupleValue::VarContext &varCxt, const Expr &expr,
 			uint32_t partitionIdColumn, uint32_t containerNameColumn,
-			uint32_t containerIdColumn, PartitionId partitionCount,
-			PartitionId &partitionId, const Plan::ValueList *parameterList,
-			bool &placeholderAffected);
+			uint32_t containerIdColumn, uint32_t partitionNameColumn,
+			PartitionId partitionCount, PartitionId &partitionId,
+			const Plan::ValueList *parameterList, bool &placeholderAffected);
+	static FullContainerKey* predicateToContainerKey(
+			TupleValue::VarContext &varCxt, TransactionContext &txn,
+			DataStoreV4 &dataStore, const Query &query, DatabaseId dbId,
+			ContainerId metaContainerId, PartitionId partitionCount,
+			util::String &dbNameStr, bool &fullReduced,
+			PartitionId &reducedPartitionId);
 
 	static Expr tqlToPredExpr(
 			util::StackAllocator &alloc, const Query &query);

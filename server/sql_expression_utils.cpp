@@ -1335,8 +1335,10 @@ util::Set<uint32_t>& SQLExprs::ExprRewriter::compColumnListToSet(
 bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 		SQLValues::ValueContext &cxt, const ExprFactory &factory,
 		const Expression *pred, uint32_t dbNameColumn,
-		uint32_t containerNameColumn, TupleValue *dbName,
-		TupleValue &containerName, bool &placeholderAffected) {
+		uint32_t containerNameColumn, uint32_t partitionNameColumn,
+		TupleValue *dbName, TupleValue &containerName,
+		std::pair<TupleValue, TupleValue> *containerNameElems,
+		bool &placeholderAffected) {
 	placeholderAffected = false;
 
 	if (pred == NULL) {
@@ -1350,8 +1352,9 @@ bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 			bool placeholderAffectedLocal;
 			const bool resolved = predicateToExtContainerName(
 					cxt, factory, expr,
-					dbNameColumn, containerNameColumn,
-					dbName, containerName, placeholderAffectedLocal);
+					dbNameColumn, containerNameColumn, partitionNameColumn,
+					dbName, containerName, containerNameElems,
+					placeholderAffectedLocal);
 
 			placeholderAffected |= placeholderAffectedLocal;
 			if (resolved) {
@@ -1362,8 +1365,11 @@ bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 		}
 		return false;
 	}
-	else if (predType == SQLType::OP_EQ ||
+	else if (
+			predType == SQLType::OP_EQ ||
+			predType == SQLType::OP_IS ||
 			predType == SQLType::FUNC_LIKE) {
+		const bool forIsNull = (predType == SQLType::OP_IS);
 		const bool forLike = (predType == SQLType::FUNC_LIKE);
 
 		const Expression *expr1 = pred->findChild();
@@ -1383,6 +1389,10 @@ bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 		if (expr2->getCode().getType() != SQLType::EXPR_CONSTANT) {
 			return false;
 		}
+		else if (forIsNull &&
+				!SQLValues::ValueUtils::isNull(expr2->getCode().getValue())) {
+			return false;
+		}
 
 		if (expr3 != NULL && (!forLike ||
 				expr3->getCode().getType() != SQLType::EXPR_CONSTANT)) {
@@ -1397,12 +1407,20 @@ bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 		}
 		const uint32_t column = metaExpr.getCode().getColumnPos();
 
+		bool forContainer = false;
 		TupleValue *valueRef;
 		if (column == dbNameColumn) {
 			valueRef = dbName;
 		}
 		else if (column == containerNameColumn) {
-			valueRef = &containerName;
+			forContainer = true;
+			valueRef = (containerNameElems == NULL ?
+					&containerName : &containerNameElems->first);
+		}
+		else if (column == partitionNameColumn) {
+			forContainer = true;
+			valueRef = (containerNameElems == NULL ?
+					NULL : &containerNameElems->second);
 		}
 		else {
 			return false;
@@ -1413,7 +1431,13 @@ bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 		}
 
 		const TupleValue &constValue2 = expr2->getCode().getValue();
-		if (constValue2.getType() != TupleTypes::TYPE_STRING) {
+		if (constValue2.getType() != (forIsNull ?
+				TupleTypes::TYPE_NULL : TupleTypes::TYPE_STRING)) {
+			return false;
+		}
+		else if (column == partitionNameColumn &&
+				constValue2.getType() == TupleTypes::TYPE_STRING &&
+				TupleString(constValue2).getBuffer().second == 0) {
 			return false;
 		}
 
@@ -1428,9 +1452,31 @@ bool SQLExprs::ExprRewriter::predicateToExtContainerName(
 			SQLValues::ValueUtils::unescapeExactLikePattern(
 					cxt, constValue2, constValue3, *valueRef);
 		}
+		else if (forIsNull) {
+			*valueRef = SQLValues::ValueUtils::createEmptyValue(
+					cxt, TupleTypes::TYPE_STRING);
+		}
 		else {
 			*valueRef =
 					SQLValues::ValueUtils::duplicateValue(cxt, constValue2);
+		}
+
+		if (forContainer && containerNameElems != NULL) {
+			const TupleValue &base = containerNameElems->first;
+			const TupleValue &sub = containerNameElems->second;
+			if (!SQLValues::ValueUtils::isNull(base) &&
+					!SQLValues::ValueUtils::isNull(sub)) {
+				if (TupleString(sub).getBuffer().second > 0) {
+					SQLValues::StringBuilder builder(cxt);
+					SQLValues::ValueUtils::formatValue(cxt, builder, base);
+					builder.appendAll("@");
+					SQLValues::ValueUtils::formatValue(cxt, builder, sub);
+					containerName = builder.build(cxt);
+				}
+				else {
+					containerName = base;
+				}
+			}
 		}
 
 		if (dbName != NULL && SQLValues::ValueUtils::isNull(*dbName)) {

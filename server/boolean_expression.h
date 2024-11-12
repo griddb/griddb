@@ -134,9 +134,10 @@ public:
 			TransactionContext &txn, MapType type, Query &queryObj,
 			TermCondition *&cond, bool &semiFiltering);
 
-	void getIndexBitmapAndInfo(TransactionContext &txn,
-		BaseContainer &baseContainer, Query &queryObj, uint32_t &mapBitmap,
-		ColumnInfo *&indexColumnInfo);
+	void getIndexBitmapAndInfo(
+			TransactionContext &txn, BaseContainer &baseContainer,
+			Query &queryObj, uint32_t &mapBitmap, ColumnInfo *&indexColumnInfo,
+			bool withPartialMatch);
 
 	void dumpTree(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		std::ostream &os);

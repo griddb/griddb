@@ -544,7 +544,7 @@ public:
 		tableCacheLoadTime_ += loadTime;
 	}
 
-	util::StackAllocator* getStackAllocator();
+	util::StackAllocator* getStackAllocator(util::AllocatorLimitter *limitter);
 	void releaseStackAllocator(util::StackAllocator* alloc);
 	const SQLProcessorConfig* getProcessorConfig() const;
 	SQLConfigParam& getSQLConfig();
@@ -1016,6 +1016,12 @@ public:
 		const util::Vector< std::pair<
 		TupleList::TupleColumnType, util::String> >& columnInfoList,
 		const Query& query, ResultSet& resultSet);
+
+	static FullContainerKey* predicateToContainerKeyByTQL(
+			TransactionContext &txn, DataStoreV4 &dataStore,
+			const Query &query, DatabaseId dbId, ContainerId metaContainerId,
+			PartitionId partitionCount, util::String &dbNameStr,
+			bool &fullReduced, PartitionId &reducedPartitionId);
 
 	void setRequest(RequestInfo& request);
 

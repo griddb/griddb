@@ -105,6 +105,7 @@ public:
 	virtual double getStoreMemoryAgingSwapRate() = 0;
 	virtual bool isAdministrator() = 0;
 	virtual uint32_t getTotalWorkerId() = 0;
+	virtual util::AllocatorLimitter* getAllocatorLimitter() = 0;
 };
 
 class SQLOps::OpCodeBuilder {
@@ -325,7 +326,8 @@ public:
 	OpAllocatorManager(
 			const util::StdAllocator<void, void> &alloc, bool composite,
 			OpAllocatorManager *sharedManager,
-			SQLValues::VarAllocator *localVarAllocRef);
+			SQLValues::VarAllocator *localVarAllocRef,
+			util::AllocatorLimitter *limitter);
 	~OpAllocatorManager();
 
 	static OpAllocatorManager& getDefault();
@@ -379,6 +381,7 @@ private:
 	util::LocalUniquePtr<CleanUpHandler> cleanUpHandler_;
 
 	util::LocalUniquePtr<util::Mutex> mutex_;
+	util::AllocatorLimitter *limitter_;
 };
 
 struct SQLOps::OpAllocatorManager::Buffer {

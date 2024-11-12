@@ -244,9 +244,6 @@ struct SQLStringExprs::Functions {
 	public:
 		typedef DefaultPolicy::AsAllocatable::AsPartiallyFinishable Policy;
 
-		Printf();
-		~Printf();
-
 		template<typename C>
 		typename C::WriterType* operator()(C &cxt);
 
@@ -263,9 +260,8 @@ struct SQLStringExprs::Functions {
 				char8_t, std::char_traits<char8_t>,
 				util::StdAllocator<char8_t, void> > String;
 
-		util::StdAllocator<void, void> alloc_;
-		String *format_;
-		ArgList *argList_;
+		util::AllocUniquePtr<String> format_;
+		util::AllocUniquePtr<ArgList> argList_;
 	};
 
 	struct Quote {

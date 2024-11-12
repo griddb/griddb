@@ -225,7 +225,8 @@ public:
 	bool getLogs(
 		PartitionId pId, int64_t sId, LogManager<MutexLocker>* logMgr,
 		CheckpointService* cpSvc,
-		bool useLongSyncLog, bool isCheck = false);
+		bool useLongSyncLog, bool isCheck, SearchLogInfo& logInfo);
+
 
 	bool getChunks(
 		util::StackAllocator& alloc, PartitionId pId,
@@ -554,9 +555,8 @@ private:
 		SyncContext* context, SyncRequestInfo& syncRequestInfo,
 		SyncResponseInfo& syncResponseInfo, NodeId senderNodeId);
 
-	void executeSyncLog(EventContext& ec, Event& ev, PartitionId pId,
-		SyncContext* context, SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo);
+	void executeSyncLog(EventContext& ec, Event& ev, PartitionId pId, SyncContext* context,
+		SyncRequestInfo& syncRequestInfo, SyncResponseInfo& syncResponseInfo);
 
 	void executeSyncLogAck(EventContext& ec, Event& ev, PartitionId pId,
 		SyncContext* context, SyncRequestInfo& syncRequestInfo,
@@ -577,6 +577,8 @@ private:
 		LogSequentialNumber backupLsn, SyncContext* context);
 };
 
+
+
 /*!
 	@brief Handles long-term Sync
 */
@@ -592,11 +594,6 @@ public:
 	void executeSyncRequest(
 		EventContext& ec, PartitionId pId,
 		SyncContext* context, SyncRequestInfo& syncRequestInfo);
-
-	void executeSyncPrepareAck(
-		EventContext& ec, Event& ev, PartitionId pId,
-		SyncContext* context, SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo, LongtermSyncInfo& syncInfo);
 
 	void executeSyncStart(
 		EventContext& ec, Event& ev, PartitionId pId,
@@ -618,10 +615,8 @@ public:
 		SyncContext* context, SyncRequestInfo& syncRequestInfo,
 		SyncResponseInfo& syncResponseInfo, NodeId senderNodeId);
 
-	void executeSyncLog(
-		EventContext& ec, Event& ev, PartitionId pId,
-		SyncContext* context, SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo);
+	void executeSyncLog(EventContext& ec, Event& ev, PartitionId pId, SyncContext* context,
+		SyncRequestInfo& syncRequestInfo, SyncResponseInfo& syncResponseInfo);
 
 	void executeSyncLogAck(
 		EventContext& ec, Event& ev, PartitionId pId,
@@ -953,12 +948,9 @@ public:
 		PartitionId pId, bool isForce,
 		PartitionRevisionNo revision = 0);
 
-	void notifyCheckpointLongSyncReady(
-		EventContext& ec, PartitionId pId,
-		LongtermSyncInfo* syncInfo, bool errorOccured);
+	void notifyCheckpointLongSyncReady(EventContext& ec, PartitionId pId, LongtermSyncInfo* syncInfo);
 
-	void notifySyncCheckpointEnd(
-		EventContext& ec, PartitionId pId, LongtermSyncInfo* syncInfo, bool errorOccured);
+	void notifySyncCheckpointEnd(EventContext& ec, PartitionId pId, LongtermSyncInfo* syncInfo);
 
 	void notifySyncCheckpointError(EventContext& ec, PartitionId pId, LongtermSyncInfo* syncInfo);
 	

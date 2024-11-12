@@ -29,6 +29,9 @@
 
 #include "sql_processor.h"
 
+#define DUMP_PARTITION_INFO(s)
+#define DUMP_PARTITION_INFO_1(s)
+
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 
 NodeAddress::NodeAddress(const char8_t* addr, uint16_t port) {
@@ -122,12 +125,18 @@ PartitionTable::PartitionTable(const ConfigTable& configTable, const char* confi
 	goalAssignmentRule_(configTable.get<int32_t>(CONFIG_TABLE_CS_GOAL_ASSIGNMENT_RULE)),
 	stableGoal_(configTable, configDir),
 	reserveNum_(1),
-	currentGoalAssignmentRule_(-1)
+	currentGoalAssignmentRule_(-1),
+	needCheck_(false),
+	pgConfig_(configTable),
+	parallelSyncNum_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_SYNC_NUM)),
+	parallelChunkSyncNum_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_SYNC_NUM)),
+	immediateCheck_(configTable.get<bool>(CONFIG_TABLE_CS_IMMEDIATE_PARTITION_CHECK)),
+	mgrSet_(NULL), prevCatchupWaitCount_(0), 
+	logSyncLsnDifference_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_LOG_SYNC_LSN_DIFFERENCE)),
+	applyNodeBalance_(configTable.get<bool>(CONFIG_TABLE_CS_PARTITION_NODE_BALANCE))
 {
-
 	try {
-		if (goalAssignmentRule_ != PARTITION_ASSIGNMENT_RULE_DEFAULT
-			&& enableRackZoneAwareness_) {
+		if (goalAssignmentRule_ != PARTITION_ASSIGNMENT_RULE_DEFAULT && enableRackZoneAwareness_) {
 			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, 
 				"Rackzone awareness and partition assignement rule (NOT 'DEfAULT') can not be defined at the same time");
 		}
@@ -166,6 +175,7 @@ PartitionTable::PartitionTable(const ConfigTable& configTable, const char* confi
 		for (PartitionId pId = 0; pId < partitionNum; pId++) {
 			newsqlPartitionList_[pId].init(pId);
 		}
+		parallelCatchupList_.assign(pgConfig_.getPartitionGroupCount(), ParallelCatchup());
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -428,10 +438,10 @@ bool PartitionTable::checkConfigurationChange(util::StackAllocator& alloc,
 	getDownNodes(downNodeSet);
 	bool isAddOrDownNode = (addNodeSet.size() > 0 || downNodeSet.size() > 0 || checkFlag);
 	if (isAddOrDownNode) {
-		GS_TRACE_CLUSTER_INFO(
-			"Detect cluster configuration change, create new goal partition, "
-			"current_time=" << CommonUtility::getTimeStr(context.currentTime_)
-			<< ", revision=" << getPartitionRevisionNo());
+//		GS_TRACE_CLUSTER_INFO(
+//			"Detect cluster configuration change, create new goal partition, "
+//			"current_time=" << CommonUtility::getTimeStr(context.currentTime_)
+//			<< ", revision=" << getPartitionRevisionNo());
 		context.setConfigurationChange();
 		if (context.isAutoGoal_) {
 			planGoal(context);
@@ -445,16 +455,25 @@ bool PartitionTable::check(PartitionContext& context) {
 
 	try {
 		util::StackAllocator& alloc = context.getAllocator();
-		if (context.currentTime_ < nextApplyRuleLimitTime_) {
-			if (getPartitionSummaryStatus() == PT_INITIAL) {
-				checkPartitionSummaryStatus(alloc, false, true);
+		if (immediateCheck_) {
+			if (context.currentTime_ >= nextApplyRuleLimitTime_) {
+				nextApplyRuleLimitTime_ = context.currentRuleLimitTime_;
 			}
-			return false;
 		}
-		nextApplyRuleLimitTime_ = context.currentRuleLimitTime_;
+		else {
+			if (context.currentTime_ < nextApplyRuleLimitTime_) {
+				if (getPartitionSummaryStatus() == PT_INITIAL) {
+					checkPartitionSummaryStatus(alloc, false, true);
+				}
+				return false;
+			}
+			nextApplyRuleLimitTime_ = context.currentRuleLimitTime_;
+		}
 		bool isAllSame = true;
 		bool catchupWait = false;
 		bool isIrregular = false;
+		int32_t checkCount = 0;
+		int32_t waitCount = 0;
 		for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 			PartitionRole currentRole;
 			PartitionRole goalRole;
@@ -465,17 +484,24 @@ bool PartitionTable::check(PartitionContext& context) {
 			else {
 				isAllSame = false;
 			}
-			if (checkTargetPartition(pId, context.backupNum_, catchupWait)) {
+			bool currentCatchupWait = false;
+			if (currentRole.hasCatchupRole()) {
+				checkCount++;
+			}
+			if (checkTargetPartition(pId, context.backupNum_, currentCatchupWait, context)) {
 				isIrregular = true;
 			}
+			if (currentCatchupWait) {
+				catchupWait = true;
+			}
 		}
+		prevCatchupWaitCount_ = waitCount;
 		if (catchupWait && !isIrregular) {
 			return false;
 		}
 		if (isAllSame && !isIrregular) {
 			isGoalPartition_ = true;
 			loadInfo_.status_ = PT_NORMAL;
-
 			context.isGoalPartition_ = true;
 			return false;
 		}
@@ -882,7 +908,6 @@ bool PartitionTable::checkNextBackup(
 
 	bool backupCond1 = !checkLimitOwnerBackupLsnGap(currentOwnerLsn, checkedLsn);
 	bool backupCond2 = (checkedLsn >= currentOwnerStartLsn);
-
 	return (backupCond1 && backupCond2);
 }
 
@@ -1058,18 +1083,19 @@ void PartitionTable::planGoal(PartitionContext& context) {
 		preparePlanGoal();
 		util::Set<NodeAddress> liveNodeAddressSet(alloc);
 		getLiveNodeAddressSet(liveNodeAddressSet);
-		bool stableCluster =
-				(reserveNum_ == static_cast<ptrdiff_t>(liveNodeAddressSet.size()));
+		bool stableCluster = (reserveNum_ == static_cast<ptrdiff_t>(liveNodeAddressSet.size()));
 		bool assignedGoal = false;
-
+		bool loaded = false;
 		picojson::value value;
 		if (stableGoal_.isEnable()) {
 			if (stableGoal_.load() && stableGoal_.validateFormat(value, true)) {
+				loaded = true;
 				if (stableCluster) {
 					assignedGoal = setGoalPartitions(alloc, &value, PT_STABLE_GOAL, true);
 					if (assignedGoal) {
 						currentGoalAssignmentRule_ = PARTITION_ASSIGNMENT_RULE_STABLE_GOAL;
-						GS_TRACE_CLUSTER_INFO("Plan goal by stable goal (stable cluster)");
+						context.setStablePartition();
+//						GS_TRACE_CLUSTER_INFO("Plan goal by stable goal (stable cluster)");
 					}
 				}
 				else if (stableGoal_.isSucceedOnError()) {
@@ -1077,16 +1103,16 @@ void PartitionTable::planGoal(PartitionContext& context) {
 						assignedGoal = assignSucceedStableGoal(alloc);
 						if (assignedGoal) {
 							currentGoalAssignmentRule_ = PARTITION_ASSIGNMENT_RULE_PARTIAL_STABLE_GOAL;
-							GS_TRACE_CLUSTER_INFO("Plan goal by partial stable goal  (not stable cluster)");
+//							GS_TRACE_CLUSTER_INFO("Plan goal by partial stable goal  (not stable cluster)");
 						}
 					}
 				}
 			}
 		}
 		if (!assignedGoal) {
-			if (stableGoal_.isEnable()) {
-				GS_TRACE_CLUSTER_INFO("Not applicable stable goal");
-			}
+//			if (stableGoal_.isEnable()) {
+//				GS_TRACE_CLUSTER_INFO("Not applicable stable goal");
+//			}
 			util::Vector<PartitionRole> roleList(alloc);
 			switch (goalAssignmentRule_) {
 			case PARTITION_ASSIGNMENT_RULE_DEFAULT: {
@@ -1102,13 +1128,16 @@ void PartitionTable::planGoal(PartitionContext& context) {
 			default:
 				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "Specified partition assignment rule is not supported");
 			}
-			GS_TRACE_CLUSTER_INFO("Plan goal (rule=" << dumpGoalAssignmentRule(currentGoalAssignmentRule_) << ")");
+//			GS_TRACE_CLUSTER_INFO("Plan goal (rule=" << dumpGoalAssignmentRule(currentGoalAssignmentRule_) << ")");
 			if (stableGoal_.isEnableInitialGenerate() && stableCluster) {
 				updateStableGoal(alloc);
 				writeStableGoal(alloc);
+				if (stableGoal_.isEnable() && !loaded) {
+					context.setStablePartition();
+				}
 			}
 		}
-		GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
+//		GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
 		int32_t lap = watch.elapsedMillis();
 		if (lap > traceLimitTime) {
 			GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, "Plan goal time=" << lap);
@@ -1426,7 +1455,7 @@ void PartitionTable::assignDefaultGoal(util::StackAllocator& alloc) {
 void PartitionTable::assignRoundRobinGoal(util::StackAllocator& alloc) {
 	util::Vector<PartitionRole> roleList(alloc);
 	util::XArray<NodeId> nodeIdList(alloc);
-	getOrderingLiveNodeIdList(nodeIdList);
+	getOrderingLiveNodeIdList(alloc, nodeIdList);
 
 	uint32_t nodeNum = static_cast<uint32_t>(nodeIdList.size());
 	uint32_t backupNum = getReplicationNum();
@@ -1490,7 +1519,7 @@ bool PartitionTable::assignSucceedStableGoal(util::StackAllocator& alloc) {
 		}
 	}
 	setGoal(this, roleList);
-	GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
+//	GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
 	return true;
 }
 
@@ -1624,6 +1653,56 @@ void PartitionTable::modifyGoalTable(util::StackAllocator& alloc,
 	}
 }
 
+void PartitionTable::addCandBackup(PartitionId pId, NodeIdList& backups, PartitionContext& context,
+	NodeId ownerNodeId, util::XArray<NodeId> &activeNodeList) {
+	int32_t backupNum = backups.size();
+	if (backupNum < context.backupNum_ && context.isLoadBalance_) {
+		PartitionRole currentRole;
+		getPartitionRole(pId, currentRole, PT_CURRENT_OB);
+		util::Set<NodeId> nodeIdSet(context.getAllocator());
+		nodeIdSet.insert(ownerNodeId);
+		for (size_t pos = 0; pos < backups.size(); pos++) {
+			nodeIdSet.insert(backups[pos]);
+		}
+		NodeIdList& currentBackups = currentRole.getBackups();
+		LogSequentialNumber ownerLsn = getLSN(pId, ownerNodeId);
+		LogSequentialNumber ownerStartLsn = getStartLSN(pId, ownerNodeId);
+		for (size_t pos = 0; pos < currentBackups.size(); pos++) {
+			NodeId candBackup = currentBackups[pos];
+			if (candBackup != UNDEF_NODEID) {
+				LogSequentialNumber candLsn = getLSN(pId, candBackup);
+				if (candLsn >= ownerStartLsn) {
+					util::Set<NodeId>::iterator it = nodeIdSet.find(candBackup);
+					if (it == nodeIdSet.end()) {
+						backups.push_back(candBackup);
+						nodeIdSet.insert(candBackup);
+						if (backups.size() >= static_cast<size_t>(context.backupNum_)) {
+							break;
+						}
+					}
+				}
+			}
+		}
+		if (backups.size() < context.backupNum_) {
+			LogSequentialNumber maxLsn = getMaxLsn(pId);
+			for (size_t pos = 0; pos < activeNodeList.size(); pos++) {
+				NodeId candBackup = activeNodeList[pos];
+				util::Set<NodeId>::iterator it = nodeIdSet.find(candBackup);
+				if (it != nodeIdSet.end()) {
+					continue;
+				}
+				LogSequentialNumber backupLSN = getLSN(pId, candBackup);
+				if (backupLSN >= maxLsn && checkNextBackup(pId, candBackup, backupLSN, ownerStartLsn, ownerLsn)) {
+					backups.push_back(candBackup);
+					if (backups.size() >= static_cast<size_t>(context.backupNum_)) {
+						break;
+					}
+				}
+			}
+		}
+	}
+}
+
 bool PartitionTable::applyInitialRule(
 	PartitionContext& context) {
 
@@ -1654,24 +1733,21 @@ bool PartitionTable::applyInitialRule(
 				NodeIdList& nextBackups = nextRole.getBackups();
 				NodeIdList& goalBackups = goalRole.getBackups();
 				nextRole.setOwner(goalOwner);
-				LogSequentialNumber ownerLsn
-					= getLSN(pId, goalOwner);
-				LogSequentialNumber ownerStartLsn
-					= getStartLSN(pId, goalOwner);
+				LogSequentialNumber ownerLsn = getLSN(pId, goalOwner);
+				LogSequentialNumber ownerStartLsn = getStartLSN(pId, goalOwner);
 
-				for (size_t pos = 0;
-					pos < goalBackups.size(); pos++) {
+				for (size_t pos = 0; pos < goalBackups.size(); pos++) {
 					NodeId candBackup = goalBackups[pos];
 					if (nextBlockQueue_.find(pId, candBackup)) {
 						continue;
 					}
-					LogSequentialNumber backupLSN
-						= getLSN(pId, candBackup);
-					if (checkNextBackup(pId, candBackup,
-						backupLSN, ownerStartLsn, ownerLsn)) {
+					LogSequentialNumber backupLSN = getLSN(pId, candBackup);
+					if (checkNextBackup(pId, candBackup, backupLSN, ownerStartLsn, ownerLsn)) {
 						nextBackups.push_back(candBackup);
 					}
 				}
+				addCandBackup(pId, nextRole.getBackups(), context, goalOwner, activeNodeList);
+
 				setAvailable(pId, true);
 				subPartitionTable.set(this, pId, nextRole, goalOwner);
 			}
@@ -1695,7 +1771,6 @@ bool PartitionTable::applyInitialRule(
 						tmpMaxLSN = lsn;
 					}
 				}
-
 				if (targetNodeId == UNDEF_NODEID) {
 					if (isAvailable(pId)) {
 						util::NormalOStringStream strstrm;
@@ -1727,38 +1802,31 @@ bool PartitionTable::applyInitialRule(
 				NodeIdList& nextBackups = nextRole.getBackups();
 				NodeIdList& goalBackups = goalRole.getBackups();
 				NodeIdList checkRole = goalBackups;
+				LogSequentialNumber ownerLsn = getLSN(pId, targetNodeId);
+				LogSequentialNumber ownerStartLsn = getStartLSN(pId, targetNodeId);
 
 				if (context.isLoadBalance_) {
 					if (targetNodeId != goalOwner) {
 						checkRole.push_back(goalOwner);
 					}
-					LogSequentialNumber ownerLsn
-						= getLSN(pId, targetNodeId);
-					LogSequentialNumber ownerStartLsn
-						= getStartLSN(pId, targetNodeId);
-
-					for (size_t pos = 0;
-						pos < checkRole.size(); pos++) {
+					for (size_t pos = 0; pos < checkRole.size(); pos++) {
 						NodeId candBackup = checkRole[pos];
 						if (candBackup == targetNodeId) continue;
 						if (nextBlockQueue_.find(pId, candBackup)) {
 							continue;
 						}
-						LogSequentialNumber backupLSN
-							= getLSN(pId, candBackup);
-						if (checkNextBackup(pId, candBackup, backupLSN,
-							ownerStartLsn, ownerLsn)) {
+						LogSequentialNumber backupLSN = getLSN(pId, candBackup);
+						if (checkNextBackup(pId, candBackup, backupLSN, ownerStartLsn, ownerLsn)) {
 							nextBackups.push_back(candBackup);
 						}
 					}
+					addCandBackup(pId, nextRole.getBackups(), context, targetNodeId, activeNodeList);
 				}
 				setAvailable(pId, true);
-				subPartitionTable.set(
-					this, pId, nextRole, targetNodeId);
+				subPartitionTable.set(this, pId, nextRole, targetNodeId);
 			}
 		}
 		else if (context.isConfigurationChange()) {
-
 			PartitionRole goalRole;
 			getPartitionRole(pId, goalRole, PT_CURRENT_GOAL);
 			PartitionRole currentRole;
@@ -1767,19 +1835,13 @@ bool PartitionTable::applyInitialRule(
 			NodeIdList& nextBackups = currentRole.getBackups();
 			currentRole.setRevision(revision_);
 			currentRole.clearCatchup();
-
 			int32_t backupNum = currentRole.getBackupSize();
-			if (backupNum < context.backupNum_
-				&& context.isLoadBalance_) {
-
-
-				NodeIdList checkRole = goalBackups;
-				NodeId ownerNodeId = currentRole.getOwner();
+			NodeIdList checkRole = goalBackups;
+			NodeId ownerNodeId = currentRole.getOwner();
+			if (context.isLoadBalance_) {
 				if (ownerNodeId != UNDEF_NODEID) {
-					LogSequentialNumber ownerLsn
-						= getLSN(pId, ownerNodeId);
-					LogSequentialNumber ownerStartLsn
-						= getStartLSN(pId, ownerNodeId);
+					LogSequentialNumber ownerLsn = getLSN(pId, ownerNodeId);
+					LogSequentialNumber ownerStartLsn = getStartLSN(pId, ownerNodeId);
 					if (goalRole.getOwner() != ownerNodeId) {
 						checkRole.push_back(goalRole.getOwner());
 					}
@@ -1789,28 +1851,26 @@ bool PartitionTable::applyInitialRule(
 							continue;
 						}
 						if (!currentRole.isOwnerOrBackup(candBackup)) {
-							LogSequentialNumber backupLSN
-								= getLSN(pId, candBackup);
-							if (checkNextBackup(pId, candBackup, backupLSN,
-								ownerStartLsn, ownerLsn)) {
+							LogSequentialNumber backupLSN = getLSN(pId, candBackup);
+							if (checkNextBackup(pId, candBackup, backupLSN, ownerStartLsn, ownerLsn)) {
 								nextBackups.push_back(candBackup);
 							}
 						}
-						if (nextBackups.size() >= static_cast<size_t>(
-							context.backupNum_)) {
-							break;
-						}
 					}
+					addCandBackup(pId, nextBackups, context, ownerNodeId, activeNodeList);
 				}
 				setAvailable(pId, true);
-				subPartitionTable.set(
-					this, pId, currentRole, getOwner(pId));
+				subPartitionTable.set(this, pId, currentRole, getOwner(pId));
 			}
 		}
 	}
 	if (subPartitionTable.size() > 0) {
-		prevCatchupPId_ = UNDEF_PARTITIONID;
-		prevCatchupNodeId_ = UNDEF_NODEID;
+		resetCatchup();
+		if (enableParallelSync()) {
+			for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
+				resetCatchup(subPartitionTable.getSubPartition(pos).pId_);
+			}
+		}
 		return true;
 	}
 	else {
@@ -1819,16 +1879,42 @@ bool PartitionTable::applyInitialRule(
 }
 
 void PartitionTable::getReplicaLossPIdList(
-	util::StackAllocator& alloc, util::Vector<ReplicaInfo>& resolvePartitionIdList) {
+	util::StackAllocator& alloc, util::Vector<ReplicaInfo>& resolvePartitionIdList, bool checkLoad) {
 
 	util::Vector<PartitionId> pIdList(getPartitionNum(), alloc);
 	std::iota(pIdList.begin(), pIdList.end(), 0);
 	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
 	arrayShuffle<util::Vector<PartitionId>, PartitionId>(pIdList, random);
+	if (checkLoad) {
+		checkPartitionSummaryStatus(alloc, false, true);
+	}
 	for (size_t pos = 0; pos < pIdList.size(); pos++) {
+		uint32_t load = 0;
+		if (checkLoad) {
+			PartitionRole currentRole;
+			PartitionRole goalRole;
+			getPartitionRole(pIdList[pos], currentRole);
+			getPartitionRole(pIdList[pos], goalRole, PT_CURRENT_GOAL);
+			std::set<NodeId> currentSet;
+			std::set<NodeId> goalSet;
+			currentRole.getRoleSet(currentSet);
+			goalRole.getRoleSet(this, goalSet);
+			util::Vector<NodeId> candList(alloc);
+			std::set_difference(goalSet.begin(), goalSet.end(),
+				currentSet.begin(), currentSet.end(), std::inserter(candList, candList.end()));
+			if (candList.size() > 0) {
+				load = UINT32_MAX;
+				for (const auto& elem : candList) {
+					uint32_t currentLoad = loadInfo_.dataLoadList_[elem];
+					if (currentLoad < load) {
+						load = currentLoad;
+					}
+				}
+			}
+		}
 		resolvePartitionIdList.emplace_back(ReplicaInfo(
 				pIdList[pos],
-				static_cast<uint32_t>(getBackupSize(alloc, pIdList[pos]))));
+				static_cast<uint32_t>(getBackupSize(alloc, pIdList[pos])), load));
 	}
 	std::sort(resolvePartitionIdList.begin(), resolvePartitionIdList.end(), cmpReplica);
 }
@@ -1847,90 +1933,275 @@ void PartitionTable::getCurrentCatchupPIdList(util::Vector<PartitionId>& catchup
 	}
 }
 
+PartitionTable::ApplyContext::ApplyContext(PartitionContext& cxt, util::Vector<ReplicaInfo>& resolvePartitionList) : 
+	alloc_(*cxt.eventStackAlloc_), subPartitionTable_(cxt.subPartitionTable_),
+	resolvePartitionList_(resolvePartitionList), catchupPGIdList_(alloc_),
+	syncMaxNum_(0), chunkSyncMaxNum_(0), currentSyncCount_(0), currentChunkSyncCount_(0) {
+}
+
+void PartitionTable::setParallelCatchup(PartitionTable::ApplyContext& cxt) {
+	util::Vector<ReplicaInfo>& resolvePartitionList = cxt.resolvePartitionList_;
+	util::Vector<PartitionGroupId>& catchupPGIdList = cxt.catchupPGIdList_;
+	SubPartitionTable& subPartitionTable = cxt.subPartitionTable_;
+	util::StackAllocator& alloc = cxt.alloc_;
+	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
+	std::vector<PartitionRole> logSyncList;
+	std::vector<PartitionRole> chunkSyncList;
+
+	bool logSync = true;
+	LogSequentialNumber diffLimit = getLogSyncLsnDifference();
+	for (int32_t i = 0; i < 2; i++) {
+		logSync = (i == 0);
+		if (logSync) {
+			cxt.syncMaxNum_ = parallelSyncNum_;
+			cxt.chunkSyncMaxNum_ = parallelChunkSyncNum_;
+			assert(cxt.syncMaxNum_ > 1);
+			cxt.catchupPGIdList_.assign(pgConfig_.getPartitionGroupCount(), -1);
+		}
+		else {
+			if (cxt.chunkSyncMaxNum_ == 0) {
+				if (subPartitionTable.size() == 0) {
+					cxt.chunkSyncMaxNum_ = 1;
+				}
+				else {
+					break;
+				}
+			}
+			if (subPartitionTable.size() > 0) {
+				break;
+			}
+		}
+		DUMP_PARTITION_INFO("parallel = " << cxt.syncMaxNum_ << ", " << cxt.chunkSyncMaxNum_);
+		for (util::Vector<ReplicaInfo>::iterator it = resolvePartitionList.begin(); it != resolvePartitionList.end(); it++) {
+			PartitionId targetPId = (*it).pId_;
+			PartitionGroupId targetPgId = getPartitionGroupId(targetPId);
+			DUMP_PARTITION_INFO("target pId=" << targetPId << ", pgId=" << targetPgId);
+			if (catchupPGIdList[targetPgId] != -1) {
+				DUMP_PARTITION_INFO("already assigned pId=" << targetPId  << ", pgId=" << targetPgId);
+				continue;
+			}
+			NodeId currentOwner = getOwner(targetPId);
+			if (currentOwner == UNDEF_NODEID) {
+				DUMP_PARTITION_INFO("not current owner pId=" << targetPId << ", pgId=" << targetPgId);
+				continue;
+			}
+			LogSequentialNumber ownerLsn = getLSN(targetPId, currentOwner);
+			LogSequentialNumber ownerStartLsn = getStartLSN(targetPId, currentOwner);
+			PartitionRole currentRole;
+			getPartitionRole(targetPId, currentRole, PT_CURRENT_OB);
+			if (currentRole.hasCatchupRole()) {
+				DUMP_PARTITION_INFO("has catchup role owner pId=" << targetPId << ", pgId=" << targetPgId << "," <<currentRole);
+				continue;
+			}
+
+			PartitionRole nextRole(targetPId, revision_, PT_CURRENT_OB);
+			PartitionRole goalRole;
+			getPartitionRole(targetPId, goalRole, PT_CURRENT_GOAL);
+			NodeId goalOwner = goalRole.getOwner();
+			if (goalOwner == UNDEF_NODEID) {
+				DUMP_PARTITION_INFO("not goal owner pId=" << targetPId << ", pgId=" << targetPgId);
+				continue;
+			}
+			NodeIdList& currentBackups = currentRole.getBackups();
+			NodeIdList& goalBackups = goalRole.getBackups();
+			NodeIdList catchups;
+			if (!currentRole.isOwnerOrBackup(goalOwner)) {
+				DUMP_PARTITION_INFO("assigned include goal,  pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner);
+				if (goalBlockQueue_.find(targetPId, goalOwner)) {
+					DUMP_PARTITION_INFO("block pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner);
+					continue;
+				}
+				LogSequentialNumber goalLsn = getLSN(targetPId, goalOwner);
+				int64_t diff = ownerLsn - goalLsn;
+				if (!logSync || (ownerStartLsn <= goalLsn && diff >= 0 && diff <= diffLimit)) {
+				}
+				else {
+					DUMP_PARTITION_INFO("first continue pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner << ", ownerLsn= " << ownerStartLsn << ", goalLsn=" << goalLsn);
+					continue;
+				}
+				catchups.push_back(goalOwner);
+				nextRole.set(currentOwner, currentBackups, catchups);
+				subPartitionTable.set(this, targetPId, nextRole, currentOwner);
+				DUMP_PARTITION_INFO("assigned add,  nextRole=" << nextRole << ", currentOwner=" << currentOwner);
+
+				setPrevCatchup(targetPId, goalOwner);
+				catchupPGIdList[targetPgId] = targetPId;
+				cxt.currentSyncCount_++;
+				if (!logSync) {
+					cxt.currentChunkSyncCount_++;
+					chunkSyncList.push_back(nextRole);
+				}
+				else {
+					logSyncList.push_back(nextRole);
+				}
+				DUMP_PARTITION_INFO("check pId=" << targetPId << ", pgId=" << targetPgId
+					<< ", syncCount1=" << cxt.currentSyncCount_ << ", syncCount2=" << cxt.syncMaxNum_
+					<< ",  chuncCount1=" << cxt.currentChunkSyncCount_ << ", chunkCount2=" << cxt.chunkSyncMaxNum_);
+
+				if (cxt.currentSyncCount_ == cxt.syncMaxNum_ || cxt.currentChunkSyncCount_ == cxt.chunkSyncMaxNum_) {
+					DUMP_PARTITION_INFO("check break pId=" << targetPId << ", pgId=" << targetPgId);
+					break;
+				}
+				else {
+					DUMP_PARTITION_INFO("check continue pId=" << targetPId << ", pgId=" << targetPgId);
+					continue;
+				}
+			}
+			util::StackAllocator::Scope scope(alloc);
+			util::XArray<NodeId> backupOrderList(alloc);
+			for (size_t pos = 0; pos < goalBackups.size(); pos++) {
+				DUMP_PARTITION_INFO("not goal check continue pId=" << targetPId << ", pgId=" << targetPgId<<", goal=" << goalBackups[pos]);
+				if (nextBlockQueue_.find(targetPId, goalBackups[pos])) {
+					DUMP_PARTITION_INFO("not goal block pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalBackups[pos]);
+					continue;
+				}
+				if (currentRole.isOwnerOrBackup(goalBackups[pos])) {
+					DUMP_PARTITION_INFO("not goal current pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalBackups[pos]);
+					continue;
+				}
+				if (goalBlockQueue_.find(targetPId, goalBackups[pos])) {
+					DUMP_PARTITION_INFO("not goal block2 pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalBackups[pos]);
+					continue;
+				}
+				if (logSync) {
+					LogSequentialNumber goalLsn = getLSN(targetPId, goalBackups[pos]);
+					DUMP_PARTITION_INFO("checkdiff pId=" << targetPId << ", pgId="
+						<< targetPgId << ", goal=" << goalBackups[pos] << ", owner=" << ownerStartLsn << ", goal=" << goalLsn);
+					int64_t diff = ownerLsn - goalLsn;
+					if (ownerStartLsn <= goalLsn && diff >= 0 && diff <= diffLimit) {
+					}
+					else {
+						DUMP_PARTITION_INFO("not goal first continue pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner << ", ownerLsn= " << ownerStartLsn << ", goalLsn=" << goalLsn);
+						continue;
+					}
+				}
+				backupOrderList.push_back(goalBackups[pos]);
+			}
+			if (backupOrderList.size() > 0) {
+				util::NormalOStringStream oss;
+				CommonUtility::dumpValueList(oss, backupOrderList);
+				DUMP_PARTITION_INFO("cand backup exists pId=" << targetPId << ", pgId=" << targetPgId << ", list=" << oss.str());
+				arrayShuffle<util::XArray<NodeId>, NodeId>(backupOrderList, random);
+				catchups.push_back(backupOrderList[0]);
+				nextRole.set(currentOwner, currentBackups, catchups);
+				subPartitionTable.set(this, targetPId, nextRole, currentOwner);
+				DUMP_PARTITION_INFO("assigned add2,  nextRole=" << nextRole << ", currentOwner=" << currentOwner);
+
+				setPrevCatchup(targetPId, backupOrderList[0]);
+				catchupPGIdList[targetPgId] = targetPId;
+				cxt.currentSyncCount_++;
+				if (!logSync) {
+					cxt.currentChunkSyncCount_++;
+					chunkSyncList.push_back(nextRole);
+				}
+				else {
+					logSyncList.push_back(nextRole);
+				}
+				DUMP_PARTITION_INFO("check2 pId=" << targetPId << ", pgId=" << targetPgId
+					<< ", syncCount1=" << cxt.currentSyncCount_ << ", syncCount2=" << cxt.syncMaxNum_
+					<< ",  chuncCount1=" << cxt.currentChunkSyncCount_ << ", chunkCount2=" << cxt.chunkSyncMaxNum_);
+
+				if (cxt.currentSyncCount_ == cxt.syncMaxNum_ || cxt.currentChunkSyncCount_ == cxt.chunkSyncMaxNum_) {
+					DUMP_PARTITION_INFO("check break2 pId=" << targetPId << ", pgId=" << targetPgId);
+					break;
+				}
+				else {
+					DUMP_PARTITION_INFO("check continue pId=" << targetPId << ", pgId=" << targetPgId);
+					continue;
+				}
+			}
+		}
+	}
+}
+
 bool PartitionTable::applyAddRule(PartitionContext& context) {
 
 	util::StackAllocator& alloc = context.getAllocator();
 	util::StackAllocator::Scope scope(alloc);
-
 	SubPartitionTable& subPartitionTable = context.subPartitionTable_;
 	subPartitionTable.clear();
 	util::XArray<NodeId> liveNodeList(alloc);
 	getLiveNodeIdList(liveNodeList);
 	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
-
 	util::Vector<ReplicaInfo> resolvePartitionList(alloc);
-	getReplicaLossPIdList(alloc, resolvePartitionList);
+	getReplicaLossPIdList(alloc, resolvePartitionList, applyNodeBalance_);
 	util::Vector<PartitionId> catchupPIdList(alloc);
 	getCurrentCatchupPIdList(catchupPIdList);
-
-	for (size_t pos = 0; pos < resolvePartitionList.size(); pos++) {
-		PartitionId targetPId = resolvePartitionList[pos].pId_;
-		NodeId currentOwner = getOwner(targetPId);
-		if (currentOwner == UNDEF_NODEID) {
-			continue;
-		}
-		PartitionRole currentRole;
-		getPartitionRole(targetPId, currentRole, PT_CURRENT_OB);
-		PartitionRole nextRole(targetPId, revision_, PT_CURRENT_OB);
-		PartitionRole goalRole;
-		getPartitionRole(targetPId, goalRole, PT_CURRENT_GOAL);
-		NodeId goalOwner = goalRole.getOwner();
-		if (goalOwner == UNDEF_NODEID) {
-			continue;
-		}
-		NodeIdList& currentBackups = currentRole.getBackups();
-		NodeIdList& goalBackups = goalRole.getBackups();
-		NodeIdList catchups;
-		if (!currentRole.isOwnerOrBackup(goalOwner)) {
-			if (goalBlockQueue_.find(targetPId, goalOwner)) {
+	if (!enableParallelSync()) {
+		for (util::Vector<ReplicaInfo>::iterator it = resolvePartitionList.begin(); it != resolvePartitionList.end(); it++) {
+			PartitionId targetPId = (*it).pId_;
+			NodeId currentOwner = getOwner(targetPId);
+			if (currentOwner == UNDEF_NODEID) {
 				continue;
 			}
-			catchups.push_back(goalOwner);
-			nextRole.set(currentOwner, currentBackups, catchups);
-			subPartitionTable.set(this, targetPId, nextRole, currentOwner);
-			prevCatchupPId_ = targetPId;
-			prevCatchupNodeId_ = goalOwner;
-		}
-		if (subPartitionTable.size() == 1) {
-			break;
-		}
-		util::StackAllocator::Scope scope(alloc);
-		util::XArray<NodeId> backupOrderList(alloc);
-		for (size_t pos = 0; pos < goalBackups.size(); pos++) {
-			if (nextBlockQueue_.find(targetPId, goalBackups[pos])) {
+			PartitionRole currentRole;
+			getPartitionRole(targetPId, currentRole, PT_CURRENT_OB);
+			PartitionRole nextRole(targetPId, revision_, PT_CURRENT_OB);
+			PartitionRole goalRole;
+			getPartitionRole(targetPId, goalRole, PT_CURRENT_GOAL);
+			NodeId goalOwner = goalRole.getOwner();
+			if (goalOwner == UNDEF_NODEID) {
 				continue;
 			}
-			if (currentRole.isOwnerOrBackup(goalBackups[pos])) {
-				continue;
+			NodeIdList& currentBackups = currentRole.getBackups();
+			NodeIdList& goalBackups = goalRole.getBackups();
+			NodeIdList catchups;
+			if (!currentRole.isOwnerOrBackup(goalOwner)) {
+				if (goalBlockQueue_.find(targetPId, goalOwner)) {
+					continue;
+				}
+				catchups.push_back(goalOwner);
+				nextRole.set(currentOwner, currentBackups, catchups);
+				subPartitionTable.set(this, targetPId, nextRole, currentOwner);
+				setPrevCatchup(targetPId, goalOwner);
 			}
-			if (goalBlockQueue_.find(targetPId, goalBackups[pos])) {
-				continue;
+			if (subPartitionTable.size() == 1) {
+				break;
 			}
-			backupOrderList.push_back(goalBackups[pos]);
-		}
-		if (backupOrderList.size() > 0) {
-			arrayShuffle<util::XArray<NodeId>, NodeId>(backupOrderList, random);
-			catchups.push_back(backupOrderList[0]);
-			nextRole.set(currentOwner, currentBackups, catchups);
-			subPartitionTable.set(this, targetPId, nextRole, currentOwner);
-			prevCatchupPId_ = targetPId;
-			prevCatchupNodeId_ = backupOrderList[0];
-		}
-		if (subPartitionTable.size() == 1) {
-			break;
+			util::StackAllocator::Scope scope(alloc);
+			util::XArray<NodeId> backupOrderList(alloc);
+			for (size_t pos = 0; pos < goalBackups.size(); pos++) {
+				if (nextBlockQueue_.find(targetPId, goalBackups[pos])) {
+					continue;
+				}
+				if (currentRole.isOwnerOrBackup(goalBackups[pos])) {
+					continue;
+				}
+				if (goalBlockQueue_.find(targetPId, goalBackups[pos])) {
+					continue;
+				}
+				backupOrderList.push_back(goalBackups[pos]);
+			}
+			if (backupOrderList.size() > 0) {
+				arrayShuffle<util::XArray<NodeId>, NodeId>(backupOrderList, random);
+				catchups.push_back(backupOrderList[0]);
+				nextRole.set(currentOwner, currentBackups, catchups);
+				subPartitionTable.set(this, targetPId, nextRole, currentOwner);
+				setPrevCatchup(targetPId, backupOrderList[0]);
+			}
+			if (subPartitionTable.size() == 1) {
+				break;
+			}
 		}
 	}
+	else {
+		ApplyContext cxt(context, resolvePartitionList);
+		setParallelCatchup(cxt);
+	}
+
 	if (subPartitionTable.size() > 0) {
 		PartitionId catchupPId = subPartitionTable.getSubPartition(0).pId_;
 		for (size_t pos = 0; pos < catchupPIdList.size(); pos++) {
 			PartitionId checkPId = catchupPIdList[pos];
-			if (catchupPId != catchupPIdList[pos]) {
-				PartitionRole nextRole;
-				getPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
-				nextRole.clearCatchup();
-				setPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
-				NodeId currentOwner = getOwner(checkPId);
-				subPartitionTable.set(this, checkPId, nextRole, currentOwner);
+			if (!enableParallelSync()) {
+				if (catchupPId != catchupPIdList[pos]) {
+					PartitionRole nextRole;
+					getPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
+					nextRole.clearCatchup();
+					setPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
+					NodeId currentOwner = getOwner(checkPId);
+					subPartitionTable.set(this, checkPId, nextRole, currentOwner);
+				}
 			}
 		}
 		return true;
@@ -2018,8 +2289,12 @@ bool PartitionTable::applyRemoveRule(
 	}
 
 	if (subPartitionTable.size() > 0) {
-		prevCatchupPId_ = UNDEF_PARTITIONID;
-		prevCatchupNodeId_ = UNDEF_NODEID;
+		resetCatchup();
+		if (enableParallelSync()) {
+			for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
+				resetCatchup(subPartitionTable.getSubPartition(pos).pId_);
+			}
+		}
 		return true;
 	}
 	else {
@@ -2101,8 +2376,12 @@ bool PartitionTable::applySwapRule(
 	}
 
 	if (subPartitionTable.size() > 0) {
-		prevCatchupPId_ = UNDEF_PARTITIONID;
-		prevCatchupNodeId_ = UNDEF_NODEID;
+		resetCatchup();
+		if (enableParallelSync()) {
+			for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
+				resetCatchup(subPartitionTable.getSubPartition(pos).pId_);
+			}
+		}
 		return true;
 	}
 	else {
@@ -2164,13 +2443,15 @@ void PartitionTable::planNext(PartitionContext& context) {
 	}
 	PartitionRevisionNo revision = getPartitionRevisionNo();
 	if (currentRuleNo_ != PARTITION_RULE_UNDEF) {
-		GS_TRACE_CLUSTER_INFO(std::endl << "Apply Rule:"
+		DUMP_PARTITION_INFO_1(CommonUtility::getTimeStr(util::DateTime::now(TRIM_MILLISECONDS).getUnixTime()) << "Apply Rule:"
 			<< dumpPartitionRule(currentRuleNo_) << ", revision=" << revision);
+//		GS_TRACE_CLUSTER_INFO(std::endl << "Apply Rule:"
+//			<< dumpPartitionRule(currentRuleNo_) << ", revision=" << revision);
 		if (subPartitionTable.size() > 0) {
 			currentRevisionNo_ = revision;
 			context.needUpdatePartition_ = true;
-			GS_TRACE_CLUSTER_INFO("Next partitions  : "<< std::endl
-				<< dumpPartitionsNew(alloc, PT_CURRENT_OB, &subPartitionTable));
+//			GS_TRACE_CLUSTER_INFO("Next partitions  : "<< std::endl
+//				<< dumpPartitionsNew(alloc, PT_CURRENT_OB, &subPartitionTable));
 		}
 	}
 	subPartitionTable.setRevision(getPartitionRevision());
@@ -2224,105 +2505,93 @@ void PartitionTable::clearCatchupRole(PartitionId pId) {
 
 
 bool PartitionTable::checkTargetPartition(
-	PartitionId pId,
-	int32_t backupNum,
-	bool& catchupWait) {
+	PartitionId pId, int32_t backupNum, bool& catchupWait, PartitionContext& context) {
 
+	util::StackAllocator& alloc = context.getAllocator();
 	PartitionRole currentRole;
 	getPartitionRole(pId, currentRole);
-	NodeId currentOwnerId
-		= currentRole.getOwner();
-	NodeIdList& currentBackups
-		= currentRole.getBackups();
-	NodeIdList& currentCatchups
-		= currentRole.getCatchups();
+	NodeId currentOwnerId = currentRole.getOwner();
+	NodeIdList& currentBackups = currentRole.getBackups();
+	NodeIdList& currentCatchups = currentRole.getCatchups();
 	bool detectError = false;
+	PartitionGroupId pgId = getPartitionGroupId(pId);
 
 	if (currentOwnerId == UNDEF_NODEID) {
 		loadInfo_.status_ = PT_OWNER_LOSS;
 	}
 	if (loadInfo_.status_ != PT_OWNER_LOSS) {
-		if (currentBackups.size()
-			< static_cast<size_t>(backupNum)) {
+		if (currentBackups.size() < static_cast<size_t>(backupNum)) {
 			loadInfo_.status_ = PT_REPLICA_LOSS;
 		}
 	}
-	if (currentOwnerId != UNDEF_NODEID
-		&& getPartitionRoleStatus(pId, currentOwnerId)
-		!= PT_OWNER) {
-
-		detectError = true;
-		GS_TRACE_CLUSTER_INFO(
-			"Unmatch owner role, pId="
-			<< pId << ", ownerAddress="
-			<< dumpNodeAddress(currentOwnerId)
-			<< ", expected=OWNER, actual="
-			<< dumpPartitionRoleStatus(
-				getPartitionRoleStatus(pId, currentOwnerId)));
+	if (currentOwnerId != UNDEF_NODEID && getPartitionRoleStatus(pId, currentOwnerId) != PT_OWNER) {
+		if (checkTransitionLimitTime(context)) {
+			detectError = true;
+//			GS_TRACE_CLUSTER_INFO(
+//				"Unmatch owner role, pId=" << pId << ", ownerAddress=" << dumpNodeAddress(currentOwnerId)
+//				<< ", expected=OWNER, actual=" << dumpPartitionRoleStatus(getPartitionRoleStatus(pId, currentOwnerId)));
+		}
 	}
-	for (size_t pos = 0;
-		pos < currentBackups.size(); pos++) {
-
-		PartitionRoleStatus roleStatus
-			= getPartitionRoleStatus(pId, currentBackups[pos]);
+	for (size_t pos = 0; pos < currentBackups.size(); pos++) {
+		PartitionRoleStatus roleStatus = getPartitionRoleStatus(pId, currentBackups[pos]);
 		if (roleStatus != PT_BACKUP) {
 			if (roleStatus == PT_CATCHUP) {
 				catchupWait = true;
 			}
 			else {
-				detectError = true;
-				GS_TRACE_CLUSTER_INFO(
-					"Unmatch backup role, pId=" << pId
-					<< ", backupAddress="
-					<< dumpNodeAddress(currentBackups[pos])
-					<< ", expected=BACKUP, actual="
-					<< dumpPartitionRoleStatus(roleStatus));
+				if (checkTransitionLimitTime(context)) {
+					detectError = true;
+//					GS_TRACE_CLUSTER_INFO(
+//						"Unmatch backup role, pId=" << pId << ", backupAddress=" << dumpNodeAddress(currentBackups[pos])
+//						<< ", expected=BACKUP, actual=" << dumpPartitionRoleStatus(roleStatus));
+				}
 			}
 		}
 	}
-	if (getRuleNo() == PARTITION_RULE_ADD
-		&& prevCatchupPId_ == pId) {
-
-		if (currentCatchups.size() == 0) {
-			PartitionRoleStatus roleStatus
-				= getPartitionRoleStatus(pId, prevCatchupNodeId_);
-			if (roleStatus != PT_BACKUP) {
-				detectError = true;
+	if (getRuleNo() == PARTITION_RULE_ADD) {
+		PartitionId prevPId = enableParallelSync() ? prevCatchupPId_ : parallelCatchupList_[pgId].pId_;
+		NodeId prevNodeId = enableParallelSync() ? prevCatchupNodeId_ : parallelCatchupList_[pgId].nodeId_;
+		if (prevPId == pId) {
+			if (currentCatchups.size() == 0) {
+				PartitionRoleStatus roleStatus = getPartitionRoleStatus(pId, prevNodeId);
+				if (roleStatus != PT_BACKUP) {
+					if (checkTransitionLimitTime(context)) {
+						detectError = true;
+					}
+				}
+			}
+			else {
+				if (currentCatchups[0] != prevNodeId) {
+					detectError = true;
+				}
 			}
 		}
-		else {
-			if (currentCatchups[0] != prevCatchupNodeId_) {
-				detectError = true;
-			}
-		}
 	}
 
-	if (getRuleNo() != PARTITION_RULE_ADD
-		&& currentCatchups.size() > 0) {
-		clearCatchupRole(pId);
-		return true;
-	}
-	if (currentOwnerId != UNDEF_NODEID
-		&& getErrorStatus(pId, currentOwnerId)
-		== PT_ERROR_LONG_SYNC_FAIL) {
-		clearCatchupRole(pId);
-		return true;
-	}
-
-	for (size_t pos = 0;
-		pos < currentCatchups.size(); pos++) {
-
-		if (getErrorStatus(pId, currentCatchups[pos])
-			== PT_ERROR_LONG_SYNC_FAIL) {
+	if (getRuleNo() != PARTITION_RULE_ADD && currentCatchups.size() > 0) {
+		if (!enableParallelSync()) {
 			clearCatchupRole(pId);
 			return true;
 		}
+		else {
+			PartitionId prevPId = parallelCatchupList_[pgId].pId_;
+			if (prevPId != UNDEF_PARTITIONID && pId != prevPId) {
+				clearCatchupRole(prevPId);
+				return true;
+			}
+		}
 	}
-	for (size_t pos = 0;
-		pos < currentCatchups.size(); pos++) {
-
-		PartitionRoleStatus roleStatus
-			= getPartitionRoleStatus(pId, currentCatchups[pos]);
+	if (currentOwnerId != UNDEF_NODEID && getErrorStatus(pId, currentOwnerId) == PT_ERROR_LONG_SYNC_FAIL) {
+		detectError = true;
+	}
+	for (size_t pos = 0; pos < currentCatchups.size(); pos++) {
+		int32_t errorStatus = getErrorStatus(pId, currentCatchups[pos]);
+		if (errorStatus == PT_ERROR_LONG_SYNC_FAIL) {
+			detectError = true;
+		}
+	}
+	for (size_t pos = 0; pos < currentCatchups.size(); pos++) {
+		PartitionRoleStatus roleStatus = getPartitionRoleStatus(pId, currentCatchups[pos]);
 		if (roleStatus != PT_CATCHUP) {
 			if (roleStatus == PT_BACKUP) {
 				PartitionRole currentRole;
@@ -2331,45 +2600,40 @@ bool PartitionTable::checkTargetPartition(
 				setPartitionRole(pId, currentRole);
 			}
 			else {
-				setBlockQueue(
-					pId, PT_CHANGE_GOAL_TABLE, currentCatchups[pos]);
-				detectError = true;
-				GS_TRACE_CLUSTER_INFO(
-					"Unmatch catchup role, pId=" << pId
-					<< ", catchupAddress="
-					<< dumpNodeAddress(currentCatchups[pos])
-					<< ", expected=CATCHUP, actual="
-					<< dumpPartitionRoleStatus(roleStatus));
+				if (checkTransitionLimitTime(context)) {
+					setBlockQueue(pId, PT_CHANGE_GOAL_TABLE, currentCatchups[pos]);
+					detectError = true;
+//					GS_TRACE_CLUSTER_INFO(
+//						"Unmatch catchup role, pId=" << pId << ", catchupAddress=" << dumpNodeAddress(currentCatchups[pos])
+//						<< ", expected=CATCHUP, actual=" << dumpPartitionRoleStatus(roleStatus));
+				}
+				else {
+					catchupWait = true;
+				}
 			}
 		}
 		else {
 			catchupWait = true;
 		}
 	}
+
 	if (detectError) {
 		clearPartitionRole(pId);
 	}
 	return detectError;
 }
 
-void PartitionTable::checkRepairPartition(
-	PartitionContext& context) {
+void PartitionTable::checkRepairPartition(PartitionContext& context) {
 
 	util::StackAllocator& alloc = context.getAllocator();
 	if (context.isRepairPartition_) {
-
 		util::StackAllocator::Scope scope(alloc);
 		util::Vector<NodeId> liveNodeList(alloc);
 		getLiveNodeIdList(liveNodeList);
-		for (PartitionId pId = 0;
-			pId < getPartitionNum(); pId++) {
-
-			LogSequentialNumber prevMaxLsn
-				= getMaxLsn(pId);
+		for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
+			LogSequentialNumber prevMaxLsn = getMaxLsn(pId);
 			LogSequentialNumber maxLSN = 0;
-			for (size_t pos = 0;
-				pos < liveNodeList.size(); pos++) {
-
+			for (size_t pos = 0; pos < liveNodeList.size(); pos++) {
 				LogSequentialNumber lsn = getLSN(pId, liveNodeList[pos]);
 				if (lsn > maxLSN) {
 					maxLSN = lsn;
@@ -2377,19 +2641,15 @@ void PartitionTable::checkRepairPartition(
 			}
 			setRepairedMaxLsn(pId, maxLSN);
 			if (maxLSN != prevMaxLsn) {
-				GS_TRACE_CLUSTER_INFO(
-					"Max Lsn updated, pId=" << pId << ", prevMaxLsn="
-					<< prevMaxLsn << ", currentMaxLsn=" << maxLSN);
+//				GS_TRACE_CLUSTER_INFO(
+//					"Max Lsn updated, pId=" << pId << ", prevMaxLsn="
+//					<< prevMaxLsn << ", currentMaxLsn=" << maxLSN);
 			}
 		}
 	}
 }
 
-void PartitionTable::setBlockQueue(
-	PartitionId pId,
-	ChangeTableType tableType,
-	NodeId nodeId) {
-
+void PartitionTable::setBlockQueue(PartitionId pId, ChangeTableType tableType, NodeId nodeId) {
 	if (pId >= getPartitionNum() || nodeId >= getNodeNum()) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_PT_SET_INVALID_NODE_ID, "");
@@ -2402,12 +2662,7 @@ void PartitionTable::setBlockQueue(
 	}
 }
 
-
-void PartitionTable::handleErrorStatus(
-	PartitionId pId,
-	NodeId targetNode,
-	int32_t status) {
-
+void PartitionTable::handleErrorStatus(PartitionId pId, NodeId targetNode, int32_t status) {
 	if (status == PT_ERROR_LONG_SYNC_FAIL) {
 		PartitionRole role;
 		getPartitionRole(pId, role);
@@ -2538,6 +2793,9 @@ std::string PartitionTable::dumpNodes() {
 		else {
 			ss << CommonUtility::getTimeStr(nodeInfo->heartbeatTimeout_);
 		}
+		ss << " (";
+		ss << CommonUtility::getTimeStr(nodeInfo->startTime_);
+		ss << ") ";
 		if (enableRackZoneAwareness_) {
 			ss << " (";
 			{
@@ -2717,7 +2975,8 @@ std::string PartitionTable::dumpPartitionsNew(util::StackAllocator& alloc, Table
 }
 
 
-std::string PartitionTable::dumpPartitions(util::StackAllocator& alloc, TableType type, bool isSummary) {
+
+std::string PartitionTable::dumpPartitions(util::StackAllocator& alloc, TableType type, KeepLogManager* keepLogManager) {
 
 	util::StackAllocator::Scope scope(alloc);
 	util::NormalOStringStream ss;
@@ -2816,10 +3075,8 @@ std::string PartitionTable::dumpPartitions(util::StackAllocator& alloc, TableTyp
 		}
 		ss << "[" << std::setw(lsnDigit_) << maxLsnList_[pId] << "]";
 		ss << "<" << revision.toString() << ">";
-		ss << "(" << psum << ")" << terminateCode;
-	}
-	if (isSummary) {
-		ss.str("");
+		ss << "(" << psum << ")";
+		ss << terminateCode;
 	}
 	for (pos = 0; pos < countList.size(); pos++) {
 		ss << countList[pos];
@@ -3541,9 +3798,9 @@ bool PartitionTable::setGoalPartitions(util::StackAllocator& alloc,
 					roleList.push_back(role);
 				}
 			}
-			if (isMaster() && !stableCheck) {
-				GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_GOAL));
-			}
+//			if (isMaster() && !stableCheck) {
+//				GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_GOAL));
+//			}
 		}
 		if (stableCheck) {
 			if (partitionCount == static_cast<int64_t>(getPartitionNum())) {
@@ -3628,9 +3885,9 @@ bool PartitionTable::GoalPartition::load() {
 	}
 	try {
 		if (!util::FileSystem::exists(goalFileName_.c_str())) {
-			if (!isEnableInitialGenerate()) {
-				GS_TRACE_CLUSTER_INFO("Failed to load stable goal (fileName='" << goalFileName_ << "'  is already exists )");
-			}
+//			if (!isEnableInitialGenerate()) {
+//				GS_TRACE_CLUSTER_INFO("Failed to load stable goal (fileName='" << goalFileName_ << "'  is already exists )");
+//			}
 			return false;
 		}
 		std::allocator<char> alloc;
@@ -3640,7 +3897,7 @@ bool PartitionTable::GoalPartition::load() {
 		CommonUtility::replaceAll(allStr, "\r\n", "\n");
 		CommonUtility::replaceAll(allStr, "\r", "\n");
 		goalData_ = allStr;
-		GS_TRACE_CLUSTER_INFO("Load stable goal (fileName='" << goalFileName_ << "')");
+//		GS_TRACE_CLUSTER_INFO("Load stable goal (fileName='" << goalFileName_ << "')");
 		return true;
 	}
 	catch (std::exception& e) {
@@ -3800,3 +4057,6 @@ bool PartitionTable::getStandbyMode(NodeId nodeId) {
 	return nodes_[nodeId].standbyMode_;
 }
 
+void PartitionTable::initialize(ManagerSet* mgrSet) {
+	mgrSet_ = mgrSet;
+}

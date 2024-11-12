@@ -899,7 +899,8 @@ SQLContext::SQLContext(
 		setGroup_(false),
 		groupId_(LocalTempStore::UNDEF_GROUP_ID)
 		,
-		isAdministrator_(false)
+		isAdministrator_(false),
+		allocLimitter_(NULL)
 {
 	setAllocator(alloc);
 }
@@ -1071,6 +1072,14 @@ void SQLContext::setTimeZone(const util::TimeZone &zone) {
 	timeZone_ = zone;
 }
 
+util::AllocatorLimitter* SQLContext::getAllocatorLimitter() {
+	return allocLimitter_;
+}
+
+void SQLContext::setAllocatorLimitter(util::AllocatorLimitter *allocLimitter) {
+	allocLimitter_ = allocLimitter;
+}
+
 SQLProcessor::Profiler::Profiler(const util::StdAllocator<void, void> &alloc) :
 		alloc_(alloc),
 		option_(NULL, alloc),
@@ -1177,6 +1186,19 @@ SQLProcessor::Profiler::Profiler(
 		result_(NULL, alloc),
 		streamData_(NULL, alloc),
 		forAnalysis_(false) {
+}
+
+SQLProcessor::Holder::Holder(SQLProcessor &processor) :
+		processor_(processor) {
+}
+
+SQLProcessor::Holder::~Holder() {
+	SQLProcessor::Factory factory;
+	factory.destroy(&processor_);
+}
+
+SQLProcessor& SQLProcessor::Holder::get() {
+	return processor_;
 }
 
 SQLProcessor::Profiler::CoderBase::CoderBase(util::StackAllocator &alloc) :

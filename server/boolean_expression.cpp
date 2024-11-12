@@ -893,15 +893,17 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 /*!
  * @brief get usable indices
  */
-void BoolExpr::getIndexBitmapAndInfo(TransactionContext &txn,
-	BaseContainer &baseContainer, Query &queryObj, uint32_t &mapBitmap,
-	ColumnInfo *&indexColumnInfo) {
+void BoolExpr::getIndexBitmapAndInfo(
+		TransactionContext &txn, BaseContainer &baseContainer, Query &queryObj,
+		uint32_t &mapBitmap, ColumnInfo *&indexColumnInfo,
+		bool withPartialMatch) {
 	Expr *unary;
 	Expr::Operation op = Expr::NONE;
 	if (this->opeType_ == UNARY) {
 		unary = this->unary_;
-		unary->getIndexBitmapAndInfo(txn, baseContainer, queryObj, mapBitmap,
-			indexColumnInfo, op, false);
+		unary->getIndexBitmapAndInfo(
+				txn, baseContainer, queryObj, mapBitmap, indexColumnInfo, op,
+				false, withPartialMatch);
 		if (unary->isColumn()) {
 #define TOBITMAP(x) (1 << (x))
 			mapBitmap &= TOBITMAP(MAP_TYPE_BTREE);
@@ -918,7 +920,8 @@ void BoolExpr::getIndexBitmapAndInfo(TransactionContext &txn,
 	else if (this->opeType_ == NOT) {
 		unary = this->operands_[0]->unary_;
 		unary->getIndexBitmapAndInfo(
-			txn, baseContainer, queryObj, mapBitmap, indexColumnInfo, op, true);
+				txn, baseContainer, queryObj, mapBitmap, indexColumnInfo, op,
+				true, withPartialMatch);
 	}
 	else {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,

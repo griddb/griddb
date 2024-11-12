@@ -23,10 +23,16 @@
 class ResourceSet;
 class Query;
 
+class TransactionContext;
+class FullContainerKey;
+class DataStoreV4;
+
 struct SQLContainerUtils {
 	typedef SQLValues::TupleColumnList TupleColumnList;
 
 	typedef SQLExprs::Expression Expression;
+
+	typedef SQLOps::ContainerLocation ContainerLocation;
 
 	typedef SQLOps::ColumnTypeList ColumnTypeList;
 	typedef SQLOps::OpStore OpStore;
@@ -154,8 +160,15 @@ struct SQLContainerUtils::ContainerUtils {
 	static bool predicateToMetaTarget(
 			SQLValues::ValueContext &cxt, const SQLExprs::Expression *pred,
 			uint32_t partitionIdColumn, uint32_t containerNameColumn,
-			uint32_t containerIdColumn, PartitionId partitionCount,
-			PartitionId &partitionId, bool &placeholderAffected);
+			uint32_t containerIdColumn, uint32_t partitionNameColumn,
+			PartitionId partitionCount, PartitionId &partitionId,
+			bool &placeholderAffected);
+	static FullContainerKey* predicateToContainerKey(
+			SQLValues::ValueContext &cxt, TransactionContext &txn,
+			DataStoreV4 &dataStore, const Expression *pred,
+			const ContainerLocation &location, PartitionId partitionCount,
+			bool forCore, util::String &dbNameStr, bool &fullReduced,
+			PartitionId &reducedPartitionId);
 
 	static SQLExprs::SyntaxExpr tqlToPredExpr(
 			util::StackAllocator &alloc, const Query &query);

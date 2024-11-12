@@ -216,23 +216,25 @@ private:
 	std::vector<uint8_t> buffer_;
 	bool pipeline_;
 	int64_t fileSize_;
+	int64_t initialLogVersion_;
+	std::vector<int32_t> logversionList_;
 
 public:
 	LogIterator(LogManager<L>* logmanager, int64_t logVersion)
 		: logManager_(logmanager), alloc_(&logmanager->getAllocator()),
 		  nextFile_(0), logFile_(NULL), logversion_(logVersion),
-		  offset_(0), lastLsn_(0), checkLsn_(-1), isXLog_(false), pipeline_(false), fileSize_(-1) {
+		  offset_(0), lastLsn_(0), checkLsn_(-1), isXLog_(false), pipeline_(false), fileSize_(-1), initialLogVersion_(-1) {
 	};
 
 	LogIterator(LogManager<L>* logmanager, int64_t logVersion, uint64_t offset, uint64_t fileSize)
 		: logManager_(logmanager), alloc_(&logmanager->getAllocator()),
 		  nextFile_(0), logFile_(NULL), logversion_(logVersion),
-		  offset_(offset), lastLsn_(0), checkLsn_(-1), isXLog_(false), pipeline_(true), fileSize_(fileSize) {
+		  offset_(offset), lastLsn_(0), checkLsn_(-1), isXLog_(false), pipeline_(true), fileSize_(fileSize), initialLogVersion_(-1) {
 	};
 
 	void add(const std::string& filename);
 
-	bool checkExists(LogSequentialNumber offset);
+	bool checkExists(LogSequentialNumber lsn);
 
 	std::unique_ptr<Log> next(bool forRecovery);
 	void fin();
@@ -247,8 +249,28 @@ public:
 		return offset_;
 	}
 
+	void setOffset(int64_t offset) {
+		offset_ = offset;
+	}
+
 	int64_t getFileSize() {
 		return fileSize_;
+	}
+
+	void setLogVersion(int64_t logVersion) {
+		initialLogVersion_ = logVersion;
+	}
+
+	int64_t getLogVersion() {
+		return initialLogVersion_;
+	}
+
+	std::vector<int32_t>& getLogVersionList() {
+		return logversionList_;
+	}
+
+	void setLogVersionList(std::vector<int32_t>& logVersionList) {
+		logversionList_ = logVersionList;
 	}
 
 	std::string toString() const;
@@ -425,6 +447,10 @@ public:
 
 	std::tuple<LogIterator<L>, LogIterator<L> > init(bool byCP);
 
+	void setExistLsnMap(int64_t logversion, LogSequentialNumber lsn) {
+		existLsnMap_[logversion] = lsn;
+	}
+
 	void init(int64_t logversion, bool withFlush, bool byCP);
 
 	inline int64_t getLogVersion() { return logversion_; };
@@ -481,6 +507,8 @@ public:
 	LogIterator<L> createCPLogIterator(LogSequentialNumber lsn);
 
 	LogIterator<L> createChunkDataLogIterator();
+
+	LogIterator<L> createXLogVersionIterator(int64_t logversion);
 
 	void copyCpLog(const char* path, uint8_t* buffer, size_t bufferSize);
 	void copyXLog(const char* path, uint8_t* buffer, size_t bufferSize);
@@ -572,8 +600,8 @@ void LogIterator<L>::add(const std::string& filename) {
 template<class L>
 bool LogIterator<L>::checkExists(LogSequentialNumber lsn) {
 	int64_t offset = 0;
-
 	{
+		if (offset_ != 0) offset = offset_;
 		util::LockGuard<Locker> guard(*logManager_->locker());
 		if (lsn < logManager_->getStartLSN()) {
 			return false;
@@ -623,7 +651,9 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 					nextFile_++;
 					if (!pipeline_) {
 						logFile_->open();
-						offset_ = 0;
+						if (forRecovery) {
+							offset_ = 0;
+						}
 					}
 					else {
 						if (!logFile_->readOnlyOpen()) {
@@ -669,7 +699,7 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 					} else {
 						logFile_->close();
 						delete logFile_;
-						logFile_ = NULL;
+						logFile_ = NULL; 
 						continue;
 					}
 				}
@@ -920,6 +950,15 @@ std::tuple<LogIterator<L>, LogIterator<L> > LogManager<L>::init(bool byCP) {
 			xit.add(oss.str());
 		}
 	}
+	std::vector<int32_t> result;
+	for (int32_t ver = mincplogver; ver <= latestcplogver; ver++) {
+		auto result2 = std::find(xlogs.begin(), xlogs.end(), ver);
+		if (result2 != xlogs.end()) {
+			result.push_back(ver);
+		}
+	}
+	xit.setLogVersionList(result);
+
 	logversion_ = latestcplogver;
 	return std::forward_as_tuple(cpit, xit);
 }
@@ -1209,7 +1248,7 @@ template <class L>
 LogSequentialNumber LogManager<L>::getStartLSN() {
 	assert(!existLsnMap_.empty());
 	const auto& itr = existLsnMap_.begin();
-	return itr->second - 1;
+	return (itr->second == 0) ? 0 : itr->second - 1;
 }
 
 /*!
@@ -1471,6 +1510,23 @@ LogIterator<L> LogManager<L>::createXLogIterator(LogSequentialNumber lsn) {
 			LogManagerConst::XLOG_FILE_SUFFIX;
 	xLogIt.add(oss.str());
 	xLogIt.markXLog();
+	xLogIt.setLogVersion(logversion);
+	
+	flushXLog(LOG_WRITE_WAL_BUFFER, false);
+	flushXLog(LOG_FLUSH_FILE, false);
+	return xLogIt;
+}
+
+template <class L>
+LogIterator<L> LogManager<L>::createXLogVersionIterator(int64_t logversion) {
+	LogIterator<L> xLogIt(this, logversion);
+	util::NormalOStringStream oss;
+	oss << xLogPath_ << "/" << pId_ << "_" << logversion <<
+		LogManagerConst::XLOG_FILE_SUFFIX;
+	xLogIt.add(oss.str());
+	xLogIt.markXLog();
+	xLogIt.setLogVersion(logversion);
+
 	flushXLog(LOG_WRITE_WAL_BUFFER, false);
 	flushXLog(LOG_FLUSH_FILE, false);
 	return xLogIt;

@@ -108,6 +108,10 @@ struct StatTaskProfilerInfo {
 		scanBufferSwapWriteSize_(0)
 	{}
 
+	int64_t getMemoryUse() const;
+	int64_t getSqlStoreUse() const;
+	int64_t getDataStoreAccess(SQLExecutionManager &executionManager) const;
+
 	int64_t id_;
 	int64_t inputId_;
 	util::String name_;
@@ -579,7 +583,9 @@ public:
 			}
 			void createProcessor(util::StackAllocator& alloc, JobInfo* jobInfo,
 				TaskId taskId, TaskInfo* taskInfo);
-			static void setupContextBase(SQLContext* cxt, JobManager* jobManager);
+			static void setupContextBase(
+					SQLContext* cxt, JobManager* jobManager,
+					util::AllocatorLimitter *limitter);
 			std::string  dump();
 
 			bool getProfiler(util::StackAllocator& alloc, StatJobProfilerInfo& jobProf,
@@ -755,6 +761,7 @@ public:
 			int64_t scanBufferSwapWriteSize_;
 
 			TaskInterruptionHandler interruptionHandler_;
+			util::AllocatorLimitter memoryLimitter_;
 			void setupContextTask();
 			void setupProfiler(TaskInfo* taskInfo);
 		};
@@ -1005,7 +1012,8 @@ public:
 
 	private:
 
-		util::StackAllocator* getStackAllocator();
+		util::StackAllocator* getStackAllocator(
+				util::AllocatorLimitter *limitter);
 		void executeJobStart(EventContext* ec, int64_t waitTime);
 		void executeTask(EventContext* ec, Event* ev, JobManager::ControlType controlType,
 			TaskId taskId, TaskId inputId, bool isEmpty, bool isComplete,
@@ -1015,7 +1023,8 @@ public:
 		void decodeOptional(EventByteInStream& in);
 
 		static bool isDQLProcessor(SQLType::Id type);
-		SQLVarSizeAllocator* getLocalVarAllocator();
+		SQLVarSizeAllocator* getLocalVarAllocator(
+				util::AllocatorLimitter &limitter);
 		void releaseStackAllocator(util::StackAllocator* alloc);
 		void releaseLocalVarAllocator(SQLVarSizeAllocator* varAlloc);
 		void encodeHeader(util::ByteStream<util::XArrayOutStream<> >& out, int32_t type, uint32_t size);
@@ -1636,6 +1645,10 @@ struct StatJobProfilerInfo {
 		taskProfs_(alloc) {
 		jobId_ = targetJobId.dump(alloc).c_str();
 	}
+
+	int64_t getMemoryUse() const;
+	int64_t getSqlStoreUse() const;
+	int64_t getDataStoreAccess(SQLExecutionManager &executionManager) const;
 
 	int64_t id_;
 	util::String startTime_;

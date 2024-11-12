@@ -841,9 +841,9 @@ QueryForMetaContainer::QueryForMetaContainer(
 	}
 }
 
-void QueryForMetaContainer::doQuery(
+bool QueryForMetaContainer::doQuery(
 		TransactionContext &txn, MetaProcessorSource &processorSource,
-		ResultSet &rs) {
+		ResultSet &rs, util::XArray<uint8_t> &suspendedData) {
 	check(txn);
 
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
@@ -853,50 +853,54 @@ void QueryForMetaContainer::doQuery(
 	container_.getColumnInfoList(columnInfoList);
 
 	const uint32_t columnCount = container_.getColumnNum();
+	const bool rowIdIncluded = true;
 	OutputMessageRowStore out(
 			dataStore->getConfig(),
 			columnInfoList.data(), columnCount,
 			*rs.getRSRowDataFixedPartBuffer(),
-			*rs.getRSRowDataVarPartBuffer(), true);
+			*rs.getRSRowDataVarPartBuffer(), rowIdIncluded);
 
 	const MetaContainerInfo &info = container_.getMetaContainerInfo();
 	MessageRowHandler handler(
 			out, pWhereExpr_, *container_.getObjectManager(), container_.getRowAllocateStrategy(),
 			getFunctionMap());
 	MetaProcessor proc(txn, info.id_, info.forCore_);
+	tryResume(txn, out, proc, suspendedData);
 
-	const TransactionManager *txnMgr =
-			processorSource.transactionManager_;
+	const TransactionManager *txnMgr = processorSource.transactionManager_;
 	const PartitionId partitionCount  =
 			txnMgr->getPartitionGroupConfig().getPartitionCount();
 
-	bool reduced;
+	util::String dbNameStr(alloc);
+	bool fullReduced;
 	PartitionId reducedPartitionId;
 	const FullContainerKey *containerKey = predicateToContainerKey(
-			txn, *dataStore, processorSource.dbId_, pWhereExpr_, info,
-			NULL, partitionCount, reduced, reducedPartitionId);
+			txn, *dataStore, *this, processorSource.dbId_, info.refId_,
+			partitionCount, dbNameStr, fullReduced, reducedPartitionId);
 	proc.setContainerKey(containerKey);
+	proc.setFullReduced(fullReduced);
 
-	if (!reduced || containerKey != NULL) {
+	if (doExecute()) {
 		proc.scan(txn, processorSource, handler);
+
+		rs.getRowDataFixedPartBuffer()->assign(
+				rs.getRSRowDataFixedPartBuffer()->begin(),
+				rs.getRSRowDataFixedPartBuffer()->end());
+		rs.getRowDataVarPartBuffer()->assign(
+				rs.getRSRowDataVarPartBuffer()->begin(),
+				rs.getRSRowDataVarPartBuffer()->end());
+
+		const ResultSize resultNum = out.getRowCount();
+
+		rs.setDataPos(
+				0, static_cast<uint32_t>(rs.getRowDataFixedPartBuffer()->size()),
+				0, static_cast<uint32_t>(rs.getRowDataVarPartBuffer()->size()));
+
+		rs.setResultType(RESULT_ROWSET, resultNum, true);
+		rs.setFetchNum(resultNum);
 	}
 
-	rs.getRowDataFixedPartBuffer()->assign(
-			rs.getRSRowDataFixedPartBuffer()->begin(),
-			rs.getRSRowDataFixedPartBuffer()->end());
-	rs.getRowDataVarPartBuffer()->assign(
-			rs.getRSRowDataVarPartBuffer()->begin(),
-			rs.getRSRowDataVarPartBuffer()->end());
-
-	const ResultSize resultNum = out.getRowCount();
-
-	rs.setDataPos(
-			0, static_cast<uint32_t>(rs.getRowDataFixedPartBuffer()->size()),
-			0, static_cast<uint32_t>(rs.getRowDataVarPartBuffer()->size()));
-
-	rs.setResultType(RESULT_ROWSET, resultNum, true);
-	rs.setFetchNum(resultNum);
-
+	const bool reduced = (fullReduced || containerKey != NULL);
 	if (reduced) {
 		const bool uncovered = false;
 		rs.setDistributedTargetStatus(uncovered, reduced);
@@ -906,6 +910,35 @@ void QueryForMetaContainer::doQuery(
 			distTarget->push_back(reducedPartitionId);
 		}
 	}
+
+	const bool suspended = trySuspend(proc, rs, suspendedData);
+
+	if (!suspended && doExplain()) {
+		const char8_t *mode = "SCAN_FULL";
+		if (reduced) {
+			mode = (fullReduced ? "SCAN_NONE" : "SCAN_REDUCED");
+		}
+		addExplain(0, "META_CONTAINER", "STRING", mode, "");
+
+		if (doExecute()) {
+			const MetaProcessor::Stats stats = proc.getStats();
+			util::NormalOStringStream os;
+			os << static_cast<int32_t>(std::min<int64_t>(
+					stats.scannedRowCount_,
+					std::numeric_limits<int32_t>::max()));
+			addExplain(1, "META_SCANNED_ROWS", "INTEGER", os.str().c_str(), "");
+		}
+
+		finishQuery(txn, rs, dataStore->getConfig());
+		rs.setDataPos(
+				0, static_cast<uint32_t>(
+						rs.getRowDataFixedPartBuffer()->size()),
+				0, static_cast<uint32_t>(
+						rs.getRowDataVarPartBuffer()->size()));
+		rs.setFetchNum(rs.getResultNum());
+	}
+
+	return suspended;
 }
 
 Collection* QueryForMetaContainer::getCollection() {
@@ -935,11 +968,6 @@ void QueryForMetaContainer::check(TransactionContext &txn) {
 				"ORDER BY is not implemented for meta container");
 	}
 
-	if (doExplain()) {
-		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
-				"EXPLAIN is not implemented for meta container");
-	}
-
 	size_t numSelection = getSelectionExprLength();
 	if (numSelection <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
@@ -958,276 +986,131 @@ void QueryForMetaContainer::check(TransactionContext &txn) {
 	}
 }
 
-FullContainerKey* QueryForMetaContainer::predicateToContainerKey(
-		TransactionContext &txn, DataStoreV4 &dataStore, DatabaseId dbId,
-		const BoolExpr *expr, const MetaContainerInfo &metaInfo,
-		const MetaContainerInfo *coreMetaInfo, PartitionId partitionCount,
-		bool &reduced, PartitionId &reducedPartitionId) {
-	reduced = false;
-	reducedPartitionId = UNDEF_PARTITIONID;
+void QueryForMetaContainer::tryResume(
+		TransactionContext &txn, OutputMessageRowStore &outStore,
+		MetaProcessor &proc, util::XArray<uint8_t> &suspendedData) {
+	if (suspendedData.empty()) {
+		return;
+	}
 
-	if (coreMetaInfo == NULL) {
-		const MetaContainerInfo *resolvedInfo;
-		if (metaInfo.forCore_) {
-			resolvedInfo = &metaInfo;
-		}
-		else {
-			const bool forCore = true;
-			const MetaType::InfoTable &infoTable =
-					MetaType::InfoTable::getInstance();
-			resolvedInfo = &infoTable.resolveInfo(metaInfo.id_, forCore);
-		}
-		return predicateToContainerKey(
-				txn, dataStore, dbId, expr, metaInfo, resolvedInfo,
-				partitionCount, reduced, reducedPartitionId);
+	util::ArrayByteInStream in(
+			(util::ArrayInStream(suspendedData.data(), suspendedData.size())));
+	try {
+		MetaContainerId id;
+		ResultSize rowCount;
+		MetaProcessor::ScanPosition scanPos;
+
+		in >> id;
+		in >> rowCount;
+		scanPos.decode(in);
+
+		std::pair<void*, uint32_t> fixedData = readData(in, suspendedData);
+		std::pair<void*, uint32_t> varData = readData(in, suspendedData);
+
+		copyRowStore(txn, outStore, id, rowCount, fixedData, varData);
+		proc.setNextScanPosition(scanPos);
+	}
+	catch (...) {
+		std::exception e;
+		GS_RETHROW_USER_ERROR(e, "");
+	}
+}
+
+bool QueryForMetaContainer::trySuspend(
+		MetaProcessor &proc, ResultSet &rs,
+		util::XArray<uint8_t> &suspendedData) {
+	suspendedData.clear();
+
+	if (!proc.isSuspended()) {
+		return false;
+	}
+
+	const MetaContainerInfo &info = container_.getMetaContainerInfo();
+	util::XArrayByteOutStream out((util::XArrayOutStream<>(suspendedData)));
+	try {
+		out << info.id_;
+		out << rs.getResultNum();
+		proc.getNextScanPosition().encode(out);
+
+		writeData(out, *rs.getRSRowDataFixedPartBuffer());
+		writeData(out, *rs.getRowDataVarPartBuffer());
+	}
+	catch (...) {
+		std::exception e;
+		GS_RETHROW_USER_ERROR(e, "");
+	}
+
+	return true;
+}
+
+void QueryForMetaContainer::copyRowStore(
+		TransactionContext &txn, OutputMessageRowStore &outStore,
+		ContainerId id, ResultSize rowCount,
+		const std::pair<void*, uint32_t> &fixedData,
+		const std::pair<void*, uint32_t> &varData) {
+	const MetaContainerInfo &info = container_.getMetaContainerInfo();
+	if (id != info.id_) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
+				"Inconsistent meta container ID");
 	}
 
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
-	const MetaContainerInfo::CommonColumnInfo &commonInfo =
-			coreMetaInfo->commonInfo_;
+	DataStoreV4 *dataStore = container_.getDataStore();
 
-	FullContainerKey *containerKey = NULL;
-	if (commonInfo.containerNameColumn_ != UNDEF_COLUMNID) {
-		util::String containerName(alloc);
-		if (!predicateToContainerName(
-				expr, metaInfo, *coreMetaInfo, containerName)) {
-			return NULL;
-		}
-		try {
-			containerKey = ALLOC_NEW(alloc) FullContainerKey(
-					alloc, KeyConstraint::getNoLimitKeyConstraint(), dbId,
-					containerName.c_str(), containerName.size());
-		}
-		catch (...) {
-		}
-	}
-	else if (commonInfo.containerIdColumn_ != UNDEF_COLUMNID) {
-		int64_t partitionId = -1;
-		int64_t containerId = -1;
-		if (!predicateToContainerId(
-				expr, metaInfo, *coreMetaInfo, partitionId, containerId)) {
-			return NULL;
-		}
+	util::XArray<ColumnInfo> columnInfoList(alloc);
+	container_.getColumnInfoList(columnInfoList);
 
-		if (partitionId != static_cast<int64_t>(txn.getPartitionId())) {
-			reduced = true;
-			if (partitionId >= 0 &&
-					partitionId < static_cast<int64_t>(partitionCount)) {
-				reducedPartitionId = static_cast<PartitionId>(partitionId);
+	const uint32_t columnCount = container_.getColumnNum();
+
+	const bool rowIdIncluded = true;
+	InputMessageRowStore inStore(
+			dataStore->getConfig(), columnInfoList.data(), columnCount,
+			fixedData.first, fixedData.second, varData.first, varData.second,
+			rowCount, rowIdIncluded);
+
+	while (inStore.next()) {
+		outStore.beginRow();
+		outStore.setRowId(outStore.getRowCount());
+		for (uint32_t i = 0; i < columnCount; i++) {
+			if (inStore.isNullValue(i)) {
+				outStore.setNull(i);
 			}
-			return NULL;
-		}
-		try {
-			KeyDataStoreValue keyStoreValue = dataStore.getKeyDataStore()->get(alloc, static_cast<ContainerId>(containerId));
-			ContainerAutoPtr containerAutoPtr(txn, &dataStore, keyStoreValue.oId_, ANY_CONTAINER, false);
-			BaseContainer *container = containerAutoPtr.getBaseContainer();
-
-			if (container == NULL) {
-				return NULL;
+			else {
+				const void *data;
+				uint32_t size;
+				inStore.getField(i, data, size);
+				outStore.setField(i, data, size);
 			}
-			containerKey = ALLOC_NEW(alloc) FullContainerKey(
-					container->getContainerKey(txn));
 		}
-		catch (...) {
-		}
+		outStore.next();
 	}
-
-	reduced = (containerKey != NULL);
-	if (reduced) {
-		const ContainerHashMode hashMode = CONTAINER_HASH_MODE_CRC32;
-
-		reducedPartitionId = KeyDataStore::resolvePartitionId(
-				alloc, *containerKey, partitionCount, hashMode);
-	}
-
-	return containerKey;
 }
 
-bool QueryForMetaContainer::predicateToContainerName(
-		const Expr *expr, const MetaContainerInfo &metaInfo,
-		const MetaContainerInfo &coreMetaInfo, util::String &containerName) {
-	if (expr == NULL) {
-		return false;
+std::pair<void*, uint32_t> QueryForMetaContainer::readData(
+		util::ArrayByteInStream &in, util::XArray<uint8_t> &base) {
+	uint32_t size;
+	in >> size;
+
+	if (size > in.base().remaining()) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR, "");
 	}
 
-	const BoolExpr *boolExpr = findBoolExpr(*expr);
-	if (boolExpr != NULL) {
-		const BoolExpr::BoolTerms *andOperands = findAndOperands(*boolExpr);
-		if (andOperands != NULL) {
-			for (BoolExpr::BoolTerms::const_iterator it = andOperands->begin();
-					it != andOperands->end(); ++it) {
-				if (predicateToContainerName(
-						*it, metaInfo, coreMetaInfo, containerName)) {
-					return true;
-				}
-			}
-			return false;
-		}
+	void *addr = base.data() + in.base().position();
+	in.base().position(in.base().position() + size);
 
-		return predicateToContainerName(
-				findUnary(*boolExpr), metaInfo, coreMetaInfo, containerName);
-	}
-
-	uint32_t baseColumnId;
-	const Value *value;
-	if (findEqCond(*expr, baseColumnId, value)) {
-		const uint32_t columnId =
-				getCoreColumnId(baseColumnId, metaInfo, coreMetaInfo);
-		const MetaContainerInfo::CommonColumnInfo &commonInfo =
-				coreMetaInfo.commonInfo_;
-
-		if (columnId != commonInfo.containerNameColumn_) {
-			return false;
-		}
-
-		if (value->getType() != COLUMN_TYPE_STRING) {
-			return false;
-		}
-
-		containerName.assign(
-				reinterpret_cast<const char8_t*>(value->data()), value->size());
-		return true;
-	}
-
-	return false;
+	return std::make_pair(addr, size);
 }
 
-bool QueryForMetaContainer::predicateToContainerId(
-		const Expr *expr, const MetaContainerInfo &metaInfo,
-		const MetaContainerInfo &coreMetaInfo, int64_t &partitionId,
-		int64_t &containerId) {
-	if (expr == NULL) {
-		return false;
+void QueryForMetaContainer::writeData(
+		util::XArrayByteOutStream &out, const util::XArray<uint8_t> &data) {
+	if (data.size() > std::numeric_limits<uint32_t>::max()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED, "");
 	}
 
-	const BoolExpr *boolExpr = findBoolExpr(*expr);
-	if (boolExpr != NULL) {
-		const BoolExpr::BoolTerms *andOperands = findAndOperands(*boolExpr);
-		if (andOperands != NULL) {
-			for (BoolExpr::BoolTerms::const_iterator it = andOperands->begin();
-					it != andOperands->end(); ++it) {
-				if (predicateToContainerId(
-						*it, metaInfo, coreMetaInfo, partitionId,
-						containerId)) {
-					return true;
-				}
-			}
-			return false;
-		}
-
-		return predicateToContainerId(
-				findUnary(*boolExpr), metaInfo, coreMetaInfo, partitionId,
-				containerId);
-	}
-
-	uint32_t baseColumnId;
-	const Value *value;
-	if (findEqCond(*expr, baseColumnId, value)) {
-		const uint32_t columnId =
-				getCoreColumnId(baseColumnId, metaInfo, coreMetaInfo);
-		const MetaContainerInfo::CommonColumnInfo &commonInfo =
-				coreMetaInfo.commonInfo_;
-
-		int64_t *condValueRef;
-		if (columnId == commonInfo.partitionIndexColumn_) {
-			condValueRef = &partitionId;
-		}
-		else if (columnId == commonInfo.containerIdColumn_) {
-			condValueRef = &containerId;
-		}
-		else {
-			return false;
-		}
-
-		if (!value->isNumerical()) {
-			return false;
-		}
-
-		*condValueRef = value->getLong();
-		return (partitionId != -1 && containerId != -1);
-	}
-
-	return false;
-}
-
-uint32_t QueryForMetaContainer::getCoreColumnId(
-		uint32_t columnId, const MetaContainerInfo &metaInfo,
-		const MetaContainerInfo &coreMetaInfo) {
-	if (columnId >= metaInfo.columnCount_) {
-		assert(false);
-		return UNDEF_COLUMNID;
-	}
-
-	const ColumnId refId = metaInfo.columnList_[columnId].refId_;
-	if (refId == UNDEF_COLUMNID) {
-		assert(metaInfo.forCore_);
-		return columnId;
-	}
-
-	if (refId >= coreMetaInfo.columnCount_) {
-		assert(false);
-		return UNDEF_COLUMNID;
-	}
-
-	return refId;
-}
-
-const BoolExpr* QueryForMetaContainer::findBoolExpr(const Expr &expr) {
-	if (ExprAccessor::getType(expr) != Expr::BOOL_EXPR) {
-		return NULL;
-	}
-
-	return static_cast<const BoolExpr*>(&expr);
-}
-
-const BoolExpr::BoolTerms* QueryForMetaContainer::findAndOperands(
-		const BoolExpr &expr) {
-	if (BoolExprAccessor::getOpType(expr) != BoolExpr::AND) {
-		return NULL;
-	}
-
-	return &BoolExprAccessor::getOperands(expr);
-}
-
-const Expr* QueryForMetaContainer::findUnary(const BoolExpr &expr) {
-	if (BoolExprAccessor::getOpType(expr) != BoolExpr::UNARY) {
-		return NULL;
-	}
-
-	return BoolExprAccessor::getUnary(expr);
-}
-
-bool QueryForMetaContainer::findEqCond(
-		const Expr &expr, uint32_t &columnId, const Value *&value) {
-	if (ExprAccessor::getType(expr) != Expr::EXPR) {
-		return false;
-	}
-
-	if (ExprAccessor::getOp(expr) != Expr::EQ) {
-		return false;
-	}
-	const ExprList *argList = ExprAccessor::getArgList(expr);
-	if (argList == NULL || argList->size() != 2) {
-		return false;
-	}
-
-	const Expr *columnExpr = (*argList)[0];
-	const Expr *valueExpr = (*argList)[1];
-	if (ExprAccessor::getType(*columnExpr) != Expr::COLUMN) {
-		std::swap(columnExpr, valueExpr);
-	}
-	if (ExprAccessor::getType(*columnExpr) != Expr::COLUMN ||
-			ExprAccessor::getType(*valueExpr) != Expr::VALUE) {
-		return false;
-	}
-
-	value = ExprAccessor::getValue(*valueExpr);
-	if (value == NULL) {
-		return false;
-	}
-
-	columnId = ExprAccessor::getColumnId(*columnExpr);
-	return true;
+	const uint32_t size = static_cast<uint32_t>(data.size());
+	out << size;
+	out.writeAll(data.data(), size);
 }
 
 QueryForMetaContainer::MessageRowHandler::MessageRowHandler(

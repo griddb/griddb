@@ -37,6 +37,7 @@ class RecoveryManager;
 class PartitionList;
 class NoLocker;
 class MutexLocker;
+class KeepLogManager;
 template <class L> class LogManager;
 
 
@@ -54,26 +55,35 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 
 
 #define GS_THROW_SYNC_ERROR(errorCode, context, s1, s2) \
-	GS_THROW_USER_ERROR(errorCode, s1 << ", (pId=" << context->getPartitionId() \
+	GS_THROW_USER_ERROR(errorCode, s1  \
+	<< " (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber() \
 	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
-	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" << s2);
-
+	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) \
+	<< ", event=" << EventTypeUtility::getEventTypeName(context->getEventType()) \
+	<< ") " << s2);
 
 #define GS_RETHROW_SYNC_ERROR(e, context, s1, s2) \
-	GS_RETHROW_USER_OR_SYSTEM(e, s1 << ", (pId=" << context->getPartitionId() \
+	GS_RETHROW_USER_OR_SYSTEM(e, s1 \
+	<< " (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber() \
 	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
-	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" \
-	<< s2 << ", reason=" << GS_EXCEPTION_MESSAGE(e));
-
+	<< ", lsn=" << pt_->getLSN(context->getPartitionId())  \
+	<< ", event=" << EventTypeUtility::getEventTypeName(context->getEventType()) \
+	<< ")" \
+	<< ", reason=(" << GS_EXCEPTION_MESSAGE(e) \
+	<< ") " << s2);
 
 #define GS_RETHROW_LOG_REDO_ERROR(e, context, s1, s2) \
-	RM_RETHROW_LOG_REDO_ERROR(e, s1 << ", (pId=" << context->getPartitionId() \
-	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" \
-	<< context->getPartitionRevision().getRevisionNo() \
-	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" \
-	<< s2 << ", reason=" << GS_EXCEPTION_MESSAGE(e));
+	RM_RETHROW_LOG_REDO_ERROR(e, s1 \
+	<< "  (pId=" << context->getPartitionId() \
+	<< ", SSN=" << context->getSequentialNumber()  \
+	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
+	<< ", lsn=" << pt_->getLSN(context->getPartitionId())  \
+	<< ", event=" << EventTypeUtility::getEventTypeName(context->getEventType()) \
+	<< ")" \
+	<< ", reason=(" << GS_EXCEPTION_MESSAGE(e) \
+	<< ") " << s2);
 
 #define GS_TRACE_SYNC(context, s1, s2) \
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1 \
@@ -83,20 +93,23 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) \
 	<< ", logStartLsn=" << pt_->getStartLSN(context->getPartitionId()) \
 	<< ", elapsedMillis=" << context->getElapsedTime() \
-	<< ")" << s2);
+	<< ", event=" << EventTypeUtility::getEventTypeName(context->getEventType()) \
+	<< ") " << s2);
 
 #define GS_TRACE_SYNC_INFO(context, s1, s2) \
 	GS_TRACE_INFO(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1 \
-	<< ", (pId=" << context->getPartitionId() \
-	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" \
-	<< context->getPartitionRevision().getRevisionNo() \
-	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" << s2);
+	<< " (pId=" << context->getPartitionId() \
+	<< ", SSN=" << context->getSequentialNumber() \
+	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
+	<< ", event=" << EventTypeUtility::getEventTypeName(context->getEventType()) \
+	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) \
+	<< "), " << s2);
+
 
 #define GS_OUTPUT_SYNC(context, s1, s2) \
 	GS_TRACE_SYNC_INFO(context, s1, s2)
 
-
-#define GS_OUTPUT_SYNC2(s)
+#define GS_OUTPUT_SYNC2(lock, s1)
 
 #define GS_TRACE_SYNC_NORMAL(s1) \
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1);
@@ -161,6 +174,18 @@ struct SyncId {
 			return false;
 		}
 	}
+
+	bool operator<(const SyncId& right) const {
+		if (contextVersion_ < right.contextVersion_) {
+			return true;
+		}
+		if (contextVersion_ > right.contextVersion_) {
+			return false;
+		}
+		return (contextId_ < right.contextId_);
+	}
+
+
 	bool isValid() {
 		return (contextId_ != UNDEF_CONTEXT_ID);
 	}
@@ -252,6 +277,13 @@ struct SyncOptStat {
 	uint32_t partitionNum_;
 };
 
+struct SearchLogInfo {
+	SearchLogInfo() : lsn_(UNDEF_LSN), offset_(0), logVersion_(-1) {}
+	LogSequentialNumber lsn_;
+	int64_t offset_;
+	int64_t logVersion_;
+};
+
 /*!
 	@brief Represents contextual information around the current synchronization
 */
@@ -272,16 +304,16 @@ public:
 		return isDump_;
 	}
 
-	void setSendReady() {
-		isSendReady_ = true;
+	void setEvent(EventType eventType) {
+		eventType_ = eventType;
+	}
+
+	EventType getEventType() {
+		return eventType_;
 	}
 
 	void setPartitionTable(PartitionTable* pt) {
 		pt_ = pt;
-	}
-
-	bool isSendReady() {
-		return isSendReady_;
 	}
 
 	void resetCounter() {
@@ -307,10 +339,6 @@ public:
 
 	bool decrementCounter(NodeId syncTargetNodeId);
 
-	int32_t getCounter() {
-		return numSendBackup_;
-	}
-
 	void getSyncTargetNodeIds(
 		util::XArray<NodeId>& backups) {
 		for (size_t pos = 0; pos < sendBackups_.size(); pos++) {
@@ -318,22 +346,16 @@ public:
 		}
 	}
 
-	void setSyncTargetLsn(
-		NodeId syncTargetNodeId, LogSequentialNumber lsn);
-	void setSyncTargetEndLsn(
-		NodeId syncTargetNodeId, LogSequentialNumber lsn);
+	void setSyncTargetLsn(NodeId syncTargetNodeId, LogSequentialNumber lsn);
+	void setSyncTargetEndLsn(NodeId syncTargetNodeId, LogSequentialNumber lsn);
 
-	void setSyncTargetLsnWithSyncId(
-		NodeId syncTargetNodeId,
+	void setSyncTargetLsnWithSyncId(NodeId syncTargetNodeId,
 		LogSequentialNumber lsn, SyncId backupSyncId);
 
-	LogSequentialNumber getSyncTargetLsn(
-		NodeId syncTargetNodeId) const;
-	LogSequentialNumber getSyncTargetEndLsn(
-		NodeId syncTargetNodeId) const;
+	LogSequentialNumber getSyncTargetLsn(NodeId syncTargetNodeId) const;
+	LogSequentialNumber getSyncTargetEndLsn(NodeId syncTargetNodeId) const;
 
-	bool getSyncTargetLsnWithSyncId(
-		NodeId syncTargetNodeId,
+	bool getSyncTargetLsnWithSyncId(NodeId syncTargetNodeId,
 		LogSequentialNumber& backupLsn, SyncId& backupSyncId);
 
 	void getCatchupSyncId(SyncId& syncId) {
@@ -341,6 +363,14 @@ public:
 			return;
 		}
 		syncId = sendBackups_[0].backupSyncId_;
+	}
+
+	SyncId getCatchupSyncId() {
+		if (sendBackups_.size() == 0) {
+			SyncId syncId;
+			return SyncId();
+		}
+		return (sendBackups_[0].backupSyncId_);
 	}
 
 	int32_t getId() const {
@@ -381,17 +411,12 @@ public:
 		ptRev_ = ptRev;
 	}
 
-
 	PartitionId getPartitionId() const {
 		return pId_;
 	}
 
 	void setPartitionId(PartitionId pId) {
 		pId_ = pId;
-	}
-
-	uint32_t getCounter() const {
-		return numSendBackup_;
 	}
 
 	void setSyncCheckpointCompleted() {
@@ -402,24 +427,7 @@ public:
 		return isSyncCpCompleted_;
 	}
 
-	void setSyncCheckpointPending(bool flag) {
-		isSyncCpPending_ = flag;
-	}
-
-	bool isSyncCheckpointPending() {
-		return isSyncCpPending_;
-	}
-
-	void setSyncStartCompleted(bool flag) {
-		isSyncStartCompleted_ = flag;
-	}
-
-	bool isSyncStartCompleted() {
-		return isSyncStartCompleted_;
-	}
-
-	void getChunkInfo(
-		int32_t& chunkNum, int32_t& chunkSize) {
+	void getChunkInfo(int32_t& chunkNum, int32_t& chunkSize) {
 		chunkNum = chunkNum_;
 		chunkSize = chunkBaseSize_;
 	}
@@ -454,9 +462,8 @@ public:
 	int64_t getProcessedLogSize() {
 		return processedLogSize_;
 	}
-	void setProcessedLsn(
-		LogSequentialNumber startLsn, LogSequentialNumber endLsn) {
 
+	void setProcessedLsn(LogSequentialNumber startLsn, LogSequentialNumber endLsn) {
 		if (processedLogNum_ == 0) {
 			startLsn_ = startLsn;
 		}
@@ -479,8 +486,7 @@ public:
 		used_ = false;
 	}
 
-	void clear(
-		SyncVariableSizeAllocator& alloc, SyncOptStat* stat);
+	void clear(SyncVariableSizeAllocator& alloc, SyncOptStat* stat);
 
 	void setNextEmptyChain(SyncContext* next) {
 		nextEmptyChain_ = next;
@@ -495,29 +501,24 @@ public:
 		syncId.contextVersion_ = version_;
 	}
 
-	void copyLogBuffer(
-		SyncVariableSizeAllocator& alloc,
-		const uint8_t* logBuffer,
-		int32_t logBufferSize,
-		SyncOptStat* stat);
+	SyncId getSyncId() {
+		SyncId syncId;
+		syncId.contextId_ = id_;
+		syncId.contextVersion_ = version_;
+		return syncId;
+	}
 
-	void copyChunkBuffer(
-		SyncVariableSizeAllocator& alloc,
-		const uint8_t* chunkBuffer,
-		int32_t chunkSize,
-		int32_t chunkNum,
-		SyncOptStat* stat);
+	void copyLogBuffer(SyncVariableSizeAllocator& alloc, const uint8_t* logBuffer,
+		int32_t logBufferSize, SyncOptStat* stat);
 
-	void freeBuffer(
-		SyncVariableSizeAllocator& alloc,
-		SyncType syncType,
-		SyncOptStat* stat);
+	void copyChunkBuffer(SyncVariableSizeAllocator& alloc, const uint8_t* chunkBuffer, int32_t chunkSize,
+		int32_t chunkNum, SyncOptStat* stat);
 
-	void getLogBuffer(
-		uint8_t*& logBuffer, int32_t& logBufferSize);
+	void freeBuffer(SyncVariableSizeAllocator& alloc, SyncType syncType, SyncOptStat* stat);
 
-	void getChunkBuffer(
-		uint8_t*& chunkBuffer, int32_t chunkNo);
+	void getLogBuffer(uint8_t*& logBuffer, int32_t& logBufferSize);
+
+	void getChunkBuffer(uint8_t*& chunkBuffer, int32_t chunkNo);
 
 	std::string dump(uint8_t detailMode = 0);
 
@@ -581,6 +582,7 @@ public:
 			endAll();
 		}
 	}
+
 	std::string getSyncModeStr() {
 		if (mode_ == MODE_SHORTTERM_SYNC) {
 			return "SHORT_TERM_SYNC";
@@ -619,14 +621,15 @@ public:
 		return longSyncType_;
 	}
 
-	bool checkLongTermSync(int32_t checkCount);
+	bool checkLongTermSync(CheckpointService* cp, int32_t checkCount);
+	bool checkLongTermSyncCore(CheckpointService* cp, int32_t checkCount);
 
-	void setExecuteRecoveryChecpoint(bool flag) {
-		isExecuteRecoveryChecpoint_ = flag;
+	void setExecuteCheckpoint(bool flag) {
+		isExecuteCheckpoint_ = flag;
 	}
 
-	bool isExecuteRecoveryChecpoint() {
-		return isExecuteRecoveryChecpoint_;
+	bool isExecuteCheckpoint() {
+		return isExecuteCheckpoint_;
 	}
 
 	size_t getLogOffset() {
@@ -635,6 +638,19 @@ public:
 
 	void setLogOffset(size_t logOffset) {
 		logOffset_ = logOffset;
+	}
+
+	SearchLogInfo& getSearchLogInfo(NodeId nodeId);
+
+	void setKeepLogVersion(int64_t logVersion) {
+		keepLogVersion_ = logVersion;
+	}
+	int64_t getKeepLogVersion() {
+		return keepLogVersion_;
+	}
+
+	PartitionTable* getPartitionTable() {
+		return pt_;
 	}
 
 private:
@@ -673,14 +689,12 @@ private:
 	bool isCatchupSync_;
 
 	bool isSyncCpCompleted_;
-	bool isSyncCpPending_;
-	bool isSyncStartCompleted_;
 	SyncContext* nextEmptyChain_;
 	PartitionRevision ptRev_;
 	bool isDump_;
-	bool isSendReady_;
-	bool isExecuteRecoveryChecpoint_;
+	bool isExecuteCheckpoint_;
 	util::NormalXArray<SendBackup> sendBackups_;
+	std::map<NodeId, SearchLogInfo> searchLogInfos_;
 
 	int64_t processedChunkNum_;
 
@@ -713,6 +727,10 @@ private:
 	int64_t prevProcessedChunkNum_;
 	int64_t prevProcessedLogNum_;
 	size_t logOffset_;
+	int64_t keepLogVersion_;
+	EventType eventType_;
+	EventType prevEventType_;
+	int64_t stateStartTime_;
 };
 
 /*!
@@ -763,14 +781,12 @@ public:
 		return &syncOptStat_;
 	}
 
-	SyncManager(
-		const ConfigTable& configTable, PartitionTable* pt);
+	SyncManager(const ConfigTable& configTable, PartitionTable* pt);
 
 	~SyncManager();
 
 	void initialize(ManagerSet* mgrSet);
-	SyncContext* createSyncContext(
-		EventContext& ec, PartitionId pId, PartitionRevision& ptRev,
+	SyncContext* createSyncContext(EventContext& ec, PartitionId pId, PartitionRole& role,
 		SyncMode syncMode, PartitionRoleStatus roleStatus);
 
 	void setShortermSyncRequest(
@@ -781,22 +797,12 @@ public:
 		SyncContext* context,
 		SyncRequestInfo& syncRequestInfo, NodeId senderNodeId);
 
-	void checkShorttermGetSyncLog(
-		SyncContext* context,
-		SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo);
+	void checkShorttermGetSyncLog(SyncContext* context, SyncRequestInfo& syncRequestInfo);
 
-	void setShorttermGetSyncLog(
-		SyncContext* context,
-		SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo,
-		NodeId targetNodeId);
+	void setShorttermGetSyncLog(SyncContext* context, SyncRequestInfo& syncRequestInfo, NodeId targetNodeId);
 
-	bool setShorttermSyncLog(
-		SyncContext* context,
-		SyncRequestInfo& syncRequestInfo,
-		EventType eventType, const util::DateTime& now,
-		const EventMonotonicTime emNow);
+	bool setShorttermSyncLog(SyncContext* context, SyncRequestInfo& syncRequestInfo,
+		const util::DateTime& now, const EventMonotonicTime emNow);
 
 	void setShorttermSyncLogAck(
 		SyncContext* context,
@@ -836,48 +842,18 @@ public:
 		SyncResponseInfo& syncResponseInfo,
 		NodeId targetNdeId);
 
-	void setLongGetSyncChunk(
-		SyncContext* context,
-		SyncRequestInfo& syncRequestInfo,
-		EventType eventType,
-		const util::DateTime& now,
-		const EventMonotonicTime emNow,
-		NodeId targetNodeId);
+	bool setLongtermSyncChunk(SyncContext* context, NodeId senderNodeId);
 
-	bool setLongtermSyncChunk(
-		SyncContext* context,
-		SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo,
-		EventType eventType,
-		const util::DateTime& now,
-		const EventMonotonicTime emNow,
-		NodeId senderNodeId);
-
-	int32_t setLongtermSyncCheckChunk(
-		EventContext& ec, Event& ev,
-		SyncContext* context,
-		SyncResponseInfo& syncResponseInfo,
-		util::XArray<NodeId>& catchups,
-		int32_t& waitTime);
+	void checkRemoveLogFile(SyncContext* context, SearchLogInfo& info, LogManager<MutexLocker>& logManager);
 
 	void setLongtermSyncChunkAck(
 		SyncContext* context,
 		SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo);
-
-	void setLongtermSyncGetChunkAck(
-		SyncContext* context,
-		SyncRequestInfo& syncRequestInfo,
-		EventType eventType,
-		const util::DateTime& now,
-		const EventMonotonicTime emNow,
-		NodeId targetNodeId);
+		SyncResponseInfo& syncResponseInfo, NodeId senderNodeId);
 
 	bool setLongtermSyncLog(
 		SyncContext* context,
 		SyncRequestInfo& syncRequestInfo,
-		SyncResponseInfo& syncResponseInfo,
-		EventType eventType,
 		const util::DateTime& now,
 		const EventMonotonicTime emNow);
 
@@ -913,6 +889,14 @@ public:
 		return clsMgr_;
 	}
 
+	TransactionManager* getTransactionManager() {
+		return txnMgr_;
+	}
+
+	PartitionList* getPartitionList() {
+		return partitionList_;
+	}
+
 	uint64_t getContextCount() {
 		uint64_t retVal = 0;
 		for (size_t pos = 0;
@@ -922,34 +906,27 @@ public:
 		return retVal;
 	}
 
-	void checkCurrentContext(
-		EventContext& ec, PartitionRevision& revision);
+	void checkCurrentContext(EventContext& ec, PartitionId pId, PartitionRevision& revision);
 	void resetCurrentSyncId(SyncContext* context);
 
-	void setCurrentSyncId(
-		PartitionId pId, SyncContext* context) {
-
-		currentSyncEntry_.syncId_.contextId_
-			= context->getId();
-		currentSyncEntry_.syncId_.contextVersion_
-			= context->getVersion();
-		currentSyncEntry_.ptRev_
-			= context->getPartitionRevision();
-		currentSyncEntry_.syncSequentialNumber_
-			= context->getSequentialNumber();
+	void setCurrentSyncId(PartitionId pId, SyncContext* context) {
+		currentSyncEntry_.syncId_.contextId_ = context->getId();
+		currentSyncEntry_.syncId_.contextVersion_ = context->getVersion();
+		currentSyncEntry_.ptRev_ = context->getPartitionRevision();
+		currentSyncEntry_.syncSequentialNumber_ = context->getSequentialNumber();
 		currentSyncEntry_.pId_ = pId;
-		currentSyncEntry_.syncSequentialNumber_
-			= context->getSequentialNumber();
+		currentSyncEntry_.syncSequentialNumber_ = context->getSequentialNumber();
+		syncEntries_.setEntry(pId, currentSyncEntry_);
 	}
 
-	void getCurrentSyncId(
-		PartitionId& pId, SyncId& syncId) {
-
+	void getCurrentSyncId(PartitionId& pId, SyncId& syncId) {
 		pId = currentSyncEntry_.pId_;
-		syncId.contextId_
-			= currentSyncEntry_.syncId_.contextId_;
-		syncId.contextVersion_
-			= currentSyncEntry_.syncId_.contextVersion_;
+		syncId.contextId_= currentSyncEntry_.syncId_.contextId_;
+		syncId.contextVersion_= currentSyncEntry_.syncId_.contextVersion_;
+	}
+
+	SyncId getCurrentSyncId(PartitionId pId) {
+		return syncEntries_.getEntry(pId).syncId_;
 	}
 
 	util::FixedSizeAllocator<util::Mutex>& getFixedSizeAllocator() {
@@ -960,14 +937,11 @@ public:
 		return allocLock;
 	}
 
-	SyncContext* getSyncContext(
-		PartitionId pId, SyncId& syncId, bool withLock = true);
+	SyncContext* getSyncContext(PartitionId pId, SyncId& syncId, bool withLock = true);
 
-	void removeSyncContext(
-		EventContext& ec, PartitionId pId, SyncContext*& context, bool isFailed);
+	void removeSyncContext(EventContext& ec, PartitionId pId, SyncContext*& context, bool isFailed);
 
-	void checkExecutable(
-		EventType operation, PartitionId pId, PartitionRole& role);
+	void checkExecutable(EventType operation, PartitionId pId, PartitionRole& role);
 
 	SyncVariableSizeAllocator& getVariableSizeAllocator() {
 		return varSizeAlloc_;
@@ -995,13 +969,6 @@ public:
 		return chunkSize_;
 	}
 
-	void setSyncMode(int32_t mode) {
-		syncMode_ = mode;
-	}
-
-	int32_t getSyncMode() {
-		return syncMode_;
-	}
 	uint8_t* getChunkBuffer(PartitionGroupId pgId) {
 		return &chunkBufferList_[chunkSize_ * pgId];
 	}
@@ -1016,6 +983,10 @@ public:
 		return (undoPartitionList_[pId] == 1);
 	}
 
+	KeepLogManager* getKeepLogManager() {
+		return keepLogMgr_;
+	}
+		
 private:
 	static const uint32_t DEFAULT_CONTEXT_SLOT_NUM = 1;
 
@@ -1026,6 +997,7 @@ private:
 	SyncContext* getSyncContextInternal(
 		PartitionId pId, SyncId& syncId);
 
+	void adjustParallelSyncParam(bool enableParallel, int32_t parallelNum, int32_t chunkParallelNum);
 
 	class SyncContextTable {
 		friend class SyncManager;
@@ -1040,8 +1012,7 @@ private:
 
 		~SyncContextTable();
 
-		SyncContext* createSyncContext(
-			PartitionRevision& ptRev);
+		SyncContext* createSyncContext(PartitionRevision& ptRev);
 
 		SyncContext* getSyncContext(
 			int32_t id, uint64_t version) const;
@@ -1073,55 +1044,7 @@ private:
 	class SyncConfig {
 	public:
 
-		SyncConfig(const ConfigTable& config)
-			: syncTimeoutInterval_(CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL))),
-			maxMessageSize_(static_cast<int32_t>(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE))),
-			sendChunkSizeLimit_(static_cast<int32_t>(ConfigTable::megaBytesToBytes(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_CHUNK_MAX_MESSAGE_SIZE)))),
-			blockSize_((config.get<int32_t>(
-				CONFIG_TABLE_DS_STORE_BLOCK_SIZE))) {
-			if (config.get<int32_t>(
-				CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE) ==
-				static_cast<int32_t>(ConfigTable::megaBytesToBytes(
-					DEFAULT_LOG_SYNC_MESSAGE_MAX_SIZE))) {
-				maxMessageSize_ = (static_cast<int32_t>(
-					ConfigTable::megaBytesToBytes(config.get<int32_t>(
-						CONFIG_TABLE_SYNC_LOG_MAX_MESSAGE_SIZE))));
-			}
-			sendChunkNum_ = (sendChunkSizeLimit_ / blockSize_) + 1;
-			longtermCheckIntervalCount_
-				= config.get<int32_t>(
-					CONFIG_TABLE_SYNC_LONGTERM_CHECK_INTERVAL_COUNT);
-
-			logInterruptionInterval_ = config.get<int32_t>(
-				CONFIG_TABLE_SYNC_LOG_INTERRUPTION_INTERVAL);
-
-			setLogReplicationTimeoutInterval(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_REDO_LOG_REPLICATION_TIMEOUT_INTERVAL));
-
-			setLogErrorKeepInterval(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_REDO_LOG_ERROR_KEEP_INTERVAL));
-
-			setReplicationCheckInterval(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_REDO_LOG_CHECK_REPLICATION_INTERVAL));
-
-			setRetryTimeoutInterval(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_REDO_LOG_RETRY_TIMEOUT_INTERVAL));
-			
-			setRetryCheckInterval(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_REDO_LOG_RETRY_CHECK_INTERVAL));
-
-			if (getLogErrorKeepInterval() <= getReplicationCheckInterval()) {
-				setReplicationCheckInterval(config.get<int32_t>(
-					CONFIG_TABLE_SYNC_REDO_LOG_ERROR_KEEP_INTERVAL));
-			}
-			maxRedoMessageSize_ = static_cast<int32_t>(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_REDO_LOG_MAX_MESSAGE_SIZE));
-		}
+		SyncConfig(const ConfigTable& config);
 
 		int32_t getSyncTimeoutInterval() const {
 			return syncTimeoutInterval_;
@@ -1157,16 +1080,8 @@ private:
 			return sendChunkNum_;
 		}
 
-		void setLongtermCheckIntervalCount(int32_t count) {
-			longtermCheckIntervalCount_ = count;
-		}
-
-		int32_t getLongtermCheckIntervalCount() {
-			return longtermCheckIntervalCount_;
-		}
-
 		void setLogInterruptionInterval(int32_t interval) {
-			logInterruptionInterval_ = interval;
+			logInterruptionInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
 		}
 
 		int32_t getLogInterruptionInterval() {
@@ -1209,8 +1124,61 @@ private:
 			retryCheckInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
 		}
 
+		void setLongtermCheckInterval(int32_t interval) {
+			longtermCheckInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		int32_t getLongtermCheckInterval() {
+			return longtermCheckInterval_;
+		}
+
 		int32_t getRetryCheckInterval() {
 			return retryCheckInterval_;
+		}
+
+		void setKeepLogInterval(int32_t interval) {
+			keepLogInterval_ = CommonUtility::changeTimeSecondToMilliSecond(interval);
+		}
+
+		void setKeepLogLsnDifference(int32_t lsn) {
+			keepLogLsnDifference_ = lsn;
+		}
+
+		int32_t getKeepLogInterval() {
+			return keepLogInterval_;
+		}
+
+		int32_t getKeepLogLsnDifference() {
+			return keepLogLsnDifference_;
+		}
+
+
+		int32_t getParallelSyncNum() {
+			return parallelSyncNum_;
+		}
+		
+		int32_t getParallelChunkSyncNum() {
+			return parallelChunkSyncNum_;
+		}
+
+		void setParallelSyncNum(int32_t syncNum) {
+			parallelSyncNum_ = syncNum;
+		}
+
+		void setParallelChunkSyncNum(int32_t syncNum) {
+			parallelChunkSyncNum_ = syncNum;
+		}
+
+		bool enableParallelSync() {
+			return enableParallelSync_;
+		}
+
+		void setParallelSync(bool enable) {
+			enableParallelSync_ = enable;
+		}
+
+		int32_t getSyncPolicy() {
+			return syncPolicy_;
 		}
 
 	private:
@@ -1219,7 +1187,6 @@ private:
 		int32_t sendChunkNum_;
 		int32_t sendChunkSizeLimit_;
 		int32_t blockSize_;
-		int32_t longtermCheckIntervalCount_;
 		int32_t logInterruptionInterval_;
 		int32_t replicationTimeoutInterval_;
 		int32_t errorKeepInterval_;
@@ -1227,6 +1194,13 @@ private:
 		int32_t maxRedoMessageSize_;
 		int32_t retryTimeoutInterval_;
 		int32_t retryCheckInterval_;
+		int32_t keepLogInterval_;
+		int64_t keepLogLsnDifference_;
+		int32_t parallelSyncNum_;
+		int32_t parallelChunkSyncNum_;
+		bool enableParallelSync_;
+		int32_t syncPolicy_;
+		int32_t longtermCheckInterval_;
 	};
 
 	/*!
@@ -1234,25 +1208,24 @@ private:
 	*/
 	class ExtraConfig {
 	public:
-		ExtraConfig(const ConfigTable& config)
-			:
-			lockConflictPendingInterval_(CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL))),
-			longtermNearestLsnGap_(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN)),
-			longtermNearestInterval_(CommonUtility::changeTimeSecondToMilliSecond(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL))),
+		ExtraConfig(const ConfigTable& config) :
+			lockConflictPendingInterval_(
+				CommonUtility::changeTimeSecondToMilliSecond(
+					config.get<int32_t>(CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL))),
+			longtermNearestLsnGap_(
+				config.get<int32_t>(CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN)),
+			longtermNearestInterval_(
+				CommonUtility::changeTimeSecondToMilliSecond(
+					config.get<int32_t>(CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL))),
 			longtermLimitQueueSize_(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_LONGTERM_LIMIT_QUEUE_SIZE)),
+				config.get<int32_t>(CONFIG_TABLE_SYNC_LONGTERM_LIMIT_QUEUE_SIZE)),
 			longtermHighLoadInterval_(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_LONGTERM_HIGHLOAD_INTERVAL)),
+				config.get<int32_t>(CONFIG_TABLE_SYNC_LONGTERM_HIGHLOAD_INTERVAL)),
 			longtermDumpChunkInterval_(
-				config.get<int32_t>(
-					CONFIG_TABLE_SYNC_LONGTERM_DUMP_CHUNK_INTERVAL)) {}
+				config.get<int32_t>(CONFIG_TABLE_SYNC_LONGTERM_DUMP_CHUNK_INTERVAL)),
+			longtermLogWaitInterval_(
+				config.get<int32_t>(CONFIG_TABLE_SYNC_LONGTERM_LOG_WAIT_INTERVAL))
+		{}
 
 		int32_t getLongtermDumpChunkInterval() const {
 			return longtermDumpChunkInterval_;
@@ -1262,68 +1235,52 @@ private:
 			return lockConflictPendingInterval_;
 		}
 
-		bool setLongtermDumpInterval(int32_t size) {
-			if (size < 0 || size > INT32_MAX) {
-				return false;
-			}
+		void setLongtermDumpInterval(int32_t size) {
 			longtermDumpChunkInterval_ = size;
-			return true;
 		}
 
-		bool setApproximateLsnGap(int32_t gap) {
-			if (gap < 0 || gap > INT32_MAX) {
-				return false;
-			}
+		void setApproximateLsnGap(int32_t gap) {
 			longtermNearestLsnGap_ = gap;
-			return true;
 		}
 
 		int32_t getApproximateGapLsn() {
 			return longtermNearestLsnGap_;
 		}
 
-		bool setApproximateWaitInterval(int32_t interval) {
-			if (interval < 0 || interval > INT32_MAX) {
-				return false;
-			}
+		void setApproximateWaitInterval(int32_t interval) {
 			longtermNearestInterval_ = interval;
-			return true;
 		}
 
 		int32_t getApproximateWaitInterval() {
 			return longtermNearestInterval_;
 		}
 
-		bool setLockWaitInterval(int32_t interval) {
-			if (interval < 0 || interval > INT32_MAX) {
-				return false;
-			}
+		void setLockWaitInterval(int32_t interval) {
 			lockConflictPendingInterval_ = interval;
-			return true;
 		}
 
-		bool setLimitLongtermQueueSize(int32_t size) {
-			if (size < 0 || size > INT32_MAX) {
-				return false;
-			}
+		void setLimitLongtermQueueSize(int32_t size) {
 			longtermLimitQueueSize_ = size;
-			return true;
 		}
 
 		int32_t getLimitLongtermQueueSize() {
 			return longtermLimitQueueSize_;
 		}
 
-		bool setLongtermHighLoadInterval(int32_t size) {
-			if (size < 0 || size > INT32_MAX) {
-				return false;
-			}
+		void setLongtermHighLoadInterval(int32_t size) {
 			longtermHighLoadInterval_ = size;
-			return true;
 		}
 
 		int32_t getLongtermHighLoadInterval() {
 			return longtermHighLoadInterval_;
+		}
+
+		void setLongtermLogWaitInterval(int32_t size) {
+			longtermLogWaitInterval_ = size;
+		}
+
+		int32_t getLongtermLogWaitInterval() {
+			return longtermLogWaitInterval_;
 		}
 
 	private:
@@ -1333,6 +1290,7 @@ private:
 		int32_t longtermLimitQueueSize_;
 		int32_t longtermHighLoadInterval_;
 		int32_t longtermDumpChunkInterval_;
+		int32_t longtermLogWaitInterval_;
 	};
 
 	struct Config : public ConfigTable::ParamHandler {
@@ -1347,6 +1305,24 @@ private:
 	void createPartition(PartitionId pId);
 
 	LongSyncEntry currentSyncEntry_;
+	struct CurrentSyncEntryList {
+		CurrentSyncEntryList(uint32_t partitionNum) {
+			currentSyncEntryList_.assign(partitionNum, LongSyncEntry());
+		}
+		LongSyncEntry& getCurrentSyncEntry(PartitionId pId) {
+			return currentSyncEntryList_[pId];
+		}
+		void setEntry(PartitionId pId, LongSyncEntry& entry) {
+			currentSyncEntryList_[pId] = entry;
+		}
+		LongSyncEntry& getEntry(PartitionId pId) {
+			return currentSyncEntryList_[pId];
+		}
+		void reset(PartitionId pId) {
+			currentSyncEntryList_[pId].reset();
+		}
+		std::vector< LongSyncEntry> currentSyncEntryList_;
+	};
 
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
 		virtual void operator()(ConfigTable& config);
@@ -1371,7 +1347,6 @@ private:
 
 	std::vector<uint8_t> chunkBufferList_;
 	DSObjectSize chunkSize_;
-	int32_t syncMode_;
 	Config config_;
 
 	int64_t syncSequentialNumber_;
@@ -1383,6 +1358,8 @@ private:
 	ClusterService* clsSvc_;
 	ClusterManager* clsMgr_;
 	RecoveryManager* recoveryMgr_;
+	KeepLogManager* keepLogMgr_;
+	CurrentSyncEntryList syncEntries_;
 };
 
 class LongtermSyncInfo {
@@ -1418,6 +1395,15 @@ public:
 		contextId_ = info.getId();
 		contextVersion_ = info.getVersion();
 		syncSequentialNumber_ = info.getSequentialNumber();
+	}
+
+	void getSyncId(SyncId& syncId) {
+		syncId.contextId_ = contextId_;
+		syncId.contextVersion_ = contextVersion_;
+	}
+
+	SyncId getSyncId() {
+		return SyncId(contextId_, contextVersion_);
 	}
 
 	std::string dump() const {

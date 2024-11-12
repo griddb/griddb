@@ -462,7 +462,8 @@ void Query::setTraceMode(bool t) {
 * @param pValue pragma value
 */
 void Query::setPragma(Token *pName1, Token *pName2, Token *pValue, int) {
-	util::String pragmaName1, pragmaName2, pragmaValue;
+	util::StackAllocator &alloc = getTransactionContext().getDefaultAllocator();
+	util::String pragmaName1(alloc), pragmaName2(alloc), pragmaValue(alloc);
 	if (pName1 != NULL) {
 		pragmaName1 = util::String(pName1->z, pName1->n, QP_ALLOCATOR_);
 	}
@@ -491,13 +492,15 @@ void Query::setPragma(Token *pName1, Token *pName2, Token *pValue, int) {
 bool Query::getIndexDataInAndList(TransactionContext &txn,
 	BaseContainer &container, util::XArray<BoolExpr *> &andList,
 	IndexData &indexData) {
+	const bool withPartialMatch = true;
 	MapType mapType = MAP_TYPE_DEFAULT;
 	ColumnInfo *indexColumnInfo;
 	uint32_t mapBitmap = 0;
 	indexColumnInfo = NULL;
 	for (uint32_t i = 0; i < andList.size(); i++) {
 		andList[i]->getIndexBitmapAndInfo(
-			txn, container, *this, mapBitmap, indexColumnInfo);
+				txn, container, *this, mapBitmap, indexColumnInfo,
+				withPartialMatch);
 
 		if (mapBitmap != 0) {
 			for (int k = 3; k >= 0; k--) {
@@ -517,7 +520,6 @@ bool Query::getIndexDataInAndList(TransactionContext &txn,
 					{
 						util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
 						columnIds.push_back(indexColumnInfo->getColumnId());
-						bool withPartialMatch = true;
 						util::Vector<IndexData> indexDataList(txn.getDefaultAllocator());
 						container.getIndexDataList(txn, mapType, columnIds,
 							indexDataList, withPartialMatch);
@@ -674,7 +676,12 @@ void Query::contractCondition() {
 }
 
 void Query::finishQuery(
-	TransactionContext &txn, ResultSet &resultSet, BaseContainer &container) {
+		TransactionContext &txn, ResultSet &resultSet, BaseContainer &container) {
+	finishQuery(txn, resultSet, container.getDataStore()->getConfig());
+}
+
+void Query::finishQuery(
+		TransactionContext &txn, ResultSet &resultSet, const DataStoreConfig &dsConfig) {
 	if (hook_) {
 		hook_->qpExecuteFinishHook(*this);	
 
@@ -688,7 +695,7 @@ void Query::finishQuery(
 		serializedVarDataList.clear();
 		ColumnInfo *explainColumnInfoList = makeExplainColumnInfo(txn);
 		OutputMessageRowStore outputMessageRowStore(
-			container.getDataStore()->getConfig(),
+			dsConfig,
 			explainColumnInfoList, EXPLAIN_COLUMN_NUM, serializedRowList,
 			serializedVarDataList, false);
 		ResultSize resultNum;
@@ -770,24 +777,24 @@ void Query::doQueryPartial(
 
 	uint64_t *pBitmap = reinterpret_cast<uint64_t *>(alloc.allocate(
 		sizeof(uint64_t) * ((container.getColumnNum() / 64) + 1)));
-	ContainerRowWrapper *row = NULL;
+	StackAllocAutoPtr<ContainerRowWrapper> stackAutoPtr(alloc);
 	bool isWithRowId = true;
 	ColumnId rowColumnId = container.getRowIdColumnId();
 	OutputOrder outputOrder = ORDER_ASCENDING;
 	switch (container.getContainerType()) {
 	case COLLECTION_CONTAINER:
 		isWithRowId = true;
-		row = ALLOC_NEW(alloc) CollectionRowWrapper(txn, *static_cast<Collection *>(&container), pBitmap);
+		stackAutoPtr.set(ALLOC_NEW(alloc) CollectionRowWrapper(txn, *static_cast<Collection *>(&container), pBitmap));
 		break;
 	case TIME_SERIES_CONTAINER:
 		isWithRowId = false;
-		row = ALLOC_NEW(alloc) TimeSeriesRowWrapper(txn, *static_cast<TimeSeries *>(&container), pBitmap);
+		stackAutoPtr.set(ALLOC_NEW(alloc) TimeSeriesRowWrapper(txn, *static_cast<TimeSeries *>(&container), pBitmap));
 		break;
 	default:
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
 		break;
 	}
-	StackAllocAutoPtr<ContainerRowWrapper> stackAutoPtr(alloc, row);
+	ContainerRowWrapper *row = stackAutoPtr.get();
 
 	OutputMessageRowStore outputMessageRowStore(
 		container.getDataStore()->getConfig(),
@@ -806,17 +813,36 @@ void Query::doQueryPartial(
 	bool isAllFinished = false;
 
 	util::XArray<OId> scanOIdList(alloc);
+	scanOIdList.reserve(ResultSetOption::PARTIAL_SCAN_LIMIT / repeatNum);
+
 	for (size_t nth = 0; ; nth++) {
-		scanOIdList.clear();
-		RowId minRowId = queryOption.getMinRowId();
-		RowId maxRowId = queryOption.getMaxRowId();
-		TermCondition startCond(container.getRowIdColumnType(), container.getRowIdColumnType(), 
-			DSExpression::GE, rowColumnId, &minRowId, sizeof(minRowId));
-		TermCondition endCond(container.getRowIdColumnType(), container.getRowIdColumnType(), 
-			DSExpression::LE, rowColumnId, &maxRowId, sizeof(maxRowId));
-		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), startCond, endCond, nLimit_);
-		sc.setSuspendLimit(scanLimit);
-		container.searchRowIdIndex(txn, sc, scanOIdList, outputOrder);
+		bool suspended;
+		size_t fullOIdCount;
+		{
+			util::StackAllocator::Scope scope(alloc);
+
+			util::XArray<OId> localScanOIdList(alloc);
+
+			RowId minRowId = queryOption.getMinRowId();
+			RowId maxRowId = queryOption.getMaxRowId();
+			TermCondition startCond(container.getRowIdColumnType(), container.getRowIdColumnType(),
+				DSExpression::GE, rowColumnId, &minRowId, sizeof(minRowId));
+			TermCondition endCond(container.getRowIdColumnType(), container.getRowIdColumnType(),
+				DSExpression::LE, rowColumnId, &maxRowId, sizeof(maxRowId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), startCond, endCond, nLimit_);
+			sc.setSuspendLimit(scanLimit);
+			container.searchRowIdIndex(txn, sc, localScanOIdList, outputOrder);
+
+			fullOIdCount = localScanOIdList.size();
+			const size_t acceptableOIdCount =
+					std::min(scanOIdList.capacity(), fullOIdCount);
+
+			scanOIdList.assign(
+					localScanOIdList.begin(),
+					localScanOIdList.begin() + acceptableOIdCount);
+			suspended = sc.isSuspended();
+		}
+		scanOIdList.reserve(fullOIdCount);
 
 		uint32_t i = 0;
 		for (; i < scanOIdList.size(); i++) {
@@ -873,7 +899,7 @@ void Query::doQueryPartial(
 		}
 		queryOption.setMinRowId(lastRowId + 1);
 
-		if ((!sc.isSuspended() && !isFetchSizeLimit) || resultNum >= nActualLimit_) {
+		if ((!suspended && !isFetchSizeLimit) || resultNum >= nActualLimit_) {
 			isAllFinished = true;
 		}
 
@@ -904,6 +930,10 @@ const BoolExpr* Query::QueryAccessor::findWhereExpr(const Query &query) {
 
 Expr::Type Query::ExprAccessor::getType(const Expr &expr) {
 	return static_cast<const ExprAccessor&>(expr).type_;
+}
+
+const char8_t* Query::ExprAccessor::getLabel(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).label_;
 }
 
 Expr::Operation Query::ExprAccessor::getOp(const Expr &expr) {

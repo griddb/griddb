@@ -53,6 +53,13 @@ using util::ValueFormatter;
 #endif
 
 
+std::string getPathElements(std::vector<std::string>& pathElements, int32_t pos) {
+	if (pathElements.size() >= pos) {
+		return "";
+	}
+	return pathElements[pos];
+}
+
 #define AUDIT_TRACE_USER_TYPE() 
 
 #define AUDIT_TRACE_INFO_INTERNAL_COMMAND(tracer) { \
@@ -72,7 +79,6 @@ using util::ValueFormatter;
 
 #define AUDIT_TRACE_ERROR_COMMAND() { \
 }
-
 
 typedef ObjectManagerV4 OCManager;
 
@@ -641,7 +647,7 @@ bool SystemService::archiveLog(
 	UNUSED_VARIABLE(eventSource);
 	UNUSED_VARIABLE(result);
 	assert(false);
-	return false;
+	return false; 
 }
 
 /*!
@@ -1379,7 +1385,6 @@ void SystemService::getLogs(
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Get logs failed"));
 	}
 }
-
 
 /*!
 	@brief Handles setEventLogLevel command
@@ -2863,6 +2868,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setJson(result);
 			}
 		}
+
 		else if (request.pathElements_.size() >= 2 &&
 				 request.pathElements_[1] == "trace") {
 			if (request.pathElements_.size() == 2) {
@@ -3021,10 +3027,10 @@ void SystemService::ListenerSocketHandler::dispatch(
 			option.logArchive_ = false;
 			option.logDuplicate_ = false;
 			option.stopOnDuplicateError_ = true;
-			option.incrementalBackupLevel_ = -1;
-			option.isIncrementalBackup_ = false;
-			option.isCumulativeBackup_ = false;
-			option.skipBaseline_ = false;
+			option.incrementalBackupLevel_ = -1;	 
+			option.isIncrementalBackup_ = false;  
+			option.isCumulativeBackup_ = false;   
+			option.skipBaseline_ = false; 
 			if (request.parameterMap_.find("archiveLog") !=
 				request.parameterMap_.end()) {
 				if (request.parameterMap_["archiveLog"] == "1") {
@@ -3212,7 +3218,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 			picojson::object errorInfo;
 			int32_t errorNo = 0;
 			std::string reason;
-				 	
+
 			if (request.method_ != EBB_POST) {
 				errorNo = WEBAPI_CP_OTHER_REASON;
 				reason = "Request method is not POST";
