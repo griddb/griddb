@@ -1,7 +1,7 @@
 AC_PREREQ(2.61)
-AC_INIT([GridDB], [5.6.0])
+AC_INIT([GridDB], [5.7.0])
 AC_CONFIG_AUX_DIR([.])
-AM_INIT_AUTOMAKE
+AM_INIT_AUTOMAKE([subdir-objects])
 
 CF_ORG="$CFLAGS"
 CX_ORG="$CXXFLAGS"
@@ -40,7 +40,7 @@ CF_STRICT=" -Wswitch-enum -Wfloat-equal -Wshadow -Winline\
  -Wstrict-aliasing=2 -Wundef" &&
 CX_STRICT="$CF_STRICT -Weffc++ -Wsynth -Wold-style-cast" ])
 
-CFLAGS="$CF_ORG $C_COMMON$CF_OPTIMIZE$CF_STRICT"
+CFLAGS="-D_DEFAULT_SOURCE $CF_ORG $C_COMMON$CF_OPTIMIZE$CF_STRICT"
 CXXFLAGS="$CX_ORG $CX_COMMON$CX_OPTIMIZE$CX_STRICT"
 
 AC_CHECK_DECL(
