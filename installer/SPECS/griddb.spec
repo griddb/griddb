@@ -434,6 +434,8 @@ fi
 /usr/griddb/bin/gridstore
 
 %changelog
+* Thu May 30 2024 Toshiba Digital Solutions Corporation
+- 5.6.0
 * Wed Feb 07 2024 Toshiba Digital Solutions Corporation
 - 5.5.0
 * Mon Nov 13 2023 Toshiba Digital Solutions Corporation
