@@ -25,12 +25,12 @@ jobs:
             docker_image: ubuntu
             container_name: ubuntu_container
             upload_path: ../griddb_*_amd64.deb
-          - os: Centos
+          - os: Rockylinux
             file_type: rpm
             package_path: ./griddb/installer/RPMS/x86_64/griddb-*-linux.x86_64.rpm
-            docker_file: .github/workflows/dockerFile/Dockerfile-centos
-            docker_image: centos
-            container_name: centos_container
+            docker_file: .github/workflows/dockerFile/Dockerfile-rockylinux
+            docker_image: rockylinux
+            container_name: rockylinux_container
             upload_path:  installer/RPMS/x86_64/griddb-*-linux.x86_64.rpm
 
     steps:
