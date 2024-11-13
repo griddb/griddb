@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 6;
+const int32_t GS_MINOR_VERSION = 7;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 40337;
+const int32_t GS_BUILD_NO = 40497;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -71,6 +71,7 @@ const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMETER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3"; 
+
 
 
 static void autoJoinCluster(const Event::Source &eventSource,
@@ -154,7 +155,6 @@ int main(int argc, char **argv) {
 	std::string pidFileName;
 	util::PIdFile pidFile;
 
-
 	try {
 		setUpTrace(NULL, false);
 		setUpAllocator();
@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
 					<< " build " << GS_BUILD_NO
 					<< " " << GS_EDITION_NAME;
 
-		util::VariableSizeAllocator<> tableAlloc(
+		GlobalVariableSizeAllocator tableAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "tableAlloc")));
 		ConfigTable config(tableAlloc);
 
@@ -452,6 +452,7 @@ int main(int argc, char **argv) {
 		ClusterService clsSvc(config, eeConfig, source, "CLUSTER_SERVICE",
 			clsMgr, clsVersionId, errorHandler, notifyAlloc);
 
+
 		SyncService syncSvc(config, eeConfig, source, "SYNC_SERVICE", syncMgr,
 			clsVersionId, errorHandler);
 
@@ -506,6 +507,7 @@ int main(int argc, char **argv) {
 
 
 		recoveryMgr.initialize(mgrSet);
+		pt.initialize(&mgrSet);
 
 		clsSvc.initialize(mgrSet);
 		syncSvc.initialize(mgrSet);
@@ -815,6 +817,7 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, MAIN, WARNING);
 	MAIN_TRACE_DECLARE(config, BASE_CONTAINER, ERROR);
 	MAIN_TRACE_DECLARE(config, DATA_STORE, ERROR);
+	MAIN_TRACE_DECLARE(config, KEY_DATA_STORE, ERROR);
 	MAIN_TRACE_DECLARE(config, COLLECTION, ERROR);
 	MAIN_TRACE_DECLARE(config, TIME_SERIES, ERROR);
 	MAIN_TRACE_DECLARE(config, CHUNK_MANAGER, ERROR);

@@ -23,6 +23,7 @@
 #include "sql_command_manager.h"
 #include "sql_utils.h"
 #include "query_processor.h"
+#include "query_collection.h"
 #include "data_store_v4.h"
 #include "database_manager.h"
 
@@ -66,6 +67,8 @@ static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
 		SQLService::SQL_V4_0_0_CLIENT_VERSION,
 		0 /* sentinel */
 };
+
+const int32_t SQLService::DEFAULT_RESOURCE_CONTROL_LEVEL = 2;
 
 template<typename S>
 void SQLGetContainerHandler::OutMessage::encode(S& out) {
@@ -376,8 +379,13 @@ SQLService::SQLService(
 	txnSvc_(NULL), clsSvc_(NULL), txnMgr_(config, true),
 	pt_(pt),
 	clientSequenceNo_(0), nosqlSyncId_(0),
+	totalMemoryLimitter_(resolveTotalMemoryLimitter()),
+	workMemoryLimitter_(
+			util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK, "sqlWorkLimitter"),
+			totalMemoryLimitter_),
 	connectHandler_(SQL_CLIENT_VERSION,
 		ACCEPTABLE_NEWSQL_CLIENT_VERSIONS),
+	requestHandler_(workMemoryLimitter_),
 	traceLimitTime_(config.get<int32_t>(
 		CONFIG_TABLE_SQL_TRACE_LIMIT_EXECUTION_TIME) * 1000),
 	traceLimitQuerySize_(config.get<int32_t>(
@@ -386,6 +394,18 @@ SQLService::SQLService(
 		CONFIG_TABLE_SQL_TABLE_CACHE_SIZE)),
 	jobMemoryLimit_(ConfigTable::megaBytesToBytes(
 		config.getUInt32(CONFIG_TABLE_SQL_JOB_TOTAL_MEMORY_LIMIT))),
+	storeMemoryLimit_(ConfigTable::megaBytesToBytes(
+			config.getUInt32(CONFIG_TABLE_SQL_STORE_MEMORY_LIMIT))),
+	workMemoryLimit_(ConfigTable::megaBytesToBytes(config.getUInt32(
+			CONFIG_TABLE_SQL_WORK_MEMORY_LIMIT))),
+	totalMemoryLimit_(ConfigTable::megaBytesToBytes(
+			config.getUInt32(CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT))),
+	workMemoryLimitRate_(doubleToBits(
+			config.get<double>(CONFIG_TABLE_SQL_WORK_MEMORY_RATE))),
+	failOnTotalMemoryLimit_(
+			config.get<bool>(CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT)),
+	resourceControlLevel_(config.get<int32_t>(
+			CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL)),
 	isProfiler_(config.get<bool>(CONFIG_TABLE_SQL_ENABLE_PROFILER)),
 	checkCounter_(config.get<int32_t>(
 		CONFIG_TABLE_SQL_ENABLE_JOB_MEMORY_CHECK_INTERVAL_COUNT)),
@@ -472,6 +492,8 @@ SQLService::SQLService(
 		ConfigTable* tmpTable = const_cast<ConfigTable*>(&config);
 		config_.setUpConfigHandler(this, *tmpTable);
 
+		setUpMemoryLimits();
+
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "SQL service initialize failed");
@@ -540,8 +562,17 @@ EventEngine::Config SQLService::createEEConfig(
 		config.get<int32_t>(CONFIG_TABLE_SQL_KEEPALIVE_COUNT);
 	eeConfig.keepaliveInterval_ =
 		config.get<int32_t>(CONFIG_TABLE_SQL_KEEPALIVE_INTERVAL);
-	eeConfig.eventBufferSizeLimit_ = ConfigTable::megaBytesToBytes(
-		config.getUInt32(CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT));
+
+	const size_t cacheSizeBase = ConfigTable::megaBytesToBytes(
+			config.getUInt32(CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT));
+	if (resolveResourceControlLevel() > 1 || cacheSizeBase == 0) {
+		eeConfig.eventBufferSizeLimit_ = ConfigTable::megaBytesToBytes(
+			config.getUInt32(CONFIG_TABLE_SQL_EVENT_BUFFER_CACHE_SIZE));
+	}
+	else {
+		eeConfig.eventBufferSizeLimit_ = cacheSizeBase;
+	}
+
 	eeConfig.setAllAllocatorGroup(ALLOCATOR_GROUP_SQL_MESSAGE);
 	eeConfig.workAllocatorGroupId_ = ALLOCATOR_GROUP_SQL_WORK;
 
@@ -843,6 +874,11 @@ void SQLGetConnectionAddressHandler::operator ()(EventContext& ec, Event& ev) {
 	}
 }
 
+SQLRequestHandler::SQLRequestHandler(
+		util::AllocatorLimitter &workMemoryLimitter) :
+		workMemoryLimitter_(workMemoryLimitter) {
+}
+
 #include "nosql_command.h"
 /*!
 	@brief リクエストハンドラ
@@ -880,6 +916,11 @@ void SQLRequestHandler::operator ()(EventContext& ec, Event& ev) {
 		}
 
 		executionManager_->setRequestedConnectionEnv(request, connOption);
+
+		util::AllocatorLimitter::Scope limitterScope(
+				workMemoryLimitter_, alloc);
+		util::AllocatorLimitter::Scope varLimitterScope(
+				workMemoryLimitter_, ec.getVariableSizeAllocator());
 
 		switch (request.requestType_) {
 		case REQUEST_TYPE_QUERY:
@@ -1549,7 +1590,7 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		setMax(65536).
 		setDefault(5000);
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT, INT32).
+		config, CONFIG_TABLE_SQL_EVENT_BUFFER_CACHE_SIZE, INT32).
 		setUnit(ConfigTable::VALUE_UNIT_SIZE_MB).
 		setMin(1).
 		setDefault(1024);
@@ -1687,6 +1728,24 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		.setMin(1)
 		.setMax(TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM)
 		.setDefault(TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT, BOOL)
+		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_WORK_MEMORY_RATE, DOUBLE)
+		.setMin(0)
+		.setDefault(4);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL, INT32)
+		.setMin(0)
+		.setMax(2)
+		.setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT, INT32).
+		setUnit(ConfigTable::VALUE_UNIT_SIZE_MB).
+		setMin(0).
+		setDefault(0);
 }
 
 /*!
@@ -1832,6 +1891,15 @@ bool SQLService::StatUpdator::operator()(StatTable& stat) {
 }
 
 SQLService::StatUpdator::StatUpdator() : service_(NULL) {}
+
+SQLService::MemoryLimitErrorHandler::~MemoryLimitErrorHandler() {
+}
+
+void SQLService::MemoryLimitErrorHandler::operator()(util::Exception &e) {
+	GS_RETHROW_USER_ERROR_CODED(GS_ERROR_SQL_TOTAL_MEMORY_EXCEEDED, e, "");
+}
+
+SQLService::MemoryLimitErrorHandler SQLService::memoryLimitErrorHandler_;
 
 template<typename T>
 void putLargeRows(
@@ -1997,6 +2065,12 @@ void decodeLargeRow(
 	const char* key, util::StackAllocator& alloc, TransactionContext& txn,
 	DataStoreV4* dataStore, const char* dbName, BaseContainer* container,
 	TableProperty& record, const EventMonotonicTime emNow);
+
+template
+void decodeLargeRow(
+	const char* key, util::StackAllocator& alloc, TransactionContext& txn,
+	DataStoreV4* dataStore, const char* dbName, BaseContainer* container,
+	ViewInfo& record, const EventMonotonicTime emNow);
 
 void decodeLargeBinaryRow(
 	const char* key, util::StackAllocator& alloc, TransactionContext& txn,
@@ -2235,7 +2309,7 @@ void PutLargeContainerHandler::operator()(
 		ReplicationContext::TaskStatus taskStatus
 			= ReplicationContext::TASK_FINISHED;
 
-		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERLY ||
+		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERTY ||
 			isAlterExecuted) {
 			DSInputMes input(alloc, DS_COMMIT);
 			StackAllocAutoPtr<DSOutputMes> retCommit(alloc, static_cast<DSOutputMes*>(ds->exec(&txn, &outputStoreValue, &input)));
@@ -3662,6 +3736,16 @@ void QueryProcessor::assignDistributedTarget(
 		txn, columnInfoList, query, resultSet);
 }
 
+FullContainerKey* QueryForMetaContainer::predicateToContainerKey(
+		TransactionContext &txn, DataStoreV4 &dataStore,
+		const Query &query, DatabaseId dbId, ContainerId metaContainerId,
+		PartitionId partitionCount, util::String &dbNameStr,
+		bool &fullReduced, PartitionId &reducedPartitionId) {
+	return SQLExecution::predicateToContainerKeyByTQL(
+			txn, dataStore, query, dbId, metaContainerId, partitionCount,
+			dbNameStr, fullReduced, reducedPartitionId);
+}
+
 void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& configTable) {
 	sqlSvc_ = sqlSvc;
 	configTable.setParamHandler(
@@ -3709,6 +3793,15 @@ void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& con
 
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM, *this);
+
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_WORK_MEMORY_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL, *this);
 }
 
 void SQLService::Config::operator()(
@@ -3763,6 +3856,20 @@ void SQLService::Config::operator()(
 	case CONFIG_TABLE_SQL_TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM:
 		sqlSvc_->setTablePartitioningMaxAssignedEntryNum(value.get<int32_t>());
 		break;
+
+	case CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT:
+		sqlSvc_->setTotalMemoryLimit(ConfigTable::megaBytesToBytes(
+			static_cast<uint32_t>(std::max(value.get<int32_t>(), 0))));
+		break;
+	case CONFIG_TABLE_SQL_WORK_MEMORY_RATE:
+		sqlSvc_->setWorkMemoryLimitRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT:
+		sqlSvc_->setFailOnTotalMemoryLimit(value.get<bool>());
+		break;
+	case CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL:
+		sqlSvc_->setResourceControlLevel(value.get<int32_t>());
+		break;
 	}
 }
 
@@ -3771,6 +3878,134 @@ void SQLService::checkActiveStatus() {
 		(StatementHandler::CROLE_MASTER | StatementHandler::CROLE_FOLLOWER);
 	StatementHandler::checkExecutable(clusterRole, pt_);
 	checkNodeStatus();
+}
+
+void SQLService::setTotalMemoryLimit(uint64_t limit) {
+	totalMemoryLimit_ = limit;
+	applyTotalMemoryLimit();
+}
+
+void SQLService::setWorkMemoryLimitRate(double rate) {
+	workMemoryLimitRate_ = doubleToBits(rate);
+	applyTotalMemoryLimit();
+}
+
+void SQLService::setFailOnTotalMemoryLimit(bool enabled) {
+	failOnTotalMemoryLimit_ = enabled;
+	applyFailOnTotalMemoryLimit();
+}
+
+void SQLService::setResourceControlLevel(int32_t level) {
+	resourceControlLevel_ = level;
+	applyFailOnTotalMemoryLimit();
+}
+
+void SQLService::setUpMemoryLimits() {
+	applyTotalMemoryLimit();
+	applyFailOnTotalMemoryLimit();
+}
+
+void SQLService::applyTotalMemoryLimit() {
+	const uint64_t totalLimit = resolveTotalMemoryLimit();
+
+	util::AllocatorLimitter *limitter = getTotalMemoryLimitter();
+	assert(limitter != NULL);
+	limitter->setLimit(totalLimit);
+}
+
+void SQLService::applyFailOnTotalMemoryLimit() {
+	const int32_t level = resolveResourceControlLevel();
+	const bool enabled = failOnTotalMemoryLimit_;
+	const bool enabledActual = enabled && isTotalMemoryLimittable(level);
+	workMemoryLimitter_.setFailOnExcess(enabledActual);
+
+	if (enabled && !enabledActual) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_CONFIG_INVALID,
+				"Unaccptable resource control level "
+				"to fail on total memory limit (" <<
+				"failOnTotalMemoryLimit=true"
+				", resourceControlLevel=" << level << ")");
+	}
+}
+
+size_t SQLService::resolveTotalMemoryLimit() {
+	const uint64_t baseTotalLimit = totalMemoryLimit_;
+
+	uint64_t totalLimit;
+	if (baseTotalLimit == 0) {
+		const uint64_t storeLimit = storeMemoryLimit_;
+
+		const uint64_t uint64Max = std::numeric_limits<uint64_t>::max();
+		const uint64_t workMax = uint64Max - storeLimit;
+
+		const uint32_t conc = pgConfig_.getPartitionGroupCount();
+		const uint64_t workLimit = std::min(workMemoryLimit_, workMax / conc);
+
+		const double workTotalRate = std::max(std::min(
+				bitsToDouble(workMemoryLimitRate_),
+				static_cast<double>(workMax / (conc * workLimit))), 0.0);
+
+		const uint64_t workTotalLimit = static_cast<uint64_t>(
+				static_cast<double>(workLimit) * workTotalRate *
+				static_cast<double>(conc));
+		totalLimit = storeLimit + workTotalLimit;
+	}
+	else {
+		totalLimit = baseTotalLimit;
+	}
+
+	const uint64_t sizeMax = std::numeric_limits<size_t>::max();
+	return static_cast<uint64_t>(std::min(totalLimit, sizeMax));
+}
+
+util::AllocatorLimitter* SQLService::resolveTotalMemoryLimitter() {
+	util::AllocatorManager &manager = util::AllocatorManager::getDefaultInstance();
+
+	const util::AllocatorGroupId mainGroup = ALLOCATOR_GROUP_SQL_WORK;
+	util::AllocatorLimitter *limitter = manager.getGroupLimitter(mainGroup);
+
+	if (limitter == NULL) {
+		const util::AllocatorGroupId rootGroup =
+				util::AllocatorManager::GROUP_ID_ROOT;
+		const util::AllocatorGroupId relatedGroups[] = {
+			ALLOCATOR_GROUP_SQL_MESSAGE,
+			ALLOCATOR_GROUP_SQL_LTS,
+			ALLOCATOR_GROUP_SQL_JOB,
+			rootGroup
+		};
+
+		const util::AllocatorManager::LimitType limitType =
+				util::AllocatorManager::LIMIT_GROUP_TOTAL_SIZE;
+
+		util::AllocatorManager &manager =
+				util::AllocatorManager::getDefaultInstance();
+
+		manager.setLimit(
+				mainGroup, limitType, std::numeric_limits<size_t>::max());
+		for (const util::AllocatorGroupId *it = relatedGroups;
+				*it != rootGroup; it++) {
+			manager.setSharingLimitterGroup(*it, mainGroup);
+		}
+		limitter = manager.getGroupLimitter(mainGroup);
+		assert(limitter != NULL);
+
+		limitter->setErrorHandler(&memoryLimitErrorHandler_);
+	}
+
+	return limitter;
+}
+
+uint64_t SQLService::doubleToBits(double src) {
+	uint64_t dest;
+	memcpy(&dest, &src, sizeof(uint64_t));
+	return dest;
+}
+
+double SQLService::bitsToDouble(uint64_t src) {
+	double dest;
+	memcpy(&dest, &src, sizeof(uint64_t));
+	return dest;
 }
 
 void BindParam::dump(util::StackAllocator& alloc) {

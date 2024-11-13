@@ -998,28 +998,28 @@ PutStatus DataStoreV4::changeContainer(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Column rename");
-		status = PutStatus::CHANGE_PROPERLY;
+		status = PutStatus::CHANGE_PROPERTY;
 		break;
-	case DataStoreV4::PROPERLY_DIFFERENCE:
+	case DataStoreV4::PROPERTY_DIFFERENCE:
 		changeContainerProperty(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change property");
-		status = PutStatus::CHANGE_PROPERLY;
+		status = PutStatus::CHANGE_PROPERTY;
 		break;
 	case DataStoreV4::ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE:
 		changeTablePartitioningVersion(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change table partitioning version");
-		status = PutStatus::CHANGE_PROPERLY;
+		status = PutStatus::CHANGE_PROPERTY;
 		break;
 	case DataStoreV4::COLUMNS_ADD:
 		addContainerSchema(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Column add");
-		status = PutStatus::CHANGE_PROPERLY;
+		status = PutStatus::CHANGE_PROPERTY;
 		break;
 	default:
 		assert(schemaState == DataStoreV4::SAME_SCHEMA);
@@ -2181,6 +2181,10 @@ void DataStoreV4::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		config, CONFIG_TABLE_DS_AUTO_ARCHIVE_OUTPUT_UUID_INFO, BOOL)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
 		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_RECOVERY_CONCURRENCY, INT32)
+		.setMin(1)
+		.setMax(128)
+		.setDefault(128); 
 }
 
 
@@ -2278,7 +2282,7 @@ void DataStoreV4::dumpPartition(TransactionContext &txn,
 		condition.insertAttribute(CONTAINER_ATTR_SUB);
 		condition.insertAttribute(CONTAINER_ATTR_VIEW);
 
-		util::String affinityStr;
+		util::String affinityStr(alloc);
 		while (1) {
 			util::XArray< KeyDataStoreValue* > storeValueList(alloc);
 			bool followingFound = keyStore_->scanContainerList(

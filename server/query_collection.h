@@ -25,6 +25,7 @@
 #include "query.h"
 #include "schema.h"
 
+class MetaProcessor;
 struct MetaContainerInfo;
 struct MetaProcessorSource;
 
@@ -268,9 +269,9 @@ public:
 			const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
 			QueryHookClass *hook = NULL);
 
-	void doQuery(
+	bool doQuery(
 			TransactionContext &txn, MetaProcessorSource &processorSource,
-			ResultSet &rs);
+			ResultSet &rs, util::XArray<uint8_t> &suspendedData);
 
 	virtual Collection* getCollection();
 	virtual TimeSeries* getTimeSeries();
@@ -278,30 +279,29 @@ public:
 private:
 	void check(TransactionContext &txn);
 
+	void tryResume(
+			TransactionContext &txn, OutputMessageRowStore &outStore,
+			MetaProcessor &proc, util::XArray<uint8_t> &suspendedData);
+	bool trySuspend(
+			MetaProcessor &proc, ResultSet &rs,
+			util::XArray<uint8_t> &suspendedData);
+
+	void copyRowStore(
+			TransactionContext &txn, OutputMessageRowStore &outStore,
+			ContainerId id, ResultSize rowCount,
+			const std::pair<void*, uint32_t> &fixedData,
+			const std::pair<void*, uint32_t> &varData);
+
+	static std::pair<void*, uint32_t> readData(
+			util::ArrayByteInStream &in, util::XArray<uint8_t> &base);
+	static void writeData(
+			util::XArrayByteOutStream &out, const util::XArray<uint8_t> &data);
+
 	static FullContainerKey* predicateToContainerKey(
-			TransactionContext &txn, DataStoreV4 &dataStore, DatabaseId dbId,
-			const BoolExpr *expr, const MetaContainerInfo &metaInfo,
-			const MetaContainerInfo *coreMetaInfo, PartitionId partitionCount,
-			bool &reduced, PartitionId &reducedPartitionId);
-
-	static bool predicateToContainerName(
-			const Expr *expr, const MetaContainerInfo &metaInfo,
-			const MetaContainerInfo &coreMetaInfo,
-			util::String &containerName);
-	static bool predicateToContainerId(
-			const Expr *expr, const MetaContainerInfo &metaInfo,
-			const MetaContainerInfo &coreMetaInfo,
-			int64_t &partitionId, int64_t &containerId);
-
-	static uint32_t getCoreColumnId(
-			uint32_t columnId, const MetaContainerInfo &metaInfo,
-			const MetaContainerInfo &coreMetaInfo);
-
-	static const BoolExpr* findBoolExpr(const Expr &expr);
-	static const BoolExpr::BoolTerms* findAndOperands(const BoolExpr &expr);
-	static const Expr* findUnary(const BoolExpr &expr);
-	static bool findEqCond(
-			const Expr &expr, uint32_t &columnId, const Value *&value);
+			TransactionContext &txn, DataStoreV4 &dataStore,
+			const Query &query, DatabaseId dbId, ContainerId metaContainerId,
+			PartitionId partitionCount, util::String &dbNameStr,
+			bool &fullReduced, PartitionId &reducedPartitionId);
 
 	MetaContainer &container_;
 };

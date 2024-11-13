@@ -1,0 +1,357 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import logs
+import os
+import json
+import glob
+from optparse import OptionParser
+from operator import attrgetter
+import util_server
+import re
+
+r0 = re.compile("(.*)(_)(.*)")
+r1 = re.compile("(.*)(_)(.*)(_)(.*)(_)(.*)")
+
+class BackupInfo:
+    def __init__(self, astarisk, backupName, status, startTime, endTime):
+        self.astarisk = astarisk
+        self.backupName = backupName
+        self.status = status
+        self.startTime = startTime
+        self.endTime = endTime
+        # sort()時のキーがNoneの場合Python3ではソートできずエラーになるため、空文字を設定する
+        # ソートキーはbackupNameとstartTimeのみ
+        # 他のフィールドは出力時にNoneチェックが行われているため問題なし
+        self.backupNameSort = backupName
+        if self.backupNameSort is None:
+            self.backupNameSort = ""
+        self.startTimeSort = startTime
+        if self.startTimeSort is None:
+            self.startTimeSort = ""
+class LsnInfo:
+    def __init__(self, astarisk, backupName, partitionId, lsn):
+        self.astarisk = astarisk
+        self.backupName = backupName
+        self.partitionId = partitionId
+        self.lsn = lsn
+
+    def __lt__(self, other):
+        return self.backupName < other.backupName
+
+
+util_server.install_sigint_handler()
+(homedir,logdir) = util_server.get_required_env()
+
+parser = OptionParser(usage="%prog -u USER/PASS [--partitionId ID]|[BACKUPNAME]",
+                      description="Obtain the backup information from the GridDB node.",
+                      version="%prog [V5.0.00]")
+util_server.add_client_options(parser)
+parser.add_option("--partitionId", dest="partition_id",
+                  type="int", default=None,
+                  help='Partition ID to display the information.')
+parser.remove_option("--server")
+parser.remove_option("--port")
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_server.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("A40001: Specify a user name and a password.(-u USER/PASS)")
+    sys.exit(2)
+
+    
+log = logs.logger(__file__, logs.DEBUG)
+log.info("%s start." % (__file__))
+
+
+# 設定ファイルのパス
+nodeConfFile = os.path.join(os.path.join(homedir, "conf"), "gs_node.json")
+if not os.path.exists(nodeConfFile):
+    print("A40101: The configuration file does not exist. "+" (path="+nodeConfFile+")")
+    log.error("A40101: The configuration file does not exist. (path="+nodeConfFile+")")
+    sys.exit(1)
+
+
+# 設定ファイル読み込み
+try:
+    with open(nodeConfFile) as f:
+        nodeconf = json.load(f)
+except Exception as e:
+    print("A40102: Failed to read the configure file. (path="+nodeConfFile+", msg="+str(e)+")")
+    log.error("A40102: Failed to read the configuration file. (path="+nodeConfFile+", msg="+str(e)+")")
+    sys.exit(1)
+
+
+# backupPath値を取得
+dataStore = nodeconf.get("dataStore")
+if dataStore is None:
+    print("A40103: Specify a value of 'dataStore' in the file 'gs_node.json'.(path="+nodeConfFile+")")
+    log.error("A40103: Specify a value of 'dataStore' in the file 'gs_node.json'.(path="+nodeConfFile+")")
+    sys.exit(1)
+
+backupBaseDir = dataStore.get("backupPath", "backup")
+if backupBaseDir is None:
+    print("A40104: Specify a value of 'backupPath' in the file 'gs_node.json'.(path="+nodeConfFile+")")
+    log.error("A40104: Specify a value of 'backupPath' in the file 'gs_node.json'.(path="+nodeConfFile+")")
+    sys.exit(1)
+
+
+# 絶対パスに変換
+if not os.path.isabs(backupBaseDir):
+    backupBaseDir = os.path.join(homedir, backupBaseDir)
+
+if not os.path.exists(backupBaseDir):
+    print("A40105: The backup directory does not exist. (path="+backupBaseDir+")")
+    log.error("A40105: The backup directory does not exist. (path="+backupBaseDir+")")
+    sys.exit(1)
+
+# バックアップ名一覧を取得
+backupNameList = []
+# 全表示の場合
+files = list(filter(os.path.isdir, glob.glob(backupBaseDir + "/*")))
+for file in files:
+    backupNameList.append(os.path.basename(file))
+backupNameList.sort()
+
+# パーティション指定 LSN情報表示
+if options.partition_id is not None:
+    lsnInfoList = []
+    for backupName in backupNameList:
+        astarisk=" "
+        if backupName.count("_lv0"):
+            astarisk="*"
+        backupDir = os.path.join(backupBaseDir, backupName)
+        lsnInfoFile = os.path.join(backupDir, "gs_lsn_info.json")
+        
+        if not os.path.exists(lsnInfoFile):
+            # V2.1以前の場合はLSNのJSONファイルが無い
+            lsnInfoList.append(LsnInfo(" ", backupName, options.partition_id, None))
+            continue
+        else:
+            # LSN情報ファイルの読み込み
+            readSuccess = False
+            for count in [0, 1, 2]:
+                try:
+                    with open(lsnInfoFile) as f1:
+                        infoFile = json.load(f1)
+                    readSuccess = True
+                    break
+                except Exception as e:
+                    log.warning("A40109: LsnInfoFile read error. (name="+backupName+", path="+lsnInfoFile+", msg="+str(e)+")")
+                    
+            if not readSuccess:
+                lsnInfoList.append(LsnInfo(astarisk,backupName, options.partition_id, None))
+                continue
+                
+        # LSN情報の取得
+        lsn = None
+        lsnInfo = infoFile.get("lsnInfo")
+        if lsnInfo is None:
+            log.warning("A40109: (name="+backupName+")")
+            backupInfoList.append(LsnInfo(astarisk,backupName, options.partition_id, None))
+            continue
+        if(options.partition_id < len(lsnInfo)):
+            lsn = lsnInfo[options.partition_id]
+        lsnInfoList.append(LsnInfo(astarisk,backupName, options.partition_id, lsn))
+
+    # 表示ヘッダ
+    print()
+    print(" BackupName    ID   LSN                ")
+    print("----------------------------------------------------------")
+    sorted(lsnInfoList)
+        
+    astariskOld = " "
+    backupNameold = ""
+    partitionIdOld = ""
+    lsnOld = ""
+    
+    for lsnInfo in lsnInfoList:
+        astarisk=lsnInfo.astarisk
+        backupName = lsnInfo.backupName
+        partitionId = lsnInfo.partitionId
+        lsn = lsnInfo.lsn
+        
+        # 差分・増分
+        m = r1.match(backupName)
+        if m is not None:
+            backupName=m.group(1)
+            astarisk = "*"
+        
+        # baseline
+        m=r0.match(backupName)
+        if m is not None:
+            backupName=m.group(1)
+            astarisk = "*"
+            
+        if backupNameold !="" and (backupNameold !=backupName):
+            print(astariskOld.ljust(1)+backupNameold.ljust(12) + "  " + str(partitionIdOld).ljust(4) + " " + str(lsnOld))
+        
+        astariskOld = astarisk
+        backupNameold = backupName
+        partitionIdOld = partitionId
+        lsnOld = lsn
+
+    print(astariskOld.ljust(1)+backupNameold.ljust(12) + "  " + str(partitionIdOld).ljust(4) + " " + str(lsnOld))
+    log.info("%s end." % (__file__))
+    sys.exit(0)
+
+
+# バックアップ情報を取得
+backupNameList2=[]
+if len(args) != 0:
+    # バックアップ名指定の場合
+    arg_backupname = args[0]
+    for backupName in backupNameList:
+        if  (backupName == arg_backupname):
+            # フルバックアップの場合
+            backupNameList2.append(backupName)
+        else:
+            # 差分・増分の場合
+            m=r1.match(backupName)
+            if  m is not None :
+                if ( m.group(1)==arg_backupname):
+                    backupNameList2.append(backupName)
+            # baselineの場合
+            m0=r0.match(backupName)
+            if  m0 is not None :
+                if ( m0.group(1)==arg_backupname):
+                    backupNameList2.append(backupName)
+                    
+    backupNameList=list(backupNameList2)
+    if len(backupNameList)==0:
+        print("A40111: The backup name does not exist.")
+        sys.exit(1)
+        
+    print("BackupName : %s"    % arg_backupname)
+
+backupInfoList = [] 
+for backupName in backupNameList:
+    astarisk=" "
+    if backupName.count("_lv1") and len(args) ==0:
+        continue
+    else:
+        if backupName.count("_lv0"):
+            astarisk="*"
+    backupDir = os.path.join(backupBaseDir, backupName)
+    backupInfoFile = os.path.join(backupDir, "gs_backup_info.json")
+
+    # バックアップ情報ファイルの存在確認
+    if not os.path.exists(backupInfoFile):
+        files = os.listdir(backupDir)
+        if len(files) != 0:
+            # V1.1の場合はJSONファイルが無いため、無い場合も完了にする
+            backupInfoList.append(BackupInfo(astarisk,backupName, "end", None, None))
+            continue
+        else:
+            # 直下にファイルが無い場合は不完全
+            backupInfoList.append(BackupInfo(astarisk,backupName, None, None, None))
+            continue
+    else:
+        # バックアップ情報ファイルの読み込み
+        readSuccess = False
+        for count in [0, 1, 2]:
+            try:
+                with open(backupInfoFile) as f1:
+                    infoFile = json.load(f1)
+                readSuccess = True
+                break
+            except Exception as e:
+                log.warning("A40106: BackupInfoFile read error. (name="+backupName+", path="+backupInfoFile+", msg="+str(e)+")")
+                
+        if not readSuccess:
+            backupInfoList.append(BackupInfo(astarisk,backupName, None, None, None))
+            continue
+
+    # バックアップ情報の取得
+    backupInfo = infoFile.get("backupInfo")
+    if backupInfo is None:
+        log.warning("A40107: (name="+backupName+")")
+        backupInfoList.append(BackupInfo(astarisk,backupName, None, None, None))
+        continue
+
+    backupStatus = backupInfo.get("backupStatus")
+    backupStartTime = backupInfo.get("backupStartTime")
+    backupEndTime = backupInfo.get("backupEndTime")
+    backupInfoList.append(BackupInfo(astarisk,backupName, backupStatus, backupStartTime, backupEndTime))
+
+newestListCount = 0
+if len(args) != 0:
+    # バックアップ名で昇順ソート
+    backupInfoList.sort(key=attrgetter("backupNameSort"))
+    newestListCount = len(backupInfoList)
+else:
+    # バックアップ開始日時で逆順ソート
+    backupInfoList.sort(key=attrgetter("startTimeSort"), reverse=True)
+    newestListCount = 1
+
+# バックアップ処理状態を取得
+server = "127.0.0.1"
+
+if options.system_ssl:
+    port = nodeconf.get("system").get("serviceSslPort")
+    if port is None:
+        port = 10045
+else:
+    port = nodeconf["system"].get("servicePort")
+    if port is None:
+        port = 10040
+
+options.server = server
+options.port = port
+options.silent = True
+currentBackupStatus = util_server.check_backup_stat_server(options, log)
+if currentBackupStatus is None:
+    print("A40108: Failed to obtain the status of backup.")
+    log.error("A40108: Failed to obtain the status of backup. (node="+options.server+":"+str(options.port)+")")
+    sys.exit(1)
+
+# 表示ヘッダ
+print()
+if len(args) ==0:
+    print(" BackupName   Status  StartTime                 EndTime")
+    print("-------------------------------------------------------------------------")
+else:
+    print("BackupData            Status StartTime                 EndTime")
+    print("--------------------------------------------------------------------------------")
+
+
+count = 0
+for backupInfo in backupInfoList:
+    count += 1
+
+    if backupInfo.status is None:
+        backupStatusStr = "NG".ljust(3)
+        
+    elif backupInfo.status == "start":
+        # backupStatuがstartの場合でも、最新のバックアップではない場合、サーバが停止またはバックアップ中でない場合は、不完全と判定する
+        if (count != newestListCount) or  ( (count == newestListCount) and (currentBackupStatus == 0 or currentBackupStatus == 1) ):
+            backupStatusStr = "NG".ljust(3)
+        else:
+            backupStatusStr = "P ".ljust(3)
+            
+    elif backupInfo.astarisk=="*" and len(args) == 0:
+            backupStatusStr = "--".ljust(3)
+    else:
+        backupStatusStr = "OK".ljust(3)
+
+    firstflag = False
+    astarisk = backupInfo.astarisk
+    backupName = backupInfo.backupName
+    backupStartTime = backupInfo.startTime
+    if backupStartTime is None:
+        backupStartTime = "-".ljust(24)
+    backupEndTime = backupInfo.endTime
+    if backupEndTime is None:
+        backupEndTime = "-"
+
+
+    if len(args)==0:
+        m = r0.match(backupName)
+        if m is not None:
+            backupName=m.group(1)
+        print(astarisk.ljust(1)+backupName.ljust(16) + " " + backupStatusStr + " " + backupStartTime + " " + backupEndTime)
+    else:
+        print(backupName.ljust(25) + " " + backupStatusStr + "" + backupStartTime + " " + backupEndTime)
+log.info("%s end." % (__file__))

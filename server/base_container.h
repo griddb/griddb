@@ -265,6 +265,20 @@ public:
 		FieldCacheList fieldCacheList_;
 	};
 
+	struct RowArrayCheckerResult {
+		RowArrayCheckerResult() :
+				latestColumnCount_(0),
+				initialColumnCount_(0),
+				rowArrayCount_(0),
+				columnMismatchCount_(0) {
+		}
+
+		uint32_t latestColumnCount_;
+		uint32_t initialColumnCount_;
+		int64_t rowArrayCount_;
+		int64_t columnMismatchCount_;
+	};
+
 	class RowArray;
 
 	template<typename Container, RowArrayType rowArrayType>
@@ -331,6 +345,11 @@ public:
 			const ColumnInfo &info);
 
 	void getErasableList(TransactionContext &txn, Timestamp erasableTimeLimit, util::XArray<ArchiveInfo> &list);
+
+	bool checkRowArray(
+			TransactionContext &txn, RowId startRowId, uint32_t limitMillis,
+			util::Stopwatch &watch, RowId &lastRowId,
+			RowArrayCheckerResult &result);
 
 	void putRow(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowData, RowId &rowId, PutStatus &status,
@@ -1142,7 +1161,8 @@ protected:
 		baseContainerImage_->status_ |= NULLS_STATS_BIT;
 	}
 
-	void convertRowArraySchema(TransactionContext &txn, RowArray &rowArray, bool isMvcc);	
+	void convertRowArraySchema(TransactionContext &txn, RowArray &rowArray, bool isMvcc,
+		RowId searchRowId = UNDEF_ROWID, BtreeMap::SearchContext* sc = NULL);	
 
 	void setContainerExpirationStartTime(Timestamp startTime) {
 		baseContainerImage_->startTime_ = startTime;

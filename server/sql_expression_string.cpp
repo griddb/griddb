@@ -169,34 +169,16 @@ inline typename C::WriterType& SQLStringExprs::Functions::Ltrim::operator()(
 }
 
 
-inline SQLStringExprs::Functions::Printf::Printf() :
-		format_(NULL),
-		argList_(NULL) {
-}
-
-inline SQLStringExprs::Functions::Printf::~Printf() {
-	if (format_ != NULL) {
-		util::StdAllocator<String, void> alloc = alloc_;
-		alloc.destroy(format_);
-		alloc.deallocate(format_, 1);
-	}
-	if (argList_ != NULL) {
-		util::StdAllocator<ArgList, void> alloc = alloc_;
-		alloc.destroy(argList_);
-		alloc.deallocate(argList_, 1);
-	}
-}
-
 template<typename C>
 inline typename C::WriterType*
 SQLStringExprs::Functions::Printf::operator()(C &cxt) {
 	typename C::WriterType &writer = cxt.getResultWriter();
 
-	assert(format_ != NULL);
+	assert(format_.get() != NULL);
 
 	size_t argCount;
 	const TupleValue *args;
-	if (argList_ == NULL) {
+	if (argList_.get() == NULL) {
 		argCount = 0;
 		args = NULL;
 	}
@@ -219,9 +201,8 @@ SQLStringExprs::Functions::Printf::operator()(C &cxt, R *format) {
 		cxt.finishFunction();
 	}
 	else {
-		alloc_ = cxt.getAllocator();
-		util::StdAllocator<String, void> alloc = alloc_;
-		format_ = new (alloc.allocate(1)) String(alloc);
+		util::StdAllocator<void, void> alloc = cxt.getAllocator();
+		format_ = ALLOC_UNIQUE(alloc, String, alloc);
 		SQLValues::ValueUtils::partToString(*format_, *format);
 	}
 
@@ -232,10 +213,9 @@ template<typename C>
 inline typename C::WriterType*
 SQLStringExprs::Functions::Printf::operator()(
 		C &cxt, const TupleValue &argValue) {
-	if (argList_ == NULL) {
-		alloc_ = cxt.getAllocator();
-		util::StdAllocator<ArgList, void> alloc = alloc_;
-		argList_ = new (alloc.allocate(1)) ArgList(alloc);
+	if (argList_.get() == NULL) {
+		util::StdAllocator<void, void> alloc = cxt.getAllocator();
+		argList_ = ALLOC_UNIQUE(alloc, ArgList, alloc);
 	}
 
 	argList_->push_back(argValue);

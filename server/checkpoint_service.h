@@ -405,10 +405,6 @@ public:
 
 	void requestNormalCheckpoint(const Event::Source &eventSource);
 
-	bool getLongSyncLog(
-			SyncSequentialNumber ssn,
-			LogSequentialNumber startLsn, LogIterator<MutexLocker> &itr);
-
 	bool getLongSyncCheckpointStartLog(
 			SyncSequentialNumber ssn, LogIterator<MutexLocker> &itr);
 
@@ -463,8 +459,20 @@ public:
 	int32_t getTransactionEEQueueSize(PartitionGroupId pgId);
 
 	void requestStartCheckpointForLongtermSync(
+		const Event::Source& eventSource,
+		PartitionId pId, LongtermSyncInfo* longtermSynInfo);
+
+
+	void requestStartCheckpointForLongtermSyncPre(
 			const Event::Source &eventSource,
 			PartitionId pId, LongtermSyncInfo *longtermSynInfo);
+
+	void requestStartCheckpointForLongtermSyncPost(
+		const Event::Source& eventSource,
+		PartitionId pId, int64_t syncSequentialNumbero);
+
+	void requestSyncCheckpoint(
+		EventContext& ec, PartitionId pId, LongtermSyncInfo* longtermSyncInfo);
 
 	void requestStopCheckpointForLongtermSync(
 			const Event::Source &eventSource,
@@ -626,8 +634,6 @@ private:
 
 	void checkSystemError();
 	public:
-	void requestSyncCheckpoint(
-			EventContext& ec, PartitionId pId, LongtermSyncInfo* longtermSyncInfo);
 	void cancelSyncCheckpoint(EventContext& ec, PartitionId pId, int64_t ssn);
 
 	struct BackupContext {
@@ -708,7 +714,7 @@ private:
 
 	const int32_t cpInterval_;	
 	const int32_t logWriteMode_;  
-	const std::string backupTopPath_;
+	const std::string backupTopPath_;  
 	util::Mutex cpLongtermSyncMutex_;
 	const std::string syncTempTopPath_;  
 
@@ -720,7 +726,7 @@ private:
 		chunkCopyIntervalMillis_;  
 
 	volatile bool backupEndPending_;
-	
+
 	std::string lastBackupPath_;
 	bool currentDuplicateLogMode_;
 
@@ -749,7 +755,9 @@ private:
 	util::Atomic<int64_t> totalNormalCpOperation_;
 	util::Atomic<int64_t> totalRequestedCpOperation_;
 	util::Atomic<int64_t> totalBackupOperation_;
+
 	util::Atomic<int32_t> archiveLogMode_;
+
 	BackupStatus lastQueuedBackupStatus_;
 	BackupStatus lastCompletedBackupStatus_;
 	util::Atomic<bool> enablePeriodicCheckpoint_;

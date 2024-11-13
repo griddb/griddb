@@ -1566,6 +1566,21 @@ bool SQLCompiler::reducePartitionedTargetByTQL(
 			NULL, placeholderAffected);
 }
 
+FullContainerKey* SQLCompiler::predicateToContainerKeyByTQL(
+		util::StackAllocator &alloc, TransactionContext &txn,
+		DataStoreV4 &dataStore, const Query &query, DatabaseId dbId,
+		ContainerId metaContainerId, PartitionId partitionCount,
+		util::String &dbNameStr, bool &fullReduced,
+		PartitionId &reducedPartitionId) {
+
+	TupleValue::VarContext varCxt;
+	varCxt.setStackAllocator(&alloc);
+
+	return ProcessorUtils::predicateToContainerKey(
+			varCxt, txn, dataStore, query, dbId, metaContainerId,
+			partitionCount, dbNameStr, fullReduced, reducedPartitionId);
+}
+
 bool SQLCompiler::isDBOnlyMatched(
 		const QualifiedName &name1, const QualifiedName &name2) {
 	assert(name1.db_ != NULL);
@@ -5485,9 +5500,10 @@ void SQLCompiler::Meta::appendMetaTableInfoId(
 	uint32_t partitionColumn;
 	uint32_t tableNameColumn;
 	uint32_t tableIdColumn;
+	uint32_t partitionNameColumn;
 	if (!findCommonColumnId(
 			plan, node, tableInfoId, metaInfo, partitionColumn, tableNameColumn,
-			tableIdColumn)) {
+			tableIdColumn, partitionNameColumn)) {
 		return;
 	}
 
@@ -5495,7 +5511,7 @@ void SQLCompiler::Meta::appendMetaTableInfoId(
 	try {
 		if (!ProcessorUtils::predicateToMetaTarget(
 				base_.getVarContext(), exprWhere, partitionColumn,
-				tableNameColumn, tableIdColumn,
+				tableNameColumn, tableIdColumn, partitionNameColumn,
 				tableInfo.partitioning_->clusterPartitionCount_,
 				targetPId, parameterList, placeholderAffected)) {
 			return;
@@ -5503,10 +5519,6 @@ void SQLCompiler::Meta::appendMetaTableInfoId(
 	}
 	catch (UserException&) {
 		placeholderAffected = true;
-		return;
-	}
-
-	if (metaInfo.id_ == MetaType::TYPE_PARTITION_STATS) {
 		return;
 	}
 
@@ -20135,13 +20147,15 @@ bool SQLCompiler::Meta::findCommonColumnId(
 		const Plan &plan, const PlanNode &node,
 		SQLTableInfo::Id tableInfoId, const MetaContainerInfo &metaInfo,
 		uint32_t &partitionColumn, uint32_t &tableNameColumn,
-		uint32_t &tableIdColumn) {
+		uint32_t &tableIdColumn, uint32_t &partitionNameColumn) {
 	partitionColumn = std::numeric_limits<uint32_t>::max();
 	tableNameColumn = std::numeric_limits<uint32_t>::max();
 	tableIdColumn = std::numeric_limits<uint32_t>::max();
+	partitionNameColumn = std::numeric_limits<uint32_t>::max();
 
 	const PlanExprList &inExprList = node.outputList_;
 
+	bool found = false;
 	for (PlanExprList::const_iterator it = inExprList.begin();
 			it != inExprList.end(); ++it) {
 		const PlanNode *inNode = &node;
@@ -20166,13 +20180,17 @@ bool SQLCompiler::Meta::findCommonColumnId(
 		const uint32_t inColumnId = inIt->columnId_;
 		if (inColumnId == metaInfo.commonInfo_.containerNameColumn_) {
 			tableNameColumn = outColumnId;
-			return true;
+			found = true;
 		}
 		else if (inColumnId == metaInfo.commonInfo_.partitionIndexColumn_) {
 			partitionColumn = outColumnId;
 		}
 		else if (inColumnId == metaInfo.commonInfo_.containerIdColumn_) {
 			tableIdColumn = outColumnId;
+		}
+		else if (inColumnId == metaInfo.commonInfo_.partitionNameColumn_) {
+			partitionNameColumn = outColumnId;
+			found = true;
 		}
 		else {
 			continue;
@@ -20184,7 +20202,7 @@ bool SQLCompiler::Meta::findCommonColumnId(
 		}
 	}
 
-	return false;
+	return found;
 }
 
 void SQLCompiler::Meta::genDriverClusterInfo(
@@ -21703,9 +21721,6 @@ bool SQLCompiler::NarrowingKeyTable::matchIndex(
 		if (forRange) {
 			if (key.isRangeFull()) {
 				break;
-			}
-			if (indexEntry.baseValue_ == getIndexBaseValue(key, true)) {
-				exact = true;
 			}
 			indexKeyBase = key.longRange_.first;
 		}

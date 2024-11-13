@@ -1,0 +1,190 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import logs
+import json
+import os
+import shutil
+import glob
+from optparse import OptionParser
+
+import util_server
+import re
+
+# modeの種類
+backup_mode_list = ["auto", "auto_nostop", "baseline", "since","incremental"]
+
+# --mode オプションチェック
+def check_backup_mode(option, opt_str, value, parser):
+    if (value in backup_mode_list):
+        parser.values.mode = value
+        return 0
+    else:
+        print("A30109: Specify a value of '%s' in option 'mode'.(" % "/".join(map(str, backup_mode_list)) +opt_str+"="+value+")")
+        sys.exit(2)
+
+util_server.install_sigint_handler()
+(homedir,logdir) = util_server.get_required_env()
+
+parser = OptionParser(usage="%prog -u USER/PASS [--mode=MODE [--skipBaseline]] BACKUPNAME",
+                      description="Acquire the backup data of the GridDB node in operation.", version="%prog [V5.0.00]")
+util_server.add_client_options(parser)
+parser.remove_option("--server")
+parser.remove_option("--port")
+parser.add_option("--mode", type="string",
+        action="callback", callback=check_backup_mode, dest="mode",
+        help="Specify the backup mode.\
+                            MODE\
+                            auto: Start auto log backup\
+                            auto_nostop: Start auto log backup (no node stop when an error occurs)\
+                            baseline: Acquire a full backup as the differential/incremental backup baseline.\
+                            since: Acquire a differential backup of the updated data blocks from the baseline.\
+                            incremental: Acquire an incremental backup of the updated data blocks.")
+parser.add_option("--skipBaseline", dest="skip_baseline",
+                  action="store_true", default=False,
+                  help="If specified, when the mode is auto log backup, the full backup operation as baseline will be skipped.")
+
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_server.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("A30001: Specify a user name and a password."+" (-u USER/PASS)")
+    sys.exit(1)
+
+if len(args) != 1:
+    parser.error("A30002: Specify the backup name.")
+regexp = re.compile(r'^[0-9A-Za-z]+$')
+if len(args[0])>12 or regexp.search(args[0]) is None:
+    print("A30002: Up to 12 alphanumeric characters can be set the backup name.")
+    sys.exit(1)
+    
+backupName = args[0]
+
+log = logs.logger(__file__, logs.DEBUG)
+log.info("%s start." % (__file__))
+
+confdir = os.path.join(homedir, "conf")
+nodeconffile = os.path.join(confdir, "gs_node.json")
+with open(nodeconffile) as f:
+    nodeconf = json.load(f)
+dbdir = nodeconf.get("dataStore").get("dbPath", "data")
+txnlogdir = nodeconf.get("dataStore").get("transactionLogPath", "txnlog")
+budir = nodeconf.get("dataStore").get("backupPath", "backup")
+
+options.server = "127.0.0.1"
+
+if options.system_ssl:
+    # SSL接続有効の場合
+    options.port = nodeconf.get("system").get("serviceSslPort")
+else:
+    # SSL接続無効の場合
+    options.port = nodeconf.get("system").get("servicePort")
+
+if options.port is None:
+    if options.system_ssl:
+        # SSL接続有効の場合デフォルトのポート番号は10045
+        options.port = 10045
+    else:
+        # SSL接続無効の場合デフォルトのポート番号は10040
+        options.port = 10040
+
+if not os.path.isabs(dbdir):
+    dbdir = os.path.join(homedir, dbdir)
+if not os.path.isabs(txnlogdir):
+    txnlogdir = os.path.join(homedir, txnlogdir)
+if not os.path.isabs(budir):
+    budir = os.path.join(homedir, budir)
+
+if not os.path.exists(dbdir):
+    print("A30102: The database directory does not exist. (path="+dbdir+")")
+    print("Check the value of 'dataStore/dbPath' in the file 'conf/gs_node.json'.")
+    log.error("A30102: The database directory does not exist. (path=%s)" % (dbdir) )
+    sys.exit(3)
+if not os.path.exists(txnlogdir):
+    print("A30102: The database directory does not exist. (path="+txnlogdir+")")
+    print("Check the value of 'dataStore/transactionLogPath' in the file 'conf/gs_node.json'.")
+    log.error("A30102: The database directory does not exist. (path=%s)" % (txnlogdir) )
+    sys.exit(3)
+if not os.path.exists(budir):
+    print("A30103: The backup directory does not exist.(path="+budir+")")
+    print("Check the value of 'dataStore/backupPath' in the file 'conf/gs_node.json'.")
+    log.error("A30103: The backup directory does not exist. (path=%s)" % (budir) )
+    sys.exit(3)
+
+namedir = os.path.join(budir,backupName)
+
+if os.path.exists(namedir) or (os.path.exists(namedir+"_lv0") and options.mode not in ["since","incremental"]):
+    print("A30104: The backup of %s already exists." % backupName)
+    print("Specify another backup name.")
+    log.error("A30104: The backup of %s already exists." % (backupName) )
+    sys.exit(3)
+since_pidfile = ""
+if options.mode in ["since","incremental"]:
+    if not os.path.exists(namedir+"_lv0"):
+        print("A30105: The specified backup does not exist.(path="+budir+")")
+        print("Check the backup name.")
+        log.error("A30106: The specified backup does not exist. (name=%s)" % (backupName) )
+        sys.exit(3)
+    if (len(glob.glob(namedir+"_lv1_*"))) >900 :
+        print("A30105: There are too many backup sets of 'since' and 'incremental'. Create a new 'baseline'.") 
+        sys.exit(3)
+
+c = util_server.is_active_cluster(options, log)
+if c is None:
+    sys.exit(1)
+elif not c:
+    print("A30101: The backup cannot be executed when the GridDB cluster does not start.")
+    log.error("A30101: The backup cannot be executed when the GridDB cluster does not start.")
+    sys.exit(3)
+
+backupStatus = util_server.check_backup_stat_server(options,log)
+if backupStatus >= 2:
+    print("A30112: Another backup is running.")
+    sys.exit(3)
+
+log.info("backup info (node="+options.server+":"+str(options.port)+" mode="+str(options.mode)+" backupName="+backupName+" path="+budir+")")
+
+method = "POST"
+path = "/node/backup"
+data = { "backupName": backupName }
+
+since_pid = None
+since_psexists = None
+if os.path.exists(since_pidfile):
+    since_pid = util_server.getpid(since_pidfile)
+    if util_server.psexists(since_pid, "gs_backup"):
+        since_psexists = True
+
+if options.mode is None:
+    print("The backup has been started.")
+elif options.mode == "auto" or options.mode == "auto_nostop":
+    print("The backup has been started. (auto)")
+    data["duplicateLog"] = 1
+    if options.mode == "auto_nostop":
+        data["stopOnDuplicateError"] = 0
+    if options.skip_baseline:
+        log.info("skipBaseline option is specified.")
+        data["skipBaseline"] = 1
+elif options.mode == "baseline":
+    print("The backup has been started. (baseline)")
+    data["incremental"] = 1
+    data["level"]=0
+elif options.mode == "since":
+    print("The backup has been started. (since)")
+    data["incremental"] = 1
+    data["level"]=1
+    data["cumulative"]=1
+elif options.mode == "incremental":
+    print("The backup has been started. (incremental).")
+    data["incremental"] = 1
+    data["level"]=1
+    data["cumulative"]=0
+
+# since以外の実行
+(res, code) = util_server.request_rest(method, path, data, options, log)
+if code != 200:
+    sys.exit(1)
+
+log.info("%s end." % (__file__))

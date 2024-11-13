@@ -2434,9 +2434,10 @@ TermCondition *Expr::toCondition(
 /*!
  * @brief get usable indices
  */
-void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
-	BaseContainer &container, Query &queryObj, uint32_t &mapBitmap,
-	ColumnInfo *&columnInfo, Operation &detectedOp, bool notFlag) {
+void Expr::getIndexBitmapAndInfo(
+		TransactionContext &txn, BaseContainer &container, Query &queryObj,
+		uint32_t &mapBitmap, ColumnInfo *&columnInfo, Operation &detectedOp,
+		bool notFlag, bool withPartialMatch) {
 #define TOBITMAP(x) (1 << (x))
 
 	ObjectManagerV4 &objectManager = *(container.getObjectManager());
@@ -2444,8 +2445,9 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 	if (type_ == EXPR) {
 		assert(arglist_ != NULL);
 		for (uint32_t i = 0; i < arglist_->size(); i++) {
-			(*arglist_)[i]->getIndexBitmapAndInfo(txn, container, queryObj,
-				mapBitmap, columnInfo, detectedOp, notFlag);
+			(*arglist_)[i]->getIndexBitmapAndInfo(
+					txn, container, queryObj, mapBitmap, columnInfo,
+					detectedOp, notFlag, withPartialMatch);
 			if (mapBitmap != 0) {
 				break;
 			}
@@ -2551,8 +2553,9 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 			reinterpret_cast<TqlFunc *>(functor_)->checkUsableIndex();
 		if (usableIndex != 0 && notFlag == false && arglist_ != NULL) {
 			for (uint32_t i = 0; i < arglist_->size(); i++) {
-				(*arglist_)[i]->getIndexBitmapAndInfo(txn, container, queryObj,
-					mapBitmap, columnInfo, detectedOp, notFlag);
+				(*arglist_)[i]->getIndexBitmapAndInfo(
+						txn, container, queryObj, mapBitmap, columnInfo,
+						detectedOp, notFlag, withPartialMatch);
 				if (mapBitmap != 0) break;
 			}
 			mapBitmap &= TOBITMAP(usableIndex);
@@ -2578,8 +2581,8 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 		assert(columnInfo != NULL);
 		util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
 		columnIds.push_back(columnInfo->getColumnId());
-		bool withPartialMatch = true;
-		IndexTypes indexBit = container.getIndexTypes(txn, columnIds, withPartialMatch);
+		const IndexTypes indexBit =
+				container.getIndexTypes(txn, columnIds, withPartialMatch);
 
 		if (container.hasIndex(indexBit, MAP_TYPE_BTREE)) {
 			mapBitmap |= TOBITMAP(MAP_TYPE_BTREE);

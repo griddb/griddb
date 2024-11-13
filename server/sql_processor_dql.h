@@ -258,6 +258,7 @@ public:
 	virtual bool isAdministrator();
 
 	virtual uint32_t getTotalWorkerId();
+	virtual util::AllocatorLimitter* getAllocatorLimitter();
 
 private:
 	SQLContext& getBase();

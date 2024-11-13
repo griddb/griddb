@@ -837,9 +837,6 @@ void CheckpointService::stopLongtermSync(
 		CpLongtermSyncInfo tmpInfo = *info;
 
 		assert(info->targetPId_ != UNDEF_PARTITIONID);
-		LogManager<MutexLocker>& logManager =
-				partitionList_->partition(info->targetPId_).logManager();
-		logManager.setKeepXLogVersion(-1); 
 		removeCpLongtermSyncInfo(ssn);
 
 		try {
@@ -962,8 +959,9 @@ void CheckpointService::partitionCheckpoint(
 				partition.startCheckpoint(NULL);
 			}
 			if (mode == CP_PREPARE_LONGTERM_SYNC) {
-				partition.logManager().setKeepXLogVersion(
-						partition.logManager().getStartLogVersion());
+				if (partition.logManager().getXKeepLogVersion() == -1) {
+					partition.logManager().setKeepXLogVersion(partition.logManager().getStartLogVersion());
+				}
 			}
 			startLsn = partition.logManager().getLSN();
 			if (needCollectOffset(mode)) {
@@ -1120,8 +1118,7 @@ void CheckpointService::partitionCheckpoint(
 				util::NormalOStringStream ossXLog;
 				ossXLog << message.backupPath().c_str() << "/txnlog/" << pId;
 
-				syncService_->notifyCheckpointLongSyncReady(
-					ec, info->targetPId_, &info->longtermSyncInfo_, false);
+				syncService_->notifyCheckpointLongSyncReady(ec, info->targetPId_, &info->longtermSyncInfo_);
 
 				GS_TRACE_INFO(
 					CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
@@ -1230,8 +1227,7 @@ void CheckpointService::notifyCheckpointEnd(
 		CpLongtermSyncInfo* info = getCpLongtermSyncInfo(message.ssn());
 		assert(info);
 
-		syncService_->notifySyncCheckpointEnd(
-			ec, info->targetPId_, &info->longtermSyncInfo_, false);
+		syncService_->notifySyncCheckpointEnd(ec, info->targetPId_, &info->longtermSyncInfo_);
 	}
 	if (message.mode() == CP_SHUTDOWN) {
 		clusterService_->requestCompleteCheckpoint(
@@ -1347,6 +1343,7 @@ void CheckpointService::requestShutdownCheckpoint(
 		}
 	}
 	catch (std::exception &e) {
+
 		clusterService_->setError(eventSource, &e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request shutdowncheckpoint failed. (reason=" <<
@@ -1391,7 +1388,6 @@ void CheckpointService::requestSyncCheckpoint(
 		GS_TRACE_INFO(
 			CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[SyncCP] requested. pId="
 			<< pId << ", SSN=" << longtermSyncInfo->getSequentialNumber());
-		
 		{
 			CpLongtermSyncInfo info;
 			info.ssn_ = longtermSyncInfo->getSequentialNumber();
@@ -1413,10 +1409,10 @@ void CheckpointService::requestSyncCheckpoint(
 									  longtermSyncInfo->getSequentialNumber());
 		EventByteOutStream out = requestEvent.getOutStream();
 		message.encode(out);
-
 		ee_.add(requestEvent);
 	}
 	catch (std::exception &e) {
+
 		clusterService_->setError(ec, &e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request sync checkpoint failed. (reason=" <<
@@ -1449,6 +1445,7 @@ void CheckpointService::cancelSyncCheckpoint(
 			ee_.add(requestEvent);
 		}
 		catch (std::exception &e) {
+
 			clusterService_->setError(ec, &e);
 			GS_RETHROW_SYSTEM_ERROR(
 					e, "Cancel sync checkpoint failed.  (reason=" <<
@@ -1480,6 +1477,7 @@ void CheckpointService::executeRecoveryCheckpoint(
 		ee_.add(requestEvent);
 	}
 	catch (std::exception &e) {
+
 		clusterService_->setError(eventSource, &e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Recovery checkpoint failed. (reason=" <<
@@ -1929,6 +1927,7 @@ bool CheckpointService::requestOnlineBackup(
 		return true;
 	}
 	catch (std::exception &e) {
+
 		clusterService_->setError(eventSource, &e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request online backup failed.  (reason=" <<
@@ -2093,6 +2092,7 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 				"FlushLogPeriodicallyHandler: elapsedMillis," << lap);
 	}
 	catch (std::exception &e) {
+
 		clusterService_->setError(ec, &e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Flush log file failed. (reason=" <<
@@ -2234,35 +2234,6 @@ void CheckpointService::PIdLsnInfo::writeFile(const char8_t *backupPath) {
 				e, "Write lsn info file failed. (fileName=" <<
 				lsnInfoFileName.c_str() << ", reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
-	}
-}
-
-bool CheckpointService::getLongSyncLog(
-		SyncSequentialNumber ssn,
-		LogSequentialNumber startLsn, LogIterator<MutexLocker> &itr) {
-
-	assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
-	CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
-	if (info) {
-		LogManager<MutexLocker>& logManager =
-				partitionList_->partition(info->targetPId_).logManager();
-		try {
-			itr = logManager.createXLogIterator(startLsn);
-			return itr.checkExists(startLsn);
-		}
-		catch(std::exception &e) {
-			info->errorOccured_ = true;
-			GS_THROW_USER_ERROR(
-					GS_ERROR_CP_LOG_FILE_WRITE_FAILED,
-					"getLongSyncLog failed (reason=" << e.what() << ")");
-			return false;
-		}
-	}
-	else {
-		GS_THROW_USER_ERROR(
-				GS_ERROR_CP_LONGTERM_SYNC_FAILED,
-				"Invalid syncSequentialNumber: ssn=" << ssn);
-		return false;
 	}
 }
 
@@ -2422,7 +2393,113 @@ void CheckpointService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 			.setDefault(5);
 }
 
+
 void CheckpointService::requestStartCheckpointForLongtermSync(
+	const Event::Source& eventSource,
+	PartitionId pId, LongtermSyncInfo* longtermSyncInfo) {
+
+	assert(longtermSyncInfo);
+	SyncSequentialNumber ssn = longtermSyncInfo->getSequentialNumber();
+	if (lastMode_ == CP_SHUTDOWN) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+			"RequestStartLongtermSync cancelled by already requested shutdown ("
+			"lastMode=" <<
+			checkpointModeToString(lastMode_) << ")");
+	}
+
+	if (requestedShutdownCheckpoint_) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+			"RequestStartLongtermSync cancelled by already requested shutdown ("
+			"lastMode=" <<
+			checkpointModeToString(lastMode_) << ")");
+	}
+
+	if (pId >= pgConfig_.getPartitionCount()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+			"RequestStartLongtermSync: invalid pId (pId=" <<
+			pId << ", syncSeqNumber=" << ssnList_.at(pId) << ")");
+	}
+	std::string syncTempPath;
+	util::NormalOStringStream oss;
+	oss << ssn;
+	util::FileSystem::createPath(
+		syncTempTopPath_.c_str(), oss.str().c_str(), syncTempPath);
+	std::string origSyncTempPath(syncTempPath);
+
+	{
+		CpLongtermSyncInfo info;
+		info.ssn_ = ssn;
+		info.targetPId_ = pId;
+		info.dir_ = syncTempPath;
+		info.longtermSyncInfo_.copy(*longtermSyncInfo);
+		info.chunkSize_ = partitionList_->partition(pId).chunkManager().getChunkSize();
+		bool success = setCpLongtermSyncInfo(ssn, info);
+		if (!success) {
+			GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"Same syncSequentialNumber already used (pId=" <<
+				pId << ", syncSequentialNumber=" << ssn << ")");
+		}
+	}
+	CpLongtermSyncInfo* info = getCpLongtermSyncInfo(ssn);
+	assert(info != NULL);
+
+	if (ssnList_.at(pId) != UNDEF_SYNC_SEQ_NUMBER) {
+		info->errorOccured_ = true;
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+			"RequestStartLongtermSync: another long sync is already running. (pId=" <<
+			pId << ", anotherSSN=" << ssnList_.at(pId) <<
+			", thisSSN=" << ssn << ")");
+	}
+
+	if (util::FileSystem::exists(syncTempPath.c_str())) {
+		removeCpLongtermSyncInfoAll();
+		try {
+			util::FileSystem::remove(syncTempPath.c_str(), true);
+		}
+		catch (std::exception& e) {
+			info->errorOccured_ = true;
+			GS_RETHROW_USER_ERROR(e,
+				"Failed to remove syncTemp top dir (path=" <<
+				syncTempPath <<
+				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+
+	try {
+		util::FileSystem::createDirectoryTree(syncTempPath.c_str());
+	}
+	catch (std::exception&) {
+		info->errorOccured_ = true;
+		GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+			"SyncTemp directory can't create (pId=" <<
+			pId << ", path=" << syncTempPath << ")");
+	}
+	try {
+		GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+			"[PrepareLongtermSync] requested (pId=" <<
+			pId << ", path=" << syncTempPath << ")");
+
+		Event requestEvent(
+			eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+
+		CheckpointMainMessage message(CP_PREPARE_LONGTERM_SYNC, 0, syncTempPath, ssn);
+		EventByteOutStream out = requestEvent.getOutStream();
+		message.encode(out);
+
+		ee_.add(requestEvent);
+	}
+	catch (std::exception& e) {
+		info->errorOccured_ = true;
+		UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e, "");
+		clusterService_->setError(eventSource, &e);
+		GS_RETHROW_SYSTEM_ERROR(
+			e, "Request prepare long sync failed.  (reason=" <<
+			GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+
+void CheckpointService::requestStartCheckpointForLongtermSyncPre(
 	const Event::Source &eventSource,
 	PartitionId pId, LongtermSyncInfo *longtermSyncInfo) {
 
@@ -2502,28 +2579,77 @@ void CheckpointService::requestStartCheckpointForLongtermSync(
 				"SyncTemp directory can't create (pId=" <<
 				pId << ", path=" << syncTempPath << ")");
 	}
+
+	GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+		"[PrepareLongtermSync] prepared (pId=" <<
+		pId << ", path=" << syncTempPath << ")");
+}
+
+void CheckpointService::requestStartCheckpointForLongtermSyncPost(
+	const Event::Source& eventSource,
+	PartitionId pId, SyncSequentialNumber ssn) {
+
+	if (lastMode_ == CP_SHUTDOWN) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+			"RequestStartLongtermSync cancelled by already requested shutdown ("
+			"lastMode=" <<
+			checkpointModeToString(lastMode_) << ")");
+	}
+
+	if (requestedShutdownCheckpoint_) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+			"RequestStartLongtermSync cancelled by already requested shutdown ("
+			"lastMode=" <<
+			checkpointModeToString(lastMode_) << ")");
+	}
+
+	if (pId >= pgConfig_.getPartitionCount()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+			"RequestStartLongtermSync: invalid pId (pId=" <<
+			pId << ", syncSeqNumber=" << ssnList_.at(pId) << ")");
+	}
+
+	CpLongtermSyncInfo* info = getCpLongtermSyncInfo(ssn);
+	assert(info != NULL);
+
+	if (ssnList_.at(pId) != UNDEF_SYNC_SEQ_NUMBER) {
+		info->errorOccured_ = true;
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+			"RequestStartLongtermSync: another long sync is already running. (pId=" <<
+			pId << ", anotherSSN=" << ssnList_.at(pId) <<
+			", thisSSN=" << ssn << ")");
+	}
+
+
 	try {
+		std::string syncTempPath;
+		util::NormalOStringStream oss;
+		oss << ssn;
+		util::FileSystem::createPath(
+			syncTempTopPath_.c_str(), oss.str().c_str(), syncTempPath);
+
 		GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-				"[PrepareLongtermSync] requested (pId=" <<
-				pId << ", path=" << syncTempPath << ")");
+			"[PrepareLongtermSync] requested (pId=" <<
+			pId << ", path=" << syncTempPath << ")");
 
 		Event requestEvent(
-				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+			eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
 
 		CheckpointMainMessage message(CP_PREPARE_LONGTERM_SYNC, 0, syncTempPath, ssn);
 		EventByteOutStream out = requestEvent.getOutStream();
 		message.encode(out);
-
 		ee_.add(requestEvent);
 	}
-	catch (std::exception &e) {
+	catch (std::exception& e) {
 		info->errorOccured_ = true;
+
 		clusterService_->setError(eventSource, &e);
 		GS_RETHROW_SYSTEM_ERROR(
-				e, "Request prepare long sync failed.  (reason=" <<
-				GS_EXCEPTION_MESSAGE(e) << ")");
+			e, "Request prepare long sync failed.  (reason=" <<
+			GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
+
 
 void CheckpointService::requestStopCheckpointForLongtermSync(
 		const Event::Source &eventSource,
@@ -2548,6 +2674,7 @@ void CheckpointService::requestStopCheckpointForLongtermSync(
 			ee_.add(requestEvent);
 		}
 		catch (std::exception &e) {
+
 			clusterService_->setError(eventSource, &e);
 			GS_RETHROW_SYSTEM_ERROR(
 					e, "Request stop long sync failed.  (reason=" <<

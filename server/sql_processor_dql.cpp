@@ -24,6 +24,7 @@
 #include "sql_execution.h"
 #include "transaction_manager.h"
 
+
 const DQLProcessor::ProcRegistrar DQLProcessor::REGISTRAR_LIST[] = {
 	ProcRegistrar::of<DQLProcs::GroupOption>(SQLType::EXEC_GROUP),
 	ProcRegistrar::of<DQLProcs::JoinOption>(SQLType::EXEC_JOIN),
@@ -304,7 +305,7 @@ SQLOps::OpStore& DQLProcessor::prepareStore(Context &cxt) {
 				allocManager_, OpAllocatorManager,
 				cxt.getVarAllocator(), false,
 				&OpAllocatorManager::getDefault().getSubManager(extCxt),
-				&cxt.getVarAllocator());
+				&cxt.getVarAllocator(), extCxt.getAllocatorLimitter());
 		store_ = UTIL_MAKE_LOCAL_UNIQUE(store_, OpStore, *allocManager_);
 
 		store_->setStackAllocatorBase(&cxt.getAllocator().base());
@@ -726,6 +727,10 @@ uint32_t DQLProcs::ExtProcContext::getTotalWorkerId() {
 				txnMgr->getPartitionGroupConfig().getPartitionGroupCount();
 		return txnWorkerCount + workerId;
 	}
+}
+
+util::AllocatorLimitter* DQLProcs::ExtProcContext::getAllocatorLimitter() {
+	return getBase().getAllocatorLimitter();
 }
 
 SQLContext& DQLProcs::ExtProcContext::getBase() {
@@ -1825,9 +1830,9 @@ void SQLProcessor::DQLTool::customizeDefaultConfig(SQLProcessorConfig &config) {
 bool SQLCompiler::ProcessorUtils::predicateToMetaTarget(
 		TupleValue::VarContext &varCxt, const Expr &expr,
 		uint32_t partitionIdColumn, uint32_t containerNameColumn,
-		uint32_t containerIdColumn, PartitionId partitionCount,
-		PartitionId &partitionId, const Plan::ValueList *parameterList,
-		bool &placeholderAffected) {
+		uint32_t containerIdColumn, uint32_t partitionNameColumn,
+		PartitionId partitionCount, PartitionId &partitionId,
+		const Plan::ValueList *parameterList, bool &placeholderAffected) {
 	partitionId = UNDEF_PARTITIONID;
 	placeholderAffected = false;
 
@@ -1849,8 +1854,8 @@ bool SQLCompiler::ProcessorUtils::predicateToMetaTarget(
 		bool placeholderAffectedLocal;
 		found = SQLContainerUtils::ContainerUtils::predicateToMetaTarget(
 				cxt, &procExpr, partitionIdColumn, containerNameColumn,
-				containerIdColumn, partitionCount, partitionId,
-				placeholderAffectedLocal);
+				containerIdColumn, partitionNameColumn,
+				partitionCount, partitionId, placeholderAffectedLocal);
 
 		if (!withParameterList) {
 			placeholderAffected = placeholderAffectedLocal;
@@ -1861,6 +1866,34 @@ bool SQLCompiler::ProcessorUtils::predicateToMetaTarget(
 	}
 
 	return found;
+}
+
+FullContainerKey* SQLCompiler::ProcessorUtils::predicateToContainerKey(
+		TupleValue::VarContext &varCxt, TransactionContext &txn,
+		DataStoreV4 &dataStore, const Query &query, DatabaseId dbId,
+		ContainerId metaContainerId, PartitionId partitionCount,
+		util::String &dbNameStr, bool &fullReduced,
+		PartitionId &reducedPartitionId) {
+	SQLValues::ValueContext cxt(
+			SQLValues::ValueContext::ofAllocator(*varCxt.getStackAllocator()));
+
+	const Expr &pred = tqlToPredExpr(cxt.getAllocator(), query);
+
+	SQLExprs::Expression::InOption option(cxt);
+	option.syntaxExpr_ = &pred;
+
+	SQLExprs::ExprFactoryContext factoryCxt(cxt.getAllocator());
+	SQLExprs::Expression &procPred =
+			SQLExprs::Expression::importFrom(factoryCxt, option);
+
+	SQLOps::ContainerLocation location;
+	location.id_ = metaContainerId;
+	location.dbVersionId_ = dbId;
+
+	const bool forCore = false;
+	return SQLContainerUtils::ContainerUtils::predicateToContainerKey(
+			cxt, txn, dataStore, &procPred, location, partitionCount, forCore,
+			dbNameStr, fullReduced, reducedPartitionId);
 }
 
 SQLCompiler::Expr SQLCompiler::ProcessorUtils::tqlToPredExpr(

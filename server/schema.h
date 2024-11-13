@@ -1153,7 +1153,7 @@ private:
 	static const uint32_t OPTION_NAME_OFFSET = OPTION_ROWID_OFFSET + sizeof(RowId);
 
 	static const uint8_t COMPOSITE_FLAG_MASK = 0x80; 
-	static const uint8_t MAP_TYPE_MASK = static_cast<const uint8_t>(~COMPOSITE_FLAG_MASK); 
+	static const uint8_t MAP_TYPE_MASK = static_cast<uint8_t>(~COMPOSITE_FLAG_MASK); 
 
 private:
 	AllocateStrategy &allocateStrategy_;

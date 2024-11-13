@@ -33,6 +33,7 @@
 #include "container_message_v4.h"
 #include "transaction_manager.h"
 #include "result_set.h"
+#include "recovery_manager.h" 
 
 UTIL_TRACER_DECLARE(PARTITION);  
 UTIL_TRACER_DECLARE(PARTITION_DETAIL);
@@ -396,14 +397,18 @@ LogSequentialNumber Partition::getLSN() {
 	@note recoveryTargetLSNが0以外の時、XLogのredo中にrecoveryTargetLSNと一致するLSNを持つログレコードが存在しなかった場合にはシステムエラー例外が送出される
 */
 void Partition::recover(
-		InterchangeableStoreMemory* ism, LogSequentialNumber recoveryTargetLsn) {
+		InterchangeableStoreMemory* ism, LogSequentialNumber recoveryTargetLsn,
+		RecoveryManager* recoveryMgr, int32_t workerId) {
 	try {
-		const uint64_t currentTime = util::Stopwatch::currentClock();
-		uint64_t adjustTime = currentTime;
+		const uint64_t startTime = util::Stopwatch::currentClock();
+		uint64_t adjustTime = startTime;
 
 		const bool byCP = false;
 		std::tuple<LogIterator<MutexLocker>, LogIterator<MutexLocker>> its =
 				defaultLogManager_->init(byCP);
+		if (recoveryMgr) {
+			recoveryMgr->setParallelRecoveryReady();
+		}
 		{
 			LogIterator<MutexLocker> it = defaultLogManager_->createChunkDataLogIterator();
 			std::unique_ptr<Log> log;
@@ -419,6 +424,12 @@ void Partition::recover(
 			}
 			it.fin();
 		}
+		if (recoveryMgr && recoveryMgr->isErrorOccured()) {
+			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+					"Recovery process has been interrupted.");
+			return;
+		}
+		const uint64_t ph1Time = util::Stopwatch::currentClock();
 		int32_t redoCount = 0;
 		{
 			LogIterator<MutexLocker>& it = std::get<0>(its);
@@ -441,6 +452,11 @@ void Partition::recover(
 			it.fin();
 			chunkManager_->reinit();
 		}
+		if (recoveryMgr && recoveryMgr->isErrorOccured()) {
+			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+					"Recovery process has been interrupted.");
+			return;
+		}
 		chunkManager_->setLogVersion(defaultLogManager_->getLogVersion());
 		if (recoveryTargetLsn > 0
 				&& recoveryTargetLsn < defaultLogManager_->getLSN()) {
@@ -451,10 +467,18 @@ void Partition::recover(
 					", redoStartLSN=" << defaultLogManager_->getLSN() << ")");
 		}
 		initializeLogFormatVersion(defaultLogManager_->getLogFormatVersion());
+		const uint64_t dsInitTime = util::Stopwatch::currentClock();
 		activate();
+		if (recoveryMgr && recoveryMgr->isErrorOccured()) {
+			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+					"Recovery process has been interrupted.");
+			return;
+		}
+		const uint64_t ph2Time = util::Stopwatch::currentClock();
 		{
 			LogIterator<MutexLocker>& it = std::get<1>(its);
 			std::unique_ptr<Log> log;
+			int64_t currentVersion = -1;
 			while (true) {
 				if (recoveryTargetLsn > 0
 						&& recoveryTargetLsn == defaultLogManager_->getLSN()) {
@@ -478,9 +502,33 @@ void Partition::recover(
 				}
 				const uint64_t currentTime = util::Stopwatch::currentClock();
 				if (ism && currentTime - adjustTime > ADJUST_MEMORY_TIME_INTERVAL_) {
+					if (recoveryMgr && recoveryMgr->isErrorOccured()) {
+						GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+									  "Recovery process has been interrupted.");
+						return;
+					}
 					adjustTime = currentTime;
-					ism->calculate();
-					ism->resize();
+					if (recoveryMgr) {
+						recoveryMgr->adjustMemory(pId_, workerId);
+					}
+					else {
+						ism->calculate();
+						ism->resize();
+					}
+				}
+			}
+			{
+				std::vector<int32_t>& versionList = it.getLogVersionList();
+				for (int32_t logver : versionList) {
+					LogIterator<MutexLocker> logIt = defaultLogManager_->createXLogVersionIterator(logver);
+					util::StackAllocator::Scope scope(defaultLogManager_->getAllocator());
+					while (true) {
+						log = logIt.next(true);
+						if (log == NULL) break;
+						defaultLogManager_->setExistLsnMap(logver, log->getLsn() + 1);
+						break;
+					}
+					logIt.fin();
 				}
 			}
 			it.fin();
@@ -494,11 +542,15 @@ void Partition::recover(
 					", redoFinishedLSN=" << defaultLogManager_->getLSN() << ")");
 		}
 		if (managerSet_ && managerSet_->pt_) {
+			const uint64_t endTime = util::Stopwatch::currentClock();
 			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
-					"Redo finished (pId=" << pId_ <<
+					"Partition recovery finished (pId=" << pId_ <<
 					", lsn=" << managerSet_->pt_->getLSN(pId_) <<
-					", elapsedMillis=" <<
-					(util::Stopwatch::currentClock() - currentTime)/1000 << ")");
+					", total(ms)=" << util::Stopwatch::clockToMillis(endTime - startTime) <<
+					", ph0=" << util::Stopwatch::clockToMillis(ph1Time - startTime) <<
+					", ph1=" << util::Stopwatch::clockToMillis(dsInitTime - ph1Time) <<
+					", dsInit=" << util::Stopwatch::clockToMillis(ph2Time - dsInitTime) <<
+					", ph2=" << util::Stopwatch::clockToMillis(endTime - ph2Time) << ")");
 		}
 		setStatus(Status::RestoredPartition);
 	} catch (std::exception &e) {
@@ -1193,10 +1245,9 @@ bool Partition::redoLogList(
 		util::StackAllocator* alloc, RedoMode mode,
 		const util::DateTime &redoStartTime, Timestamp redoStartEmTime,
 		const uint8_t* logListBinary, size_t totalLen, size_t &pos,
-		util::Stopwatch* watch, uint32_t limitInterval) {
+		util::Stopwatch* watch, int32_t limitInterval) {
 	UNUSED_VARIABLE(alloc);
-	UNUSED_VARIABLE(watch);
-	UNUSED_VARIABLE(limitInterval);
+	bool enaleInterruption = (watch && limitInterval >= 0);
 
 	const uint8_t* logTop = logListBinary;
 	while (pos < totalLen) { 
@@ -1314,8 +1365,16 @@ bool Partition::redoLogList(
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Undefine Operation Id");
 		}
+		if (enaleInterruption && watch->elapsedMillis() >= limitInterval) {
+			break;
+		}
 	} 
-	return true;
+	if (enaleInterruption) {
+		return (pos >= totalLen);
+	}
+	else {
+		return true;
+	}
 }
 
 /*!

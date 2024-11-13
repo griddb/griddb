@@ -250,8 +250,12 @@ protected:
 	virtual Query *dup(TransactionContext &, ObjectManagerV4 &, AllocateStrategy &) {
 		return NULL;
 	}
-	virtual void finishQuery(TransactionContext &txn, ResultSet &resultSet,
-		BaseContainer &container);
+	virtual void finishQuery(
+			TransactionContext &txn, ResultSet &resultSet,
+			BaseContainer &container);
+	virtual void finishQuery(
+			TransactionContext &txn, ResultSet &resultSet,
+			const DataStoreConfig &dsConfig);
 
 	void setQueryOption(TransactionContext &txn, ResultSet &resultSet);
 	void doQueryPartial(
@@ -562,6 +566,7 @@ struct Query::QueryAccessor {
 
 struct Query::ExprAccessor : public Expr {
 	static Type getType(const Expr &expr);
+	static const char8_t* getLabel(const Expr &expr);
 	static Operation getOp(const Expr &expr);
 	static const ExprList* getArgList(const Expr &expr);
 	static const Value* getValue(const Expr &expr);

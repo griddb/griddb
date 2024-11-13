@@ -1171,8 +1171,7 @@ public:
 	static void decodeEnumData(
 		S&in, EnumType &enumData);
 	template <typename S>
-	static void decodeUUID(S&in, uint8_t *uuid,
-		size_t uuidSize);
+	static void decodeUUID(S &in, uint8_t *uuid, size_t uuidSize);
 
 	template<typename S>
 	static void decodeReplicationAck(
@@ -1181,6 +1180,12 @@ public:
 	static void decodeStoreMemoryAgingSwapRate(
 		S &in,
 		double &storeMemoryAgingSwapRate);
+	template<typename S>
+	static void decodeUserInfo(
+		S &in, UserInfo &userInfo);
+	template<typename S>
+	static void decodeDatabaseInfo(S &in,
+		DatabaseInfo &dbInfo, util::StackAllocator &alloc);
 
 	static EventByteOutStream encodeCommonPart(
 		Event &ev, StatementId stmtId, StatementExecStatus status);
@@ -2662,6 +2667,14 @@ private:
 		}
 		util::String query_;
 	};
+
+	static void suspendRequest(
+			EventContext& ec, const Event &baseEv,
+			const util::XArray<uint8_t> &suspendedData, size_t extraDataSize);
+	static void decodeSuspendedData(
+			const Event &ev, EventByteInStream &in,
+			util::XArray<uint8_t> &suspendedData, size_t &extraDataSize);
+
 	typedef TQLOutputMessage OutMessage;
 };
 
@@ -4798,6 +4811,16 @@ private:
 	PartitionId *pIdCursor_;
 };
 
+
+
+class KeepLogHandler : public StatementHandler {
+public:
+	KeepLogHandler();
+	~KeepLogHandler();
+	void operator()(EventContext& ec, Event& ev);
+};
+
+
 /*!
 	@brief Handles BACK_GROUND event
 */
@@ -5295,6 +5318,8 @@ private:
 
 	DataStorePeriodicallyHandler dataStorePeriodicallyHandler_;
 	AdjustStoreMemoryPeriodicallyHandler adjustStoreMemoryPeriodicallyHandler_;
+	KeepLogHandler keepLogHandler_;
+
 	BackgroundHandler backgroundHandler_;
 	ContinueCreateDDLHandler createDDLContinueHandler_;
 

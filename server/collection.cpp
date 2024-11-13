@@ -2260,7 +2260,7 @@ void Collection::undoUpdateRow(
 			}
 			if (isOldSchema) {
 				RowScope rowScope(*this, TO_NORMAL);
-				convertRowArraySchema(txn, rowArray, false); 
+				convertRowArraySchema(txn, rowArray, false, rowId, &sc); 
 			}
 		}
 		else {
@@ -2419,8 +2419,8 @@ void Collection::getContainerOptionInfo(
 	return;
 }
 
-util::String Collection::getBibContainerOptionInfo(TransactionContext &) {
-	return "";
+util::String Collection::getBibContainerOptionInfo(TransactionContext &txn) {
+	return util::String("", txn.getDefaultAllocator());
 }
 
 void Collection::checkContainerOption(

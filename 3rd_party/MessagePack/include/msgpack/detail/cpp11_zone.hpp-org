@@ -203,7 +203,7 @@ public:
     void swap(zone& o);
 
 
-    static void* operator new(std::size_t size)
+    static void* operator new(std::size_t size) throw(std::bad_alloc)
     {
         void* p = ::malloc(size);
         if (!p) throw std::bad_alloc();

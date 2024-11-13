@@ -1299,18 +1299,7 @@ void TupleList::BlockWriter::append(const Block &tupleBlock) {
 
 
 
-TupleList::Reader::Reader()
-: tupleList_(NULL), fixedAddr_(NULL), fixedEndAddr_(NULL), cxt_(NULL)
-, accessOrder_(ORDER_SEQUENTIAL)
-, currentBlockNth_(0), keepTopBlockNth_(UNDEF_BLOCKID)
-, keepMaxBlockNth_(0)
-, headBlockNth_(0), readerId_(-1)
-, fixedPartSize_(0), blockSize_(0), blockExpSize_(0), positionOffsetMask_(0)
-, nullBitOffset_(0)
-, isNullable_(false), isActive_(false), isDetached_(false)
-, positionCalled_(false)
-{
-}
+
 
 TupleList::Reader::Reader(TupleList &tupleList, AccessOrder order)
 : tupleList_(&tupleList), fixedAddr_(NULL), fixedEndAddr_(NULL)
@@ -2047,15 +2036,6 @@ bool TupleList::Reader::nextDetail() {
 	return true;
 }
 
-TupleList::Writer::Writer()
-: tupleList_(NULL), fixedAddr_(NULL), varTopAddr_(NULL), varTailAddr_(NULL)
-, cxt_(NULL), storeLobHeader_(NULL)
-, currentBlockNth_(0), nullBitOffset_(0)
-, tupleCount_(0), contiguousBlockCount_(0)
-, fixedPartSize_(0), blockSize_(0), maxAvailableSize_(0)
-, isNullable_(false), isActive_(false), isDetached_(false)
-{
-}
 
 TupleList::Writer::Writer(TupleList &tupleList)
 : tupleList_(&tupleList), fixedAddr_(NULL), varTopAddr_(NULL), varTailAddr_(NULL)
@@ -2265,10 +2245,9 @@ void TupleList::Writer::allocateNewBlock() {
 	varTopAddr_ = static_cast<uint8_t*>(block.data()) + blockSize_;
 	varTailAddr_ = NULL;
 	tupleCount_ = 0;
-	uint8_t *blockTop = static_cast<uint8_t*>(block.data());
-	TupleBlockHeader::setTupleCount(blockTop, 0);
-	TupleBlockHeader::setNextFixDataOffset(blockTop, TupleList::BLOCK_HEADER_SIZE);
-	TupleBlockHeader::setNextVarDataOffset(blockTop, blockSize_);
+	TupleBlockHeader::setTupleCount(block.data(), 0);
+	TupleBlockHeader::setNextFixDataOffset(block.data(), TupleList::BLOCK_HEADER_SIZE);
+	TupleBlockHeader::setNextVarDataOffset(block.data(), blockSize_);
 	contiguousBlockCount_ = 0;
 	block_ = block;
 	varBlock_ = block;

@@ -188,7 +188,7 @@ def optional_arg(arg_default):
 
 def getpid(path):
     if os.path.exists(path):
-        fp = open(path, 'rU')
+        fp = open(path, 'r')
         pid = fp.readline()
         return pid.rstrip()
 

@@ -3878,6 +3878,7 @@ void NoSQLStore::addColumn(
 				containerType);
 
 			int32_t errorPos = -1;
+			util::Exception pendingException;
 			for (NodeAffinityNumber subContainerId = 0;
 					subContainerId < static_cast<NodeAffinityNumber>(
 							partitioningInfo.getCurrentPartitioningCount());
@@ -3902,6 +3903,7 @@ void NoSQLStore::addColumn(
 				catch (std::exception& e) {
 					UTIL_TRACE_EXCEPTION_WARNING(SQL_SERVICE, e, "");
 					errorPos = static_cast<int32_t>(subContainerId);
+					pendingException = GS_EXCEPTION_CONVERT(e, "");
 				}
 
 			}
@@ -3930,6 +3932,9 @@ void NoSQLStore::addColumn(
 				NoSQLStoreOption option(execution);
 				option.putRowOption_ = PUT_INSERT_OR_UPDATE;
 				targetContainer.putRow(fixedPart, varPart, UNDEF_ROWID, option);
+			}
+			if (errorPos != -1) {
+				throw pendingException;
 			}
 		}
 		else {

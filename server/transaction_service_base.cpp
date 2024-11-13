@@ -88,7 +88,6 @@ extern std::string dumpUUID(uint8_t* uuid);
 
 
 
-
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
 
@@ -1698,16 +1697,20 @@ void StatementHandler::decodeVarSizeBinaryData(
 	@brief Decodes UUID
 */
 template <typename S>
-void StatementHandler::decodeUUID(S & in,
-	uint8_t * uuid_, size_t uuidSize) {
+void StatementHandler::decodeUUID(S &in, uint8_t *uuid, size_t uuidSize) {
 	try {
-		assert(uuid_ != NULL);
-		in.readAll(uuid_, uuidSize);
+		assert(uuid != NULL);
+		in.readAll(uuid, uuidSize);
 	}
 	catch (std::exception& e) {
 		TXN_RETHROW_DECODE_ERROR(e, "");
 	}
 }
+
+template
+void StatementHandler::decodeUUID(
+		util::ByteStream<util::ArrayInStream> &in, uint8_t *uuid,
+		size_t uuidSize);
 
 /*!
 	@brief Decodes ReplicationAck
@@ -3745,9 +3748,10 @@ void GetContainerPropertiesHandler::getPartitioningTableIndexInfo(
 
 	}
 	catch (std::exception& e) {
-		GS_RETHROW_USER_ERROR(e,
-			"Failed to get partitioning table index metadata. containerName="
-			<< containerName);
+		GS_RETHROW_USER_ERROR(
+				e, GS_EXCEPTION_MERGE_MESSAGE(
+						e, "Failed to get partitioning table index metadata ("
+						"containerName=" << containerName << ")"));
 	}
 }
 
@@ -4115,8 +4119,8 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 			int8_t unitValue = -1;
 			if (TupleColumnTypeUtils::isTimestampFamily(
 					partitionColumnOriginalType)) {
-				StatementHandler::checkMetaTableFeatureVersion(unitValue, static_cast<uint8_t>(acceptableFeatureVersion));
 				unitValue = static_cast<int8_t>(partitioningInfo.intervalUnit_);
+				StatementHandler::checkMetaTableFeatureVersion(unitValue, static_cast<uint8_t>(acceptableFeatureVersion));
 			}
 			out << unitValue;
 		}
@@ -4218,14 +4222,16 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 		out.base().position(lastPos);
 	}
 	catch (UserException& e) {
-		GS_RETHROW_USER_ERROR(e,
-			"Failed to get partitioning metadata. containerName="
-			<< containerName);
+		GS_RETHROW_USER_ERROR(
+				e, GS_EXCEPTION_MERGE_MESSAGE(
+						e, "Failed to get partitioning metadata ("
+						"containerName=" << containerName << ")"));
 	}
 	catch (std::exception& e) {
-		TXN_RETHROW_ENCODE_ERROR(e,
-			"Failed to get partitioning metadata. containerName="
-			<< containerName);
+		TXN_RETHROW_ENCODE_ERROR(
+				e, GS_EXCEPTION_MERGE_MESSAGE(
+						e, "Failed to get partitioning metadata ("
+						"containerName=" << containerName << ")"));
 	}
 }
 
@@ -4380,7 +4386,7 @@ void PutContainerHandler::operator()(EventContext & ec, Event & ev) {
 
 		int32_t replicationMode = transactionManager_->getReplicationMode();
 		ReplicationContext::TaskStatus taskStatus = ReplicationContext::TASK_FINISHED;
-		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERLY ||
+		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERTY ||
 			isAlterExecuted) {
 			DSInputMes input(alloc, DS_COMMIT);
 			StackAllocAutoPtr<DSOutputMes> retCommit(alloc, NULL);
@@ -6350,6 +6356,10 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 
+		util::XArray<uint8_t> suspendedData(alloc);
+		size_t extraDataSize;
+		decodeSuspendedData(ev, in, suspendedData, extraDataSize);
+
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
 		PartialQueryOption& partialQueryOption = inMes.partialQueryOption_;
@@ -6445,12 +6455,15 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 			source.sqlService_ = sqlService_;
 			source.sqlExecutionManager_ = sqlService_->getExecutionManager();
 
-			QueryProcessor::executeMetaTQL(
-				txn, *metaContainer, source, fetchOption.limit_,
-				TQLInfo(
-					request.optional_.get<Options::DB_NAME>(),
-					containerKey, query.c_str()),
-				*response.rs_);
+			if (QueryProcessor::executeMetaTQL(
+					txn, *metaContainer, source, fetchOption.limit_,
+					TQLInfo(
+							request.optional_.get<Options::DB_NAME>(),
+							containerKey, query.c_str()),
+					*response.rs_, suspendedData)) {
+				suspendRequest(ec, ev, suspendedData, extraDataSize);
+				return;
+			}
 
 			replySuccess(
 				ec, alloc, ev.getSenderND(), ev.getType(),
@@ -6510,6 +6523,60 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 	}
 	catch (std::exception& e) {
 		handleError(ec, alloc, ev, request, e);
+	}
+}
+
+void QueryTqlHandler::suspendRequest(
+		EventContext& ec, const Event &baseEv,
+		const util::XArray<uint8_t> &suspendedData, size_t extraDataSize) {
+	Event ev(baseEv);
+	EventByteOutStream out = ev.getOutStream();
+
+	assert(out.base().position() >= extraDataSize);
+	out.base().position(out.base().position() - extraDataSize);
+
+	if (suspendedData.size() > std::numeric_limits<uint32_t>::max()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED, "");
+	}
+
+	const uint32_t size = static_cast<uint32_t>(suspendedData.size());
+	try {
+		out << size;
+		out.writeAll(suspendedData.data(), size);
+	}
+	catch (...) {
+		std::exception e;
+		TXN_RETHROW_ENCODE_ERROR(e, "");
+	}
+
+	ev.incrementQueueingCount();
+	ec.getEngine().add(ev);
+}
+
+void QueryTqlHandler::decodeSuspendedData(
+		const Event &ev, EventByteInStream &in,
+		util::XArray<uint8_t> &suspendedData, size_t &extraDataSize) {
+	suspendedData.clear();
+	extraDataSize = in.base().remaining();
+
+	if (ev.getQueueingCount() <= 1) {
+		return;
+	}
+
+	try {
+		uint32_t size;
+		in >> size;
+
+		if (size > in.base().remaining()) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR, "");
+		}
+
+		suspendedData.resize(size);
+		in.readAll(suspendedData.data(), suspendedData.size());
+	}
+	catch (...) {
+		std::exception e;
+		TXN_RETHROW_DECODE_ERROR(e, "");
 	}
 }
 
@@ -10325,9 +10392,6 @@ int64_t DataStorePeriodicallyHandler::getContainerNameList(
 	UNUSED_VARIABLE(pgId);
 
 	Partition& partition = partitionList_->partition(pId);
-	if (!partition.isActive()) {
-		return 0;
-	}
 	if (!partitionTable_->isOwner(pId)) {
 		return 0;
 	}
@@ -10336,7 +10400,9 @@ int64_t DataStorePeriodicallyHandler::getContainerNameList(
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	util::LockGuard<util::Mutex> guard(partition.mutex());
-
+	if (!partition.isActive()) {
+		return 0;
+	}
 	TransactionManager::ContextSource src;
 	TransactionContext& txn = transactionManager_->put(
 		alloc, pId, TXN_EMPTY_CLIENTID, src, now, emNow);
@@ -10495,9 +10561,9 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 				while (count < periodMaxScanCount) {
 					util::LockGuard<util::Mutex> guard(
 						partitionList_->partition(pIdCursor_[pgId]).mutex());
-					DataStoreV4* ds = getDataStore(pIdCursor_[pgId]);
 					Partition* partition = &partitionList_->partition(pIdCursor_[pgId]);
 					if (partition->isActive()) {
+						DataStoreV4* ds = getDataStore(pIdCursor_[pgId]);
 						Timestamp timestamp = ec.getHandlerStartTime().getUnixTime();
 
 						util::StackAllocator& alloc = ec.getAllocator();
@@ -10541,6 +10607,34 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 	}
 }
 
+KeepLogHandler::KeepLogHandler() : StatementHandler(){
+}
+
+KeepLogHandler::~KeepLogHandler() {
+}
+
+void KeepLogHandler::operator()(EventContext& ec, Event& ev) {
+	TXN_TRACE_HANDLER_CALLED(ev);
+	try {
+		if (!clusterManager_->checkRecoveryCompleted()) {
+			return;
+		}
+		const PartitionGroupId pgId = ec.getWorkerId();
+		const PartitionGroupConfig& pgConfig = transactionManager_->getPartitionGroupConfig();
+		PartitionId startPId = pgConfig.getGroupBeginPartitionId(pgId);
+		PartitionId endPId = pgConfig.getGroupEndPartitionId(pgId);
+		KeepLogManager& keepLogMgr = *resourceSet_->syncMgr_->getKeepLogManager();
+	}
+	catch (UserException& e) {
+		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
+			"(nd=" << ev.getSenderND() << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		if (GS_EXCEPTION_CHECK_CRITICAL(e)) {
+			clusterService_->setError(ec, &e);
+		}
+	}
+}
+
+
 AdjustStoreMemoryPeriodicallyHandler::AdjustStoreMemoryPeriodicallyHandler()
 	: StatementHandler(), pIdCursor_(NULL) {
 	pIdCursor_ = UTIL_NEW PartitionId[KeyDataStore::MAX_PARTITION_NUM];
@@ -10553,12 +10647,10 @@ AdjustStoreMemoryPeriodicallyHandler::AdjustStoreMemoryPeriodicallyHandler()
 AdjustStoreMemoryPeriodicallyHandler::~AdjustStoreMemoryPeriodicallyHandler() {
 	delete[] pIdCursor_;
 }
-
 /*!
 	@brief Handler Operator
 */
-void AdjustStoreMemoryPeriodicallyHandler::operator()(
-	EventContext& ec, Event& ev) {
+void AdjustStoreMemoryPeriodicallyHandler::operator()(EventContext & ec, Event & ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	try {
@@ -11529,6 +11621,13 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		ee_->setHandlingMode(ADJUST_STORE_MEMORY_PERIODICALLY,
 			EventEngine::HANDLING_PARTITION_SERIALIZED);
 
+//		keepLogHandler_.initialize(mgrSet);
+//		ee_->setHandler(TXN_KEEP_LOG_CHECK_PERIODICALLY, keepLogHandler_);
+//		ee_->setHandler(TXN_KEEP_LOG_UPDATE, keepLogHandler_);
+//		ee_->setHandler(TXN_KEEP_LOG_RESET, keepLogHandler_);
+//		ee_->setHandlingMode(TXN_KEEP_LOG_CHECK_PERIODICALLY,
+//			EventEngine::HANDLING_PARTITION_SERIALIZED);
+
 		backgroundHandler_.initialize(mgrSet);
 		ee_->setHandler(BACK_GROUND, backgroundHandler_);
 		ee_->setHandlingMode(BACK_GROUND,
@@ -11658,6 +11757,11 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 				eeSource_, ADJUST_STORE_MEMORY_PERIODICALLY, beginPId);
 			ee_->addPeriodicTimer(adjustStoreMemoryPeriodicEvent,
 				ADJUST_STORE_MEMORY_CHECK_INTERVAL * 1000);
+
+			int32_t interval = CommonUtility::changeTimeSecondToMilliSecond(
+				mgrSet.config_->get<int32_t>(CONFIG_TABLE_SYNC_KEEP_LOG_CHECK_INTERVAL));
+			Event keepLogCheckEvent(eeSource_, TXN_KEEP_LOG_CHECK_PERIODICALLY, beginPId);
+			ee_->addPeriodicTimer(keepLogCheckEvent, interval);
 		}
 
 		ee_->setHandler(EXECUTE_JOB, executeHandler_);
@@ -12020,13 +12124,12 @@ int32_t TransactionService::getWaitTime(EventContext& ec, Event* ev, int32_t ope
 			int32_t interval = 0;
 			switch (type) {
 			case SYNC_EXEC: {
-				EventType eventType = (*ev).getType();
-				if (eventType != TXN_LONGTERM_SYNC_CHUNK_ACK
-					&& eventType != TXN_LONGTERM_SYNC_LOG_ACK) {
-					return 0;
-				}
 				queueSizeLimit = syncManager_->getExtraConfig().getLimitLongtermQueueSize();
 				interval = syncManager_->getExtraConfig().getLongtermHighLoadInterval();
+				int32_t logWaitInterval = syncManager_->getExtraConfig().getLongtermLogWaitInterval();
+				if (logWaitInterval > 0) {
+					return logWaitInterval;
+				}
 				int32_t queueSize = static_cast<int32_t>(
 					stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
 				if (queueSize >= queueSizeLimit) {
@@ -12636,6 +12739,9 @@ bool TransactionService::isUpdateEvent(Event& ev) {
 	case TXN_COLLECT_TIMEOUT_RESOURCE:
 	case CHUNK_EXPIRE_PERIODICALLY:
 	case ADJUST_STORE_MEMORY_PERIODICALLY:
+	case TXN_KEEP_LOG_CHECK_PERIODICALLY:
+	case TXN_KEEP_LOG_UPDATE:
+	case TXN_KEEP_LOG_RESET:
 		return false;
 	case TXN_SHORTTERM_SYNC_REQUEST:
 	case TXN_SHORTTERM_SYNC_START:

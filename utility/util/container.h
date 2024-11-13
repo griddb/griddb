@@ -149,6 +149,7 @@ private:
 
 	BaseAllocator base_;
 	AllocatorStats stats_;
+	AllocatorLimitter *limitter_;
 };
 
 template<typename T, typename Mutex>
@@ -2180,7 +2181,7 @@ ObjectPool<T, Mutex>::ObjectPool(const AllocatorInfo &info) :
 		base_(info, Utils::ELEMENT_OFFSET + sizeof(T)),
 		stats_(info) {
 
-	util::AllocatorManager::addAllocator(stats_.info_, *this);
+	util::AllocatorManager::addAllocator(stats_.info_, *this, limitter_);
 }
 
 template<typename T, typename Mutex>

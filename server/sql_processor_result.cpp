@@ -239,6 +239,7 @@ catch (...) {
 SQLDetailProfs::SQLDetailProfs(SQLVariableSizeGlobalAllocator& globalVarAlloc, const SQLDetailProfs& another) :
 	globalVarAlloc_(globalVarAlloc),
 	startTime_(another.startTime_),
+	startTimeStr_(globalVarAlloc_),
 	dbName_(another.dbName_.c_str(), globalVarAlloc_),
 	applicationName_(another.applicationName_.c_str(), globalVarAlloc_),
 	query_(another.query_.c_str(), globalVarAlloc_),

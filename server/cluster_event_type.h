@@ -266,6 +266,9 @@ enum GSEventType {
 	CONTINUE_ALTER_CONTAINER,
 	UPDATE_DATA_STORE_STATUS, 
 	PURGE_DATA_AFFINITY_INFO_PERIODICALLY,
+	TXN_KEEP_LOG_CHECK_PERIODICALLY,
+	TXN_KEEP_LOG_UPDATE,
+	TXN_KEEP_LOG_RESET,
 
 	AUTHENTICATION = 700, /*!< authentication */
 	AUTHENTICATION_ACK,   /*!< authentication ack */
@@ -312,6 +315,7 @@ enum GSEventType {
 	CS_NEWSQL_PARTITION_REFRESH_ACK,
 	
 	CS_SEND_MASTER_INFO,
+	CS_UPDATE_LONGTERM_INFO,   
 
 
 	TXN_SHORTTERM_SYNC_REQUEST =
@@ -332,6 +336,7 @@ enum GSEventType {
 	TXN_SYNC_TIMEOUT,			  /*!< synchronization timeout */
 	TXN_LONGTERM_SYNC_PREPARE_ACK,
 	TXN_LONGTERM_SYNC_RECOVERY_ACK,
+
 	SYC_SHORTTERM_SYNC_LOG =
 		2500,			   /*!< shor-term synchronization via SyncService */
 	SYC_LONGTERM_SYNC_LOG, /*!< long-term log synchronization via SyncService */
@@ -353,7 +358,7 @@ enum GSEventType {
 	PARTITION_GROUP_END, /*!< end of checkpoint among a group of Partitions */
 	WRITE_LOG_PERIODICALLY, /*!< periodic write to log */
 	CLEANUP_CP_DATA,		/*!< cleanup checkpoint information */
-	CLEANUP_LOG_FILES,
+	CLEANUP_LOG_FILES,				
 	CP_TXN_PREPARE_LONGTERM_SYNC,	
 	CP_TXN_STOP_LONGTERM_SYNC,		
 

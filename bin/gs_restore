@@ -1,0 +1,390 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import logs
+import os
+import shutil
+import glob
+import json
+import time
+import signal
+from optparse import OptionParser
+import re
+import multiprocessing
+from multiprocessing import Process, Event
+
+import util_server
+
+# 中断した場合、リストア中のファイルを削除する
+def restore_handler(signum, frame):
+    # jsonファイル削除
+    for file1 in glob.glob("%s/*.json" % dbdir):
+        os.remove(os.path.join(dbdir, file1))
+    # database下のディレクトリとファイル削除
+    for partdir in os.listdir('%s' % dbdir):
+        if os.path.isdir(os.path.join(dbdir, partdir)):
+            for file1 in glob.glob(os.path.join(dbdir, partdir, "*.dat")):
+                os.remove(os.path.join(dbdir, partdir, file1))
+            for file1 in glob.glob(os.path.join(dbdir, partdir, "*.cplog")):
+                os.remove(os.path.join(dbdir, partdir, file1))
+            os.rmdir(os.path.join(dbdir, partdir))
+    # txnlog下のディレクトリとファイル削除
+    for partdir in os.listdir('%s' % txndir):
+        if os.path.isdir(os.path.join(txndir, partdir)):
+            for file1 in glob.glob(os.path.join(txndir, partdir, "*.xlog")):
+                os.remove(os.path.join(txndir, partdir, file1))
+            os.rmdir(os.path.join(txndir, partdir))
+    print("\nAC0108: The restore process has been suspended and processing files has been deleted.")
+    log.warning("AC0108: The restore process has been suspended and processing files has been deleted.")
+    exit(128 + signum)
+
+# バックアップファイルバージョンチェック処理
+def backup_vercheck(budir):
+    # バックアップファイルの有無を確認
+    if os.path.exists(budir):
+        #gs_backup_info.jsonが存在する場合のみ、バージョンチェックを行う。
+        #※自動ログバックアップかつskipBaseline=1の場合は、gs_backup_info.jsonが作成されない仕様にサーバが変更された
+        #  このケースのみ、サーバ側の起動チェックにゆだねることとする。
+        if os.path.exists('%s/gs_backup_info.json' % budir):
+            backupInfoFile = os.path.join(budir, "gs_backup_info.json")
+            with open(backupInfoFile) as f:
+                backupInfo = json.load(f)
+            backup_version = backupInfo.get("backupInfo").get("systemVersion")
+            # gs_backup_info.jsonから読み取ったバーション情報から分析
+            if float(backup_version[:3]) < 5.0:
+                print("Check the version of backup file, the backup file version is before version V5.0. (path=" + budir + ")")
+                log.error("AC0113: The backup file version is before version V5.0. (path=" + budir + ")")
+                sys.exit(1)
+    else:
+        print("AC0105: The backup data does not exist in %s" % backup_name_dir)
+        log.error("AC0105: The backup data does not exist. (path=" + backup_name_dir + ")")
+        sys.exit(1)
+
+#　指定されたパスのディレクトリ一覧を取得します
+def getdirs(path):
+    dirs = []
+    for item in os.listdir(path):
+        if os.path.isdir(os.path.join(path, item)):
+            dirs.append(item)
+    return dirs
+
+#　指定されたパスのバックアップNameのディレクトリ一覧を取得します
+def getbackupdirs(path, backupName):
+    backup_dirs = []
+    dirs = getdirs(path)
+    for dir in dirs:
+        if dir == backupName or dir.startswith(backupName + "_"):
+            backup_dirs.append(dir)
+    backup_dirs.sort()
+    return backup_dirs
+
+#　指定されたフォルダでリカバリに利用するLV1（差分・増分）ディレクトリを取得します
+def getlv1dirs(path, backupName):
+    dirs = getbackupdirs(path, backupName)
+    # LV1_MAX を取出し　LV1_MAX_を含むフォルダのリストを取得します
+    lastfile = dirs[-1]
+    namepices = dirs[-1].rsplit("_", 1)
+    rdirs = []
+    if namepices[1] != "lv0":
+        for dir in dirs:
+            if namepices[0] + "_" in dir:
+                rdirs.append(dir)
+    return rdirs
+
+#　指定されたフォルダのデータ
+def copy_files(budir, dbdir, txndir):
+    # jsonファイルをリストア
+    copy_json_files(budir, dbdir)
+    # dataの下のデータファイルをリストア
+    for partdir in os.listdir('%s/data' % budir):
+        if os.path.isdir(os.path.join(budir, "data", partdir)):
+            os.makedirs(os.path.join(dbdir, partdir),exist_ok=True)
+            for file1 in glob.glob(os.path.join(budir, "data", partdir, "*.dat")):
+                print(os.path.basename(file1))
+                shutil.copy(os.path.join(budir, "data", partdir, file1),os.path.join(dbdir, partdir))
+    # data & txnlogの下のログファイルをリストア
+    copy_log_files(budir, dbdir, txndir)
+
+#　ログファイルのみをコピーします
+def copy_log_files(budir, dbdir, txndir):
+    for partdir in os.listdir('%s/data' % budir):
+        if os.path.isdir(os.path.join(budir, "data", partdir)):
+            os.makedirs(os.path.join(dbdir, partdir), exist_ok=True)
+            for file1 in glob.glob(os.path.join(budir, "data", partdir, "*.cplog")):
+                print(os.path.basename(file1))
+                shutil.copy(os.path.join(budir, "data", partdir, file1),os.path.join(dbdir, partdir))
+    for partdir in os.listdir('%s/txnlog' % budir):
+        if os.path.isdir(os.path.join(budir, "txnlog", partdir)):
+            os.makedirs(os.path.join(txndir, partdir), exist_ok=True)
+            for file1 in glob.glob(os.path.join(budir, "txnlog", partdir, "*.xlog")):
+                print(os.path.basename(file1))
+                shutil.copy(os.path.join(budir, "txnlog", partdir, file1),os.path.join(txndir, partdir))
+
+#　txnlog のxlogログファイルのみをコピーします
+def copy_txnlog_log_files(budir, dbdir, txndir):
+    for partdir in os.listdir('%s/txnlog' % budir):
+        if os.path.isdir(os.path.join(budir, "txnlog", partdir)):
+            os.makedirs(os.path.join(txndir, partdir), exist_ok=True)
+            for file1 in glob.glob(os.path.join(budir, "txnlog", partdir, "*.xlog")):
+                print(os.path.basename(file1))
+                shutil.copy(os.path.join(budir, "txnlog", partdir, file1),os.path.join(txndir, partdir))
+
+#　JSONファイルのみをコピーします
+def copy_json_files(budir, dbdir):
+    for file1 in glob.glob("%s/*.json" % budir):
+        print(os.path.basename(file1))
+        shutil.copy(os.path.join(budir, file1), dbdir)
+
+#　差分・増分バックアップデータをコピーします
+def copy_lv0_lv1(budir, name, dbdir, txndir):
+    dirs = getlv1dirs(budir, name)
+    copy_files(budir + "/" + name + "_lv0", dbdir, txndir)
+    for dir in dirs:
+        bu_check = util_server.check_backup_stat(budir + "/" + dir)
+        if bu_check == 0:
+            print("AC0210: The backup data of 'since' and 'incremental' may be corrupted. (path=" + budir + "/" + dir + ")")
+            log.error("AC0210: The backup data of 'since' and 'incremental' may be corrupted. (path="+ budir + "/" + dir + ")")
+            sys.exit(1)
+        copy_files(budir + "/" + dir, dbdir, txndir)
+    return
+
+
+###############################################################
+
+util_server.install_sigint_handler()
+(homedir, logdir) = util_server.get_required_env()
+
+parser = OptionParser(usage="%prog [--test] [--updateLogs] BACKUPNAME",
+                      description=u"Restore the GridDB backup files.",
+			          version="%prog [V5.0.00]")
+ 
+parser.add_option("-t", "--test",
+                  action="store_true", default=False, dest="test",
+                  help=u"Display the backup data to restore.")
+parser.add_option("--updateLogs",
+                  action="store_true", default=False, dest="update_logs",
+                  help=u"If specified, restore only log and json files and overwrite existing files.")
+
+(options, args) = parser.parse_args()
+
+if len(args) != 1:
+    parser.error("AC0104: Specify the BACKUPNAME.")
+
+log = logs.logger(__file__, logs.DEBUG)
+log.info("%s start." % (__file__))
+log.info("args=" + str(args))
+
+# confからgs_node.jsonを読み込む
+confdir = os.path.join(homedir, "conf")
+nodeconffile = os.path.join(confdir, "gs_node.json")
+with open(nodeconffile) as f:
+    nodeconf = json.load(f)
+# gs_node.jsonからdbPathの読み取り、jsonファイルにない場合、デフォルトパスにする
+dbdir = nodeconf.get("dataStore").get("dbPath", "data")
+# gs_node.jsonからbackupPathの読み取り、jsonファイルにない場合、デフォルトパスにする
+budir = nodeconf.get("dataStore").get("backupPath", "backup")
+# gs_node.jsonからtransactionLogPathの読み取り、jsonファイルにない場合、デフォルトパスにする （gs_node.json txnLogPath から transactionLogPath に名称変更）
+txndir = nodeconf.get("dataStore").get("transactionLogPath", "txnlog")
+
+# dbPath相対パス絶対パス判断
+if not os.path.isabs(dbdir):
+    dbdir = os.path.join(homedir, dbdir)
+# backupPath相対パス絶対パス判断
+if not os.path.isabs(budir):
+    budir = os.path.join(homedir, budir)
+# transactionLogPath相対パス絶対パス判断
+if not os.path.isabs(txndir):
+    txndir = os.path.join(homedir, txndir)
+
+# dbPathが存在しない場合、エラーメッセージ表示
+if not os.path.exists(dbdir):
+    print("AC0101: The database directory does not exist.")
+    print("Check the value of 'dataStore/dbPath' in the file 'conf/gs_node.json'.")
+    log.error("AC0101: The database directory does not exist. (path=" + dbdir + ")")
+    sys.exit(1)
+# backupPathが存在しない場合、エラーメッセージ表示
+if not os.path.exists(budir):
+    print("AC0102: The backup directory does not exist.")
+    print("Check the value of 'dataStore/backupPath' in the file 'conf/gs_node.json'.")
+    log.error("AC0102: The backup directory does not exist. (path=" + budir + ")")
+    sys.exit(1)
+# transactionLogPathが存在しない場合、エラーメッセージ表示
+if not os.path.exists(txndir):
+    print("AC0114: The transaction log file directory does not exist.")
+    print("Check the value of 'dataStore/transactionLogPath' in the file 'conf/gs_node.json'.")
+    log.error("AC0114: The transaction log file directory does not exist. (path=" + txndir + ")")
+    sys.exit(1)
+
+# コピー先のdataディレクトリの下にファイルorディレクトリが存在する場合、エラーメッセージ表示
+dirList = os.listdir(dbdir)
+if options.test is False:
+    if dirList and not options.update_logs:
+        print("AC0107: The file or directory exists in %s directory." % os.path.basename(dbdir))
+        print("If restoring , delete or move the files in the %s directory." % os.path.basename(dbdir))
+        log.error("AC0107: The file or directory exists in data directory. (path=" + dbdir + ")")
+        sys.exit(1)
+# コピー先のtxnlogディレクトリの下にファイルorディレクトリが存在する場合、エラーメッセージ表示
+    dirList = os.listdir(txndir)
+    if dirList and not options.update_logs:
+        print("AC0115: The file or directory exists in %s directory." % os.path.basename(txndir))
+        print("If restoring , delete or move the files in the %s directory." % os.path.basename(txndir))
+        log.error("AC0115: The file or directory exists in transaction log file directory. (path=" + txndir + ")")
+        sys.exit(1)
+
+backup_name = args[0]
+backup_name_dir = os.path.join(budir, backup_name)
+lv0 = 0
+# ベースラインの有無を確認
+if glob.glob("%s_lv0" % backup_name_dir):
+    backup_name_dir = backup_name_dir + "_lv0"
+    lv0 = 1
+
+# バックアップファイルバージョンチェックを実行
+backup_vercheck(backup_name_dir)
+
+# バックアップデータ有無判断処理
+# バックアップの下にtxnlogとdataが存在することを確認
+checkdatadir = 0
+checktxnlogdir = 0
+if os.path.exists('%s/txnlog' % backup_name_dir) and ( os.path.exists('%s/data' % backup_name_dir) or options.update_logs ):
+    # xlogファイルが存在しない場合はリストアできないため処理中断
+    for partdir in os.listdir('%s/txnlog' % backup_name_dir):
+        if os.path.isdir(os.path.join(backup_name_dir, "txnlog", partdir)):
+            checktxnlogdir = 1
+            if not glob.glob(os.path.join(backup_name_dir, "txnlog", partdir,"*.xlog")):
+                print("AC0105: The backup data does not exist in %s" % backup_name_dir)
+                log.error("AC0105: The backup data does not exist. (path=" + backup_name_dir + ")")
+                sys.exit(1)
+    # cplogファイル、datファイルが存在しない場合はリストアできないため処理中断
+    if options.update_logs:
+        # --updateLogs の場合/dataのチェックを行わない
+        checkdatadir = 1
+    else:
+        for partdir in os.listdir('%s/data' % backup_name_dir):
+            if os.path.isdir(os.path.join(backup_name_dir, "data", partdir)):
+                checkdatadir = 1
+                if not glob.glob(os.path.join(backup_name_dir, "data", partdir,"*.cplog")) and not glob.glob(os.path.join(backup_name_dir, "data", partdir,"*.dat")):
+                    print("AC0105: The backup data does not exist in %s" % backup_name_dir)
+                    log.error("AC0105: The backup data does not exist. (path=" + backup_name_dir + ")")
+                    sys.exit(1)
+    if not checkdatadir or not checktxnlogdir:
+        print("AC0105: The backup data does not exist in %s" % backup_name_dir)
+        log.error("AC0105: The backup data does not exist. (path=" + backup_name_dir + ")")
+        sys.exit(1)
+else:
+    print("AC0105: The backup data does not exist in %s" % backup_name_dir)
+    log.error("AC0105: The backup data does not exist. (path=" + backup_name_dir + ")")
+    sys.exit(1)
+
+if options.test:
+    print()
+    print("BackupName : %s" % backup_name)
+    print("BackupFolder : %s" % budir)
+    print()
+    # 表示ヘッダ
+    print("RestoreData         Status   StartTime                 EndTime")
+    print("--------------------------------------------------------------------------------")
+
+    backupNameList = []
+    if backup_name_dir.count("_lv0"):
+        backupNameList.append(backup_name + "_lv0")
+        backupNameList.extend(getlv1dirs(budir, backup_name))
+    else:
+        backupNameList.append(backup_name)
+
+    for backupName in backupNameList:
+        backupDir = os.path.join(budir, backupName)
+        backupInfoFile = os.path.join(backupDir, "gs_backup_info.json")
+
+        # バックアップ情報ファイルの存在確認
+        readSuccess = True
+        if not os.path.exists(backupInfoFile):
+            files = os.listdir(backupDir)
+            if len(files) != 0:
+                # V1.1の場合はJSONファイルが無いため、無い場合も完了にする
+                print(backupName.ljust(25) + " " + "OK")
+                continue
+            else:
+                # 直下にファイルが無い場合は不完全
+                print(backupName.ljust(25) + " " + "NG")
+                continue
+        else:
+            # バックアップ情報ファイルの読み込み
+            for count in [0, 1, 2]:
+                try:
+                    with open(backupInfoFile) as f1:
+                        infoFile = json.load(f1)
+
+                    break
+                except Exception as e:
+                    log.warning("AC0110: BackupInfoFile read error. (name=" + backupName + ", path=" + backupInfoFile + ", msg=" + str(e) + ")")
+                    readSuccess = False
+        if not readSuccess:
+            break
+
+        # バックアップ情報の取得
+        backupInfo = infoFile.get("backupInfo")
+        if backupInfo is None:
+            log.warning("AC0112: BackupInfo not found. (name=" + backupName + ")")
+            break
+
+        backupStatus = backupInfo.get("backupStatus")
+        if backupStatus != "end":
+            backupStatus = "NG"
+        else:
+            backupStatus = "OK"
+        backupStartTime = backupInfo.get("backupStartTime")
+        backupEndTime = backupInfo.get("backupEndTime")
+
+        # バックアップ情報の出力
+        print(backupName.ljust(25) + " " + backupStatus.ljust(2) + " " + backupStartTime + " " + backupEndTime)
+    sys.exit(0)
+
+# サーバ起動確認
+pidfile = os.path.join(confdir, "gridstore.pid")
+if os.path.exists(pidfile):
+    pid = util_server.getpid(pidfile)
+    if util_server.psexists(pid, "gsserver"):
+        print("AC0103: There is a possibility that GridDB node has been started.")
+        log.error("AC0103: There is a possibility that GridDB node has been started.")
+        sys.exit(1)
+    else:
+        log.warning("AC0104: PID file exists, but gsserver process is not found. Then delete pid file and start gs_restore.")
+        os.remove(pidfile)
+
+# gs_backup_info.jsonからバックアップ状態を確認
+if lv0 == 1:
+    bu_check = util_server.check_backup_stat(budir + "_lv0")
+else:
+    bu_check = util_server.check_backup_stat(budir)
+if bu_check == 0:
+    print("AC0106: The specified backup file may be corrupted.")
+    log.error("AC0106: The specified backup file may be corrupted. (path=" + budir + ")")
+    sys.exit(1)
+
+print()
+print("Restoring data files...")
+
+# 中断した場合、リストア中のファイルを削除する
+signal.signal(signal.SIGINT, restore_handler)
+signal.signal(signal.SIGQUIT, restore_handler)
+
+event = Event()
+# ベースライン & 差分増分バックアップのリストア
+if lv0 == 1:
+    copy_lv0_lv1(budir, backup_name, dbdir, txndir)
+
+# ログバックアップのリストア
+elif options.update_logs:
+	print(backup_name_dir)
+	copy_txnlog_log_files(backup_name_dir, dbdir, txndir)
+	copy_json_files(backup_name_dir, dbdir)
+
+# フルバックアップのリストア
+else:
+    print(backup_name_dir)
+    copy_files(backup_name_dir, dbdir, txndir)
+
+log.info("restore %s to %s" % (budir, dbdir))
+log.info("%s end." % (__file__))

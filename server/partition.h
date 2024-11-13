@@ -46,6 +46,7 @@ class ClusterService;
 class TransactionContext;
 class KeyDataStoreValue;
 class KeyDataStore;
+class RecoveryManager;
 
 
 enum RedoMode {
@@ -270,7 +271,8 @@ public:
 	void reinit(PartitionList& ptList);
 
 	void recover(
-			InterchangeableStoreMemory* ism, LogSequentialNumber targetLsn = 0);
+			InterchangeableStoreMemory* ism, LogSequentialNumber targetLsn = 0,
+			RecoveryManager *rm = NULL, int32_t workerId = -1);
 
 	void restore(const uint8_t* logListBinary, uint32_t size);
 
@@ -321,7 +323,7 @@ public:
 		const util::DateTime &redoStartTime, 
 		Timestamp redoStartEmTime,
 		const uint8_t* data, size_t dataLen, size_t& pos,
-		util::Stopwatch* watch, uint32_t limitInterval);
+		util::Stopwatch* watch, int32_t limitInterval);
 
 	void genTempLogManager();
 

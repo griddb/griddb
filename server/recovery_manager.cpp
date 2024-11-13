@@ -42,6 +42,8 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
+
+
 const std::string RecoveryManager::BACKUP_INFO_FILE_NAME("gs_backup_info.json");
 const std::string RecoveryManager::BACKUP_INFO_DIGEST_FILE_NAME(
 	"gs_backup_info_digest.json");
@@ -64,12 +66,25 @@ RecoveryManager::RecoveryManager(
 	  recoveryDownCount_(
 		  configTable.get<int32_t>(CONFIG_TABLE_DEV_RECOVERY_DOWN_COUNT)),
 	  recoveryTargetPartitionMode_(false),
+	  recoveryConcurrency_(
+		  configTable.get<int32_t>(CONFIG_TABLE_DS_RECOVERY_CONCURRENCY)),
+	  parallelRecoveryReady_(false),
+	  recoveryErrorOccured_(false),
+	  recoverdPartitionCount_(0),
 	  releaseUnusedFileBlocks_(releaseUnusedFileBlocks),
 	  pt_(NULL),
 	  clsSvc_(NULL), sysSvc_(NULL), txnMgr_(NULL),
 	  partitionList_(NULL)
 {
 	statUpdator_.manager_ = this;
+
+	int32_t concurrency = configTable.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY);
+	if (recoveryConcurrency_ > concurrency) {
+		recoveryConcurrency_ = concurrency;
+	}
+	for (int32_t pgId = 0; pgId < concurrency; ++pgId) {
+		recoveryTargetPartitionGroupList_.push_back(pgId);
+	}
 
 	backupInfo_.setConfigValue(
 		configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
@@ -385,31 +400,39 @@ void RecoveryManager::recovery(
 
 	try {
 		util::StackAllocator::Scope scope(alloc);
-		const uint64_t currentTime = util::Stopwatch::currentClock();
+		const uint64_t recoveryStartTime = util::Stopwatch::currentClock();
 		const uint32_t partitionNum = pgConfig_.getPartitionCount();
 		if (existBackup) {
 			checkRestoreFile();
 		}
-		int64_t releasedBlockCount = 0;
-		for (uint32_t pId = 0; pId < partitionNum; ++pId) {
-			Partition &partition = partitionList_->partition(pId);
-			InterchangeableStoreMemory& ism = partitionList_->interchangeableStoreMemory();
-			LogSequentialNumber restoreTargetLsn = 0;
-			restoreTargetLsn = clusterSnapshotRestoreInfo_.getTargetLsn(pId);
-			partition.recover(&ism, restoreTargetLsn);
-			ism.calculate();
-			ism.resize();
-			if (releaseUnusedFileBlocks_) {
-				releasedBlockCount += partition.chunkManager().releaseUnusedFileBlocks();
-			}
-			progressPercent_ = static_cast<uint32_t>(
-					(pId + 1.0) / partitionNum * 90);
+		recoveryWorkerThreadList_.reserve(recoveryConcurrency_);
+		for (int32_t id = 0; id < recoveryConcurrency_; ++id) {
+			RecoveryWorkerThread *thread = UTIL_NEW RecoveryWorkerThread(
+					this, id, true, pgConfig_, partitionList_,
+					releaseUnusedFileBlocks_, clusterSnapshotRestoreInfo_);
+			recoveryWorkerThreadList_.push_back(thread);
 		}
-		GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
-			"Partition recovery finished (elapsedMillis="
-			<< (util::Stopwatch::currentClock() - currentTime) / 1000 << ")");
-
+		for (auto &thread : recoveryWorkerThreadList_) {
+			thread->tryStart();
+		}
+		for (auto &thread : recoveryWorkerThreadList_) {
+			thread->waitForShutdown();
+		}
+		if (isErrorOccured()) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_RECOVERY_FAILED,
+								  "Error occurred during partition recovery.");
+		}
+		for (auto& thread : recoveryWorkerThreadList_) {
+			thread->close();
+		}
+		for (auto& thread : recoveryWorkerThreadList_) {
+			delete thread;
+			thread = NULL;
+		}
 		clusterSnapshotRestoreInfo_.removeInfoFile();
+		GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+				"Recovery finished (elapsedMillis=" <<
+				util::Stopwatch::clockToMillis(util::Stopwatch::currentClock() - recoveryStartTime) << ")");
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -417,6 +440,39 @@ void RecoveryManager::recovery(
 	}
 }
 
+
+PartitionGroupId RecoveryManager::nextRecoveryTargetPartitionGroup() {
+	util::LockGuard<util::Mutex> guard(targetListMutex_);
+	if (recoveryTargetPartitionGroupList_.empty()) {
+		return UNDEF_PARTITIONGROUPID;
+	}
+	PartitionGroupId pgId = recoveryTargetPartitionGroupList_.front();
+	recoveryTargetPartitionGroupList_.pop_front();
+	return pgId;
+}
+
+void RecoveryManager::adjustMemory(PartitionId pId, int32_t workerId) {
+	const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+	const PartitionId groupBeginPId = pgConfig_.getGroupBeginPartitionId(pgId);
+	const PartitionId groupEndPId = pgConfig_.getGroupEndPartitionId(pgId);
+	InterchangeableStoreMemory& ism = partitionList_->interchangeableStoreMemory();
+	if (workerId == 0) {
+		util::LockGuard<util::Mutex> guard(redistibuteMutex_);
+		ism.calculate();
+	}
+	ChunkManager& chunkManager =
+			partitionList_->partition(groupBeginPId).chunkManager();
+	uint64_t newLimit = ism.getChunkBufferLimit(pgId);
+	uint64_t currentLimit = chunkManager.getCurrentLimit();
+	if (newLimit != currentLimit) {
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(groupBeginPId).mutex());
+		chunkManager.adjustStoreMemory(newLimit);  
+	}
+}
+
+void RecoveryManager::displayRecoveryProgress() {
+}
 
 RecoveryManager::StatSetUpHandler RecoveryManager::statSetUpHandler_;
 
@@ -1206,4 +1262,125 @@ LogSequentialNumber RecoveryManager::ClusterSnapshotRestoreInfo::getTargetLsn(Pa
 		return 0;
 	}
 }
+
+
+RecoveryManager::RecoveryWorkerThread::RecoveryWorkerThread(
+		RecoveryManager* rm,
+		int32_t workerId,
+		bool enabled,
+		PartitionGroupConfig& pgConfig,
+		PartitionList *partitionList,
+		bool releaseUnusedFileBlocks,
+		ClusterSnapshotRestoreInfo& csRestoreInfo
+) :
+	recoveryMgr_(rm),
+	workerId_(workerId),
+	runnable_(enabled),
+	enabled_(enabled),
+	pgConfig_(pgConfig),
+	partitionList_(partitionList),
+	releaseUnusedFileBlocks_(releaseUnusedFileBlocks),
+	clusterSnapshotRestoreInfo_(csRestoreInfo)
+{
+}
+
+bool RecoveryManager::RecoveryWorkerThread::isEnabled() const {
+	return enabled_;
+}
+
+void RecoveryManager::RecoveryWorkerThread::initialize() {
+}
+
+void RecoveryManager::RecoveryWorkerThread::tryStart() {
+	if (!enabled_) {
+		return;
+	}
+	start();
+}
+
+/*!
+	@brief Starts thread for RecoveryWorker
+*/
+void RecoveryManager::RecoveryWorkerThread::run() {
+	PartitionGroupId pgId = UNDEF_PARTITIONGROUPID;
+	PartitionId pId = UNDEF_PARTITIONID;
+	try {
+		while (runnable_) {
+			if (workerId_ > 0) {
+				while (!recoveryMgr_->isParallelRecoveryReady()) {
+					util::Thread::sleep(1000);
+				}
+				GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_RECOVERY_INFO,
+						"[" << workerId_ << "]parallelRecoveryReady." << pgId );
+			}
+			pgId = recoveryMgr_->nextRecoveryTargetPartitionGroup();
+			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_RECOVERY_INFO,
+						"[" << workerId_ << "]run(): targetPgId=" << pgId );
+			if (pgId == UNDEF_PARTITIONGROUPID) {
+				GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_RECOVERY_INFO,
+						"[" << workerId_ << "]Worker thread end." );
+				return;
+			}
+			const uint64_t pgStartTime = util::Stopwatch::currentClock();
+			int64_t releasedBlockCount = 0;
+			PartitionId startPId = pgConfig_.getGroupBeginPartitionId(pgId);
+			PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
+			for (pId = startPId; pId < endPId; ++pId) {
+				const uint64_t currentTime = util::Stopwatch::currentClock();
+
+				GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_RECOVERY_INFO,
+						"[" << workerId_ << "]Recovery start: (pgId=" << pgId << ", pId=" << pId << ")");
+
+				Partition& partition = partitionList_->partition(pId);
+				InterchangeableStoreMemory& ism = partitionList_->interchangeableStoreMemory();
+				LogSequentialNumber restoreTargetLsn = 0;
+				restoreTargetLsn = clusterSnapshotRestoreInfo_.getTargetLsn(pId);
+				partition.recover(&ism, restoreTargetLsn, recoveryMgr_);
+				recoveryMgr_->adjustMemory(pId, workerId_);
+				if (!isEnabled() || recoveryMgr_->isErrorOccured()) {
+					GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+							"[" << workerId_ << "]Recovery process has been interrupted. (pgId=" << pgId
+							<< ", pId=" << pId << ", elapsedMillis="
+							<< (util::Stopwatch::currentClock() - currentTime) / 1000 << ")");
+					return;
+				}
+				if (releaseUnusedFileBlocks_) {
+					releasedBlockCount += partition.chunkManager().releaseUnusedFileBlocks();
+				}
+				GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_RECOVERY_INFO,
+						"[" << workerId_ << "]Partition recovery finished (pId=" << pId << ", elapsedMillis="
+						<< util::Stopwatch::clockToMillis(util::Stopwatch::currentClock() - currentTime) << ")");
+				recoveryMgr_->incrementRecoverdPartitionCount();
+				recoveryMgr_->displayRecoveryProgress();
+			}
+			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_RECOVERY_INFO,
+				"[" << workerId_ << "]PartitionGroup recovery finished (pgId=" << pgId << ",elapsedMillis="
+				<< (util::Stopwatch::currentClock() - pgStartTime) / 1000 << ")");
+		}
+	}
+	catch (std::exception &e) {
+		UTIL_TRACE_EXCEPTION(RECOVERY_MANAGER, e, "");
+		recoveryMgr_->setErrorOccured();
+	}
+}
+
+/*!
+	@brief Sets mode to shutdown thread for RecoveryWorker
+*/
+void RecoveryManager::RecoveryWorkerThread::shutdown() {
+	runnable_ = false;
+}
+
+/*!
+	@brief Waits for shutdown
+*/
+void RecoveryManager::RecoveryWorkerThread::waitForShutdown() {
+	join();
+}
+
+void RecoveryManager::RecoveryWorkerThread::start(
+		util::ThreadRunner *runner, const util::ThreadAttribute *attr) {
+	util::Thread::start(runner, attr);
+}
+
 
