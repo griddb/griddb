@@ -1,9 +1,10 @@
 #!/bin/sh
 
-# Declare constants for OS Ubuntu, CentOS, openSUSE
+# Declare constants for OS Ubuntu, CentOS, openSUSE, RockyLinux
 readonly UBUNTU=Ubuntu
 readonly CENTOS=Centos
 readonly OPENSUSE=Opensuse
+readonly ROCKYLINUX=Rockylinux
 
 # Check if the file exists with the parameter path passed
 check_file_exist() {
@@ -28,7 +29,7 @@ build_griddb() {
     local os=$1
     cd griddb/
     case $os in
-        $CENTOS | $OPENSUSE | $UBUNTU)
+        $CENTOS | $OPENSUSE | $UBUNTU | $ROCKYLINUX)
             # Build GridDB server
             ./bootstrap.sh
             ./configure
@@ -54,7 +55,7 @@ build_package() {
     zip -r $griddb_zip_file $griddb_folder_name
 
     case $os in
-        $CENTOS)
+        $CENTOS | $ROCKYLINUX)
             cp $griddb_zip_file griddb/installer/SOURCES/
             rm -rf $griddb_folder_name
             cd griddb/installer
@@ -92,7 +93,7 @@ check_package() {
     local os=$2
 
     case $os in
-        $CENTOS | $OPENSUSE)
+        $CENTOS | $OPENSUSE | $ROCKYLINUX)
             rpm -qip $package_path
         ;;
         $UBUNTU)
@@ -112,7 +113,7 @@ install_griddb() {
 
     # Install package
     case $os in
-        $CENTOS | $OPENSUSE)
+        $CENTOS | $OPENSUSE | $ROCKYLINUX)
             rpm -ivh $package_path
         ;;
         $UBUNTU)
@@ -179,7 +180,7 @@ uninstall_package() {
     local package_name=$1
     local os=$2
     case $os in
-        $CENTOS | $OPENSUSE)
+        $CENTOS | $OPENSUSE | $ROCKYLINUX)
             rpm -e $package_name
         ;;
         $UBUNTU)
@@ -198,7 +199,7 @@ copy_package_to_host() {
     local griddb_version=$(get_version)
 
     case $os in
-        $CENTOS)
+        $CENTOS | $ROCKYLINUX)
             mkdir -p installer/RPMS/x86_64/
             docker cp $container_name:/griddb/installer/RPMS/x86_64/griddb-${griddb_version}-linux.x86_64.rpm installer/RPMS/x86_64/
         ;;
@@ -214,3 +215,4 @@ copy_package_to_host() {
         ;;
     esac
 }
+
