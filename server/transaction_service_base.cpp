@@ -11758,10 +11758,10 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 			ee_->addPeriodicTimer(adjustStoreMemoryPeriodicEvent,
 				ADJUST_STORE_MEMORY_CHECK_INTERVAL * 1000);
 
-			int32_t interval = CommonUtility::changeTimeSecondToMilliSecond(
-				mgrSet.config_->get<int32_t>(CONFIG_TABLE_SYNC_KEEP_LOG_CHECK_INTERVAL));
-			Event keepLogCheckEvent(eeSource_, TXN_KEEP_LOG_CHECK_PERIODICALLY, beginPId);
-			ee_->addPeriodicTimer(keepLogCheckEvent, interval);
+//			int32_t interval = CommonUtility::changeTimeSecondToMilliSecond(
+//				mgrSet.config_->get<int32_t>(CONFIG_TABLE_SYNC_KEEP_LOG_CHECK_INTERVAL));
+//			Event keepLogCheckEvent(eeSource_, TXN_KEEP_LOG_CHECK_PERIODICALLY, beginPId);
+//			ee_->addPeriodicTimer(keepLogCheckEvent, interval);
 		}
 
 		ee_->setHandler(EXECUTE_JOB, executeHandler_);
