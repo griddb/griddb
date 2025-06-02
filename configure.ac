@@ -1,5 +1,5 @@
 AC_PREREQ(2.61)
-AC_INIT([GridDB], [5.7.0])
+AC_INIT([GridDB], [5.8.0])
 AC_CONFIG_AUX_DIR([.])
 AM_INIT_AUTOMAKE([subdir-objects])
 

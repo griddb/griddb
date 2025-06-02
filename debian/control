@@ -3,7 +3,7 @@ Section: unknown
 Priority: extra
 Maintainer: Katsuhiko Nonomura <contact@griddb.org>
 Build-Depends: debhelper (>= 10)
-Standards-Version: 5.7.0
+Standards-Version: 5.8.0
 Homepage: https://github.com/griddb/griddb
 
 Package: griddb
