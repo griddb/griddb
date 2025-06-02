@@ -883,10 +883,10 @@ static void fromTimestampFunc(
     sqlite3_mutex_leave(sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER));
 #endif
     if( pTm ){
-      char tmpBuf[100];
+      char tmpBuf[32];
       char zBuf[100] = "";
-      strftime(tmpBuf, 100,  "%Y-%m-%dT%H:%M:%S", &sNow);
-      sprintf(zBuf, "%s.%dZ", tmpBuf, milli);
+      strftime(tmpBuf, sizeof(tmpBuf),  "%Y-%m-%dT%H:%M:%S", &sNow);
+      snprintf(zBuf, sizeof(zBuf), "%s.%dZ", tmpBuf, milli);
       sqlite3_result_text(context, zBuf, -1, SQLITE_TRANSIENT);
     }
   }
