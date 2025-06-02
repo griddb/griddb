@@ -21,14 +21,18 @@ GridDB 監視テンプレート for Zabbixは、ZabbixでGridDBの死活監視�
 次のファイルで構成されます。
 
 -   `griddb_templates.xml`
-    -   監視テンプレート
+    -   Zabbix Ver 4.0/5.0用 監視テンプレート
+-   `griddb_templates_v6.xml`
+    -   Zabbix Ver 6.0用 監視テンプレート
+-   `griddb_templates_v7.xml`
+    -   Zabbix Ver 7.0用 監視テンプレート
 
 ## 動作環境
 
 本テンプレートは以下のソフトウェアで動作確認しました。
 
--   Zabbix Ver.4.0(CentOS7.9), Ver.6.0(Ubuntu22.04/CentOS7.9)
--   GridDB V5.5CE
+-   Zabbix Ver.6.0/7.0
+-   GridDB V5.8CE
     -   サーバ
     -   運用コマンド(gs_stat)
     -   WebAPI
