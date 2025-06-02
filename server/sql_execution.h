@@ -280,6 +280,14 @@ public:
 		partitioningRowKeyConstraint_ = value;
 	}
 
+	void setCostBasedJoin(bool value) {
+		costBasedJoin_ = value;
+	}
+
+	void setCostBasedJoinDriving(bool value) {
+		costBasedJoinDriving_ = value;
+	}
+
 	bool isMultiIndexScan() const {
 		return multiIndexScan_;
 	}
@@ -290,6 +298,10 @@ public:
 
 	bool isCostBasedJoin() const {
 		return costBasedJoin_;
+	}
+
+	bool isCostBasedJoinDriving() const {
+		return costBasedJoinDriving_;
 	}
 
 	const SQLPlanningVersion& getPlanningVersion() const {
@@ -306,6 +318,7 @@ private:
 	bool multiIndexScan_;
 	bool partitioningRowKeyConstraint_;
 	bool costBasedJoin_;
+	bool costBasedJoinDriving_;
 	SQLPlanningVersion planningVersion_;
 };
 
@@ -550,6 +563,7 @@ public:
 	SQLConfigParam& getSQLConfig();
 
 	PartitionTable* getPartitionTable();
+	SQLIndexStatsCache& getIndexStats();
 
 	int32_t getTableCacheDumpLimitTime() {
 		return tableCacheDumpLimitTime_;
@@ -577,6 +591,7 @@ private:
 	DBConnection* dbConnection_;
 	PartitionTable* pt_;
 	SQLExecutionMap executionMap_;
+	SQLIndexStatsCache indexStats_;
 	util::FixedSizeAllocator<util::Mutex> fixedAllocator_;
 	SQLProcessorConfig* processorConfig_;
 	int64_t fetchSizeLimit_;
@@ -1156,10 +1171,17 @@ private:
 	void encodeSuccessExplainAnalyze(util::StackAllocator& alloc,
 		EventByteOutStream& out, Job* job);
 
-	void compile(util::StackAllocator& alloc, SQLConnectionControl& control,
-		ValueTypeList& parameterTypeList, SQLTableInfoList* tableInfoList,
-		util::Vector<BindParam*>& bindParamInfos,
-		TupleValue::VarContext& varCxt, int64_t startTime);
+	void compile(
+			EventContext &ec, SQLConnectionControl &connectionControl,
+			ValueTypeList &parameterTypeList, SQLTableInfoList *tableInfoList,
+			TupleValue::VarContext &varCxt, int64_t startTime,
+			RequestInfo& request, bool prepared, bool first,
+			bool isPreparedRetry);
+	void compileSub(
+			util::StackAllocator &alloc, SQLConnectionControl &connectionControl,
+			ValueTypeList &parameterTypeList, SQLTableInfoList *tableInfoList,
+			util::Vector<BindParam*> &bindParamInfos,
+			TupleValue::VarContext &varCxt, int64_t startTime);
 
 	bool replySuccessExplainAnalyze(
 		EventContext& ec, Job* job, uint8_t versionId, JobId* responseJobId);
@@ -1197,6 +1219,12 @@ private:
 	void executeCancel(EventContext& ec, bool clientCancel = false);
 
 	SQLTableInfoList* generateTableInfo(SQLExpandViewContext& cxt);
+	SQLTableInfoList* createEmptyTableInfo(util::StackAllocator &alloc);
+
+	void clearIndexStatsRequester();
+	bool checkIndexStatsResolved();
+	void resolveIndexStats(EventContext &ec);
+	SQLIndexStatsCache& getIndexStats();
 
 	void generateJobInfo(util::StackAllocator& alloc,
 		SQLTableInfoList* tableInfoList,
@@ -1356,6 +1384,7 @@ private:
 	int64_t batchCount_;
 	int64_t batchCurrentPos_;
 	BindParamSet bindParamSet_;
+	SQLIndexStatsCache::RequesterHolder indexStatsRequester_;
 };
 
 struct SQLProfilerInfo {

@@ -131,4 +131,19 @@ struct BtreeMap::SearchBulkFunc {
 	int32_t ret_;
 };
 
+struct BtreeMap::EstimateFunc {
+	EstimateFunc(
+			TransactionContext &txn, SearchContext &sc, BtreeMap *tree) :
+			txn_(txn), sc_(sc), tree_(tree), ret_(0) {
+	}
+
+	template<typename P, typename K, typename V, typename R>
+	void execute();
+
+	TransactionContext &txn_;
+	SearchContext &sc_;
+	BtreeMap *tree_;
+	uint64_t ret_;
+};
+
 #endif 

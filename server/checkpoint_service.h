@@ -538,7 +538,7 @@ private:
 	};
 
 	struct AutoArchiveCommand {
-		AutoArchiveCommand() : stopOnDuplicateError_(false), skipBaseLine_(false) {}
+		AutoArchiveCommand() : stopOnDuplicateError_(false), skipBaseLine_(false), duplicateLog_(false) {}
 		AutoArchiveCommand(const std::string& archiveName, bool stopOnDuplicateError, bool skipBaseLine, bool duplicateLog) :
 			archiveName_(archiveName), stopOnDuplicateError_(stopOnDuplicateError), skipBaseLine_(skipBaseLine), duplicateLog_(duplicateLog){}
 		std::string archiveName_;

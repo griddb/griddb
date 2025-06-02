@@ -26,6 +26,9 @@ void SQLTimeExprs::Registrar::operator()() const {
 	add<SQLType::FUNC_EXTRACT, Functions::Extract>();
 	add<SQLType::FUNC_MAKE_TIMESTAMP, Functions::MakeTimestamp>();
 	add<SQLType::FUNC_MAKE_TIMESTAMP_BY_DATE, Functions::MakeTimestamp>();
+	add<SQLType::FUNC_MAKE_TIMESTAMP_MS, Functions::MakeTimestampMs>();
+	add<SQLType::FUNC_MAKE_TIMESTAMP_US, Functions::MakeTimestampUs>();
+	add<SQLType::FUNC_MAKE_TIMESTAMP_NS, Functions::MakeTimestampNs>();
 	add<SQLType::FUNC_NOW, Functions::Now>();
 	add<SQLType::FUNC_STRFTIME, TimeFunctions::Strftime>();
 	add<SQLType::FUNC_TO_EPOCH_MS, Functions::ToEpochMs>();
@@ -80,24 +83,28 @@ inline int64_t SQLTimeExprs::Functions::Extract::operator()(
 template<typename C, typename T>
 int64_t SQLTimeExprs::Functions::Extract::Checker::operator()(
 		C&, int64_t fieldTypeValue, const T&) {
-	FunctionUtils::checkTimeField(fieldTypeValue, true, true);
+	FunctionUtils::TimeFieldChecker().withPrecise().withDays()(fieldTypeValue);
 	return 0;
 }
 
 
 template<typename C, typename Sec, typename R>
-inline int64_t SQLTimeExprs::Functions::MakeTimestamp::operator()(
+inline typename
+SQLTimeExprs::Functions::MakeTimestamp::template SecondsOf<Sec>::RetType
+SQLTimeExprs::Functions::MakeTimestamp::operator()(
 		C &cxt, int64_t year, int64_t month, int64_t day,
-		int64_t hour, int64_t min, Sec second, R &zone) {
+		int64_t hour, int64_t min, const Sec &second, R &zone) {
 	return (*this)(
 			cxt, year, month, day, hour, min, second,
 			FunctionUtils::resolveTimeZone(zone));
 }
 
 template<typename C, typename Sec>
-inline int64_t SQLTimeExprs::Functions::MakeTimestamp::operator()(
+inline typename
+SQLTimeExprs::Functions::MakeTimestamp::template SecondsOf<Sec>::RetType
+SQLTimeExprs::Functions::MakeTimestamp::operator()(
 		C &cxt, int64_t year, int64_t month, int64_t day,
-		int64_t hour, int64_t min, Sec second,
+		int64_t hour, int64_t min, const Sec &second,
 		const util::TimeZone &zone) {
 	util::DateTime::FieldData fieldData;
 	fieldData.initialize();
@@ -108,7 +115,9 @@ inline int64_t SQLTimeExprs::Functions::MakeTimestamp::operator()(
 	setFieldValue<util::DateTime::FIELD_HOUR>(fieldData, hour);
 	setFieldValue<util::DateTime::FIELD_MINUTE>(fieldData, min);
 
-	const std::pair<int64_t, int64_t> secondsParts = decomposeSeconds(second);
+	uint32_t nanos;
+	const std::pair<int64_t, int64_t> secondsParts =
+			decomposeSeconds(second, nanos);
 	setFieldValue<util::DateTime::FIELD_SECOND>(fieldData, secondsParts.first);
 	setFieldValue<util::DateTime::FIELD_MILLISECOND>(
 			fieldData, secondsParts.second);
@@ -117,9 +126,9 @@ inline int64_t SQLTimeExprs::Functions::MakeTimestamp::operator()(
 	cxt.applyDateTimeOption(option);
 	option.zone_ = FunctionUtils::resolveTimeZone(cxt, zone);
 
-	util::DateTime ret;
+	util::DateTime base;
 	try {
-		ret.setFields(fieldData, option);
+		base.setFields(fieldData, option);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR_CODED(
@@ -128,7 +137,9 @@ inline int64_t SQLTimeExprs::Functions::MakeTimestamp::operator()(
 						e, "Invalid timestamp fields"));
 	}
 
-	return ret.getUnixTime();
+	return SQLValues::DateTimeElements(
+			util::PreciseDateTime::ofNanoSeconds(base, nanos)).toTimestamp(
+					typename SecondsOf<Sec>::TagType());
 }
 
 template<typename C, typename R>
@@ -156,12 +167,17 @@ inline void SQLTimeExprs::Functions::MakeTimestamp::setFieldValue(
 }
 
 inline std::pair<int64_t, int64_t>
-SQLTimeExprs::Functions::MakeTimestamp::decomposeSeconds(int64_t value) {
+SQLTimeExprs::Functions::MakeTimestamp::decomposeSeconds(
+		int64_t value, uint32_t &nanos) {
+	nanos = 0;
 	return std::pair<int64_t, int64_t>(value, 0);
 }
 
 inline std::pair<int64_t, int64_t>
-SQLTimeExprs::Functions::MakeTimestamp::decomposeSeconds(double value) {
+SQLTimeExprs::Functions::MakeTimestamp::decomposeSeconds(
+		double value, uint32_t &nanos) {
+	nanos = 0;
+
 	if (!(0 <= value && value < 60)) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INVALID_EXPRESSION_INPUT,
 				"Seconds value out of range");
@@ -174,6 +190,68 @@ SQLTimeExprs::Functions::MakeTimestamp::decomposeSeconds(double value) {
 			NumberArithmetic::remainder(value, 1.0) * 1000 + 0.5), 999);
 
 	return std::make_pair(integralPart, floatingPart);
+}
+
+template<typename T>
+inline std::pair<int64_t, int64_t>
+SQLTimeExprs::Functions::MakeTimestamp::decomposeSeconds(
+		const FractionalSeconds<T> &value, uint32_t &nanos) {
+	const int32_t nanosPerSec = 1000 * 1000 * 1000;
+	const int32_t unit = 1000 * (
+			util::IsSame<T, SQLValues::Types::TimestampTag>::VALUE ? 1 :
+			util::IsSame<T, SQLValues::Types::MicroTimestampTag>::VALUE ? 1000 :
+			util::IsSame<T, SQLValues::Types::NanoTimestampTag>::VALUE ?
+					1000 * 1000 : 0);
+	UTIL_STATIC_ASSERT(unit != 0);
+
+	if (!(0 <= value.second_ && value.second_ < 60)) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INVALID_EXPRESSION_INPUT,
+				"Seconds value out of range");
+	}
+
+	if (!(0 <= value.fration_ && value.fration_ < unit)) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INVALID_EXPRESSION_INPUT,
+				"Fraction value out of range");
+	}
+
+	nanos = static_cast<uint32_t>(
+			value.fration_ % (unit / 1000) * (nanosPerSec / unit));
+	return std::make_pair(value.second_, value.fration_ * 1000 / unit);
+}
+
+
+template<typename T>
+SQLTimeExprs::Functions::MakeTimestamp::FractionalSeconds<T>::FractionalSeconds(
+		int64_t second, int64_t fration) :
+		second_(second),
+		fration_(fration) {
+}
+
+
+template<typename T>
+template<typename C, typename R>
+inline typename T::LocalValueType
+SQLTimeExprs::Functions::MakeTimestamp::Fractional<T>::operator()(
+		C &cxt, int64_t year, int64_t month, int64_t day,
+		int64_t hour, int64_t min, int64_t second, int64_t fration,
+		R &zone) {
+	MakeTimestamp baseFunc;
+	return baseFunc(
+			cxt, year, month, day, hour, min,
+			FractionalSeconds<T>(second, fration), zone);
+}
+
+template<typename T>
+template<typename C>
+inline typename T::LocalValueType
+SQLTimeExprs::Functions::MakeTimestamp::Fractional<T>::operator()(
+		C &cxt, int64_t year, int64_t month, int64_t day,
+		int64_t hour, int64_t min, int64_t second, int64_t fration,
+		const util::TimeZone &zone) {
+	MakeTimestamp baseFunc;
+	return baseFunc(
+			cxt, year, month, day, hour, min,
+			FractionalSeconds<T>(second, fration), zone);
 }
 
 
@@ -251,7 +329,7 @@ inline T SQLTimeExprs::Functions::TimestampTrunc::operator()(
 template<typename C, typename T>
 T SQLTimeExprs::Functions::TimestampTrunc::Checker::operator()(
 		C&, int64_t fieldTypeValue, const T &tsValue) {
-	FunctionUtils::checkTimeField(fieldTypeValue, true, false);
+	FunctionUtils::TimeFieldChecker().withPrecise()(fieldTypeValue);
 	return tsValue;
 }
 
@@ -294,7 +372,7 @@ inline T SQLTimeExprs::Functions::TimestampAdd::operator()(
 template<typename C, typename T>
 T SQLTimeExprs::Functions::TimestampAdd::Checker::operator()(
 		C&, int64_t fieldTypeValue, const T &tsValue, int64_t) {
-	FunctionUtils::checkTimeField(fieldTypeValue, false, false);
+	FunctionUtils::TimeFieldChecker().withPrecise()(fieldTypeValue);
 	return tsValue;
 }
 
@@ -340,7 +418,7 @@ inline int64_t SQLTimeExprs::Functions::TimestampDiff::operator()(
 template<typename C, typename T>
 int64_t SQLTimeExprs::Functions::TimestampDiff::Checker::operator()(
 		C&, int64_t fieldTypeValue, const T&, const T&) {
-	FunctionUtils::checkTimeField(fieldTypeValue, false, false);
+	FunctionUtils::TimeFieldChecker().withPrecise()(fieldTypeValue);
 	return 0;
 }
 

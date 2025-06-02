@@ -185,6 +185,7 @@ public:
         uint32_t delayStartInterval_;
         uint32_t delayExecutionInterval_;
         void convert(DatabaseId dbId, picojson::object& dbConstraint);
+
     };
     struct Option {
         Option() : dropOnly_(false) {}
@@ -220,6 +221,50 @@ public:
         }
     }
 
+    void incrementRequest(DatabaseId dbId, bool isSQL) {
+        if (dbId == UNDEF_DBID) return;
+        if (dbId < directMaxDbId_) {
+            if (isSQL) {
+                sqlDirectRequestCounter_[dbId]++;
+            }
+            else {
+                nosqlDirectRequestCounter_[dbId]++;
+            }
+        }
+        else {
+            util::LockGuard<util::Mutex> guard(requestLock_);
+            decltype(requestCountMap_)::iterator it = requestCountMap_.find(dbId);
+            if (it != requestCountMap_.end()) {
+                (*it).second++;
+            }
+            else {
+                requestCountMap_[dbId] = 0;
+            }
+        }
+    }
+
+    int64_t getRequestCount(DatabaseId dbId, bool isSQL) {
+        if (dbId == UNDEF_DBID) return 0;
+        if (dbId < directMaxDbId_) {
+            if (isSQL) {
+                return sqlDirectRequestCounter_[dbId];
+            }
+            else {
+               return  nosqlDirectRequestCounter_[dbId];
+            }
+        }
+        else {
+            util::LockGuard<util::Mutex> guard(requestLock_);
+            decltype(requestCountMap_)::iterator it = requestCountMap_.find(dbId);
+            if (it != requestCountMap_.end()) {
+                return (*it).second;
+            }
+            else {
+                return 0;
+            }
+        }
+    }
+
 private:
 
     util::Mutex mutex_;
@@ -235,8 +280,15 @@ private:
     int32_t limitDelayTime_;
     util::Mutex constraintLock_;
     util::Mutex dumpLock_;
+    util::Mutex requestLock_;
 
     util::AllocMap< DatabaseId, ExecutionConstraint*> constraintMap_;
+    std::vector<util::Atomic<int64_t>> nosqlDirectRequestCounter_;
+    std::vector<util::Atomic<int64_t>> sqlDirectRequestCounter_;
+    std::vector<int64_t> nosqlRequestCounter_;
+    std::vector<int64_t> sqlRequestCounter_;
+    int32_t directMaxDbId_;
+    util::AllocMap< DatabaseId, int64_t> requestCountMap_;
 };
 
 class DatabaseStatsMap {

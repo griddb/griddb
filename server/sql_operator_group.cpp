@@ -1078,8 +1078,10 @@ void SQLGroupOps::GroupRangeMerge::execute(OpContext &cxt) const {
 						mergeCxt.windowState_.rangePrevKey_ =
 								mergeCxt.windowState_.rangeKey_;
 						getFillFinishProjection(mergeCxt, noNext).project(cxt);
-						mergeCxt.windowState_.rangeNextKey_ = -1;
-						mergeCxt.windowState_.rangePrevKey_ = -1;
+						mergeCxt.windowState_.rangeNextKey_ =
+								RangeKey::invalid();
+						mergeCxt.windowState_.rangePrevKey_ =
+								RangeKey::invalid();
 					}
 				}
 				else {
@@ -1133,7 +1135,7 @@ bool SQLGroupOps::GroupRangeMerge::finishPendingGroups(
 	}
 
 	if (!directions.isOnNormalGroup() &&
-			mergeCxt.windowState_.rangeKey_ < mergeCxt.partEnd_) {
+			mergeCxt.windowState_.rangeKey_.isLessThan(mergeCxt.partEnd_)) {
 		return true;
 	}
 
@@ -1156,19 +1158,20 @@ bool SQLGroupOps::GroupRangeMerge::finishPendingGroups(
 	return true;
 }
 
+#include <iostream>
 bool SQLGroupOps::GroupRangeMerge::checkGroupRow(
 		OpContext &cxt, MergeContext &mergeCxt, TupleListReader &pipeReader,
 		TupleListReader &keyReader, Directions &directions) {
 
-	const int64_t groupEnd = mergeCxt.getGroupEnd();
+	const RangeKey &groupEnd = mergeCxt.getGroupEnd();
 	if (!mergeCxt.isFirstRowReady()) {
-		const int64_t nextRangeKey = groupEnd;
+		const RangeKey &nextRangeKey = groupEnd;
 		directions = Directions::of(nextRangeKey, 1, -1, false, false);
 		return false;
 	}
 
 	int32_t partitionDirection;
-	int64_t nextKey;
+	RangeKey nextKey = RangeKey::invalid();
 	if (keyReader.exists()) {
 		if (mergeCxt.partEq_ == NULL || (*mergeCxt.partEq_)(
 				SQLValues::TupleListReaderSource(pipeReader),
@@ -1182,20 +1185,20 @@ bool SQLGroupOps::GroupRangeMerge::checkGroupRow(
 	}
 	else {
 		partitionDirection = 1;
-		nextKey = -1;
+		nextKey = RangeKey::invalid();
 	}
 
-	const int64_t curKey = (pipeReader.exists() ?
+	const RangeKey &curKey = (pipeReader.exists() ?
 			getRangeKey(mergeCxt, pipeReader) : groupEnd);
 	const bool afterNormal = !mergeCxt.isForNormalGroup();
 
 	int32_t groupDirection;
 	bool rowAcceptable;
 	bool onNormalGroup;
-	if (curKey < groupEnd || afterNormal) {
+	if (curKey.isLessThan(groupEnd) || afterNormal) {
 		groupDirection = (partitionDirection < 0 &&
-				(nextKey < groupEnd || afterNormal) ? 0 : 1);
-		if (curKey >= mergeCxt.getGroupBegin()) {
+				(nextKey.isLessThan(groupEnd) || afterNormal) ? 0 : 1);
+		if (!curKey.isLessThan(mergeCxt.getGroupBegin())) {
 			rowAcceptable = true;
 			onNormalGroup = !afterNormal;
 		}
@@ -1210,13 +1213,13 @@ bool SQLGroupOps::GroupRangeMerge::checkGroupRow(
 		onNormalGroup = false;
 	}
 
-	int64_t nextRangeKey = -1;
+	RangeKey nextRangeKey = RangeKey::invalid();
 	bool nextRowForNextGroup = false;
 	if (!rowAcceptable || groupDirection > 0) {
 		if (mergeCxt.isFilling()) {
 			if (partitionDirection < 0) {
 				nextRangeKey = groupEnd;
-				nextRowForNextGroup = (nextKey >= groupEnd);
+				nextRowForNextGroup = !nextKey.isLessThan(groupEnd);
 			}
 			else if (mergeCxt.isBeforePartitionTail()) {
 				nextRangeKey = groupEnd;
@@ -1239,7 +1242,8 @@ bool SQLGroupOps::GroupRangeMerge::checkGroupRow(
 		}
 	}
 
-	if (!onNormalGroup && (partitionDirection > 0 || curKey >= groupEnd)) {
+	if (!onNormalGroup &&
+			(partitionDirection > 0 || !curKey.isLessThan(groupEnd))) {
 		nextRowForNextGroup = false;
 	}
 
@@ -1292,7 +1296,7 @@ bool SQLGroupOps::GroupRangeMerge::setGroupPending(
 		mergeCxt.fillPending_ = true;
 		mergeCxt.pendingKey_ = mergeCxt.windowState_.rangeKey_;
 		mergeCxt.windowState_.rangePrevKey_ =
-				mergeCxt.pendingKey_ - mergeCxt.interval_;
+				mergeCxt.pendingKey_.subtract(mergeCxt.interval_);
 	}
 
 	return true;
@@ -1319,16 +1323,16 @@ void SQLGroupOps::GroupRangeMerge::endPendingGroup(
 	mergeCxt.fillProjecting_ = false;
 
 	std::swap(mergeCxt.pendingKey_, mergeCxt.windowState_.rangeKey_);
-	mergeCxt.windowState_.rangeNextKey_ = -1;
+	mergeCxt.windowState_.rangeNextKey_ = RangeKey::invalid();
 
-	if (mergeCxt.pendingKey_ >=
-			mergeCxt.windowState_.rangeKey_ - mergeCxt.interval_) {
-		mergeCxt.windowState_.rangePrevKey_ = -1;
-		mergeCxt.pendingKey_ = -1;
+	if (mergeCxt.windowState_.rangeKey_.subtract(
+			mergeCxt.interval_).isLessThanEq(mergeCxt.pendingKey_)) {
+		mergeCxt.windowState_.rangePrevKey_ = RangeKey::invalid();
+		mergeCxt.pendingKey_ = RangeKey::invalid();
 		mergeCxt.fillPending_ = false;
 	}
 	else {
-		mergeCxt.pendingKey_ += mergeCxt.interval_;
+		mergeCxt.pendingKey_ = mergeCxt.pendingKey_.add(mergeCxt.interval_);
 	}
 }
 
@@ -1359,7 +1363,7 @@ SQLOps::TupleListReader& SQLGroupOps::GroupRangeMerge::prepareKeyReader(
 
 	if (!mergeCxt.firstRowReady_ && reader.exists()) {
 		if (!mergeCxt.isFilling()) {
-			const int64_t baseKey = getRangeKey(mergeCxt, reader);
+			const RangeKey &baseKey = getRangeKey(mergeCxt, reader);
 			mergeCxt.windowState_.rangeKey_ = getNextRangeKeyByValue(
 					mergeCxt, mergeCxt.partBegin_, baseKey);
 		}
@@ -1420,7 +1424,7 @@ void SQLGroupOps::GroupRangeMerge::swapAggregationValues(
 	if (columnList.empty()) {
 		return;
 	}
-	
+
 	const uint32_t basePos = columnList.front().getSummaryPosition();
 	const uint32_t aggrPos = basePos + (withCurrent ? 0 : size);
 	const uint32_t localPos = basePos + size;
@@ -1459,15 +1463,17 @@ SQLGroupOps::GroupRangeMerge::prepareLocalAggragationTuple(
 	return mergeCxt.localAggrTuple_;
 }
 
-int64_t SQLGroupOps::GroupRangeMerge::getNextRangeKeyByValue(
-		MergeContext &mergeCxt, int64_t groupEnd, int64_t value) {
-	assert(groupEnd <= mergeCxt.partEnd_);
-	return std::min(mergeCxt.partEnd_, groupEnd +
-			(std::max(value, groupEnd) - groupEnd) /
-			mergeCxt.interval_ * mergeCxt.interval_);
+SQLGroupOps::RangeKey
+SQLGroupOps::GroupRangeMerge::getNextRangeKeyByValue(
+		MergeContext &mergeCxt, const RangeKey &groupEnd,
+		const RangeKey &value) {
+	assert(groupEnd.isLessThanEq(mergeCxt.partEnd_));
+	return mergeCxt.partEnd_.getMin(groupEnd.add(
+			(value.getMax(groupEnd).subtract(groupEnd)).truncate(
+					mergeCxt.interval_)));
 }
 
-int64_t SQLGroupOps::GroupRangeMerge::getRangeKey(
+SQLGroupOps::RangeKey SQLGroupOps::GroupRangeMerge::getRangeKey(
 		MergeContext &mergeCxt, TupleListReader &reader) {
 	if (SQLValues::ValueUtils::readCurrentNull(reader, mergeCxt.rangeColumn_)) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
@@ -1477,12 +1483,13 @@ int64_t SQLGroupOps::GroupRangeMerge::getRangeKey(
 	return mergeCxt.valueReaderFunc_(valuerReader);
 }
 
-int64_t SQLGroupOps::GroupRangeMerge::getRangeKey(const TupleValue &value) {
+SQLGroupOps::RangeKey SQLGroupOps::GroupRangeMerge::getRangeKey(
+		const TupleValue &value) {
 	if (SQLValues::ValueUtils::isNull(value)) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION, "");
 	}
-	return SQLValues::ValueUtils::toLong(value);
+
+	return SQLValues::ValueUtils::toLongInt(value);
 }
 
 
@@ -1501,24 +1508,28 @@ SQLGroupOps::GroupRangeMerge::ValueReader::RetType
 SQLGroupOps::GroupRangeMerge::ValueReader::read(
 		const T&, const SQLValues::Types::Integral&) const {
 	typedef SQLValues::Types::Long DestType;
-	return SQLValues::ValueUtils::getPromoted<DestType, T>(
-			SQLValues::ValueUtils::readCurrentValue<T>(reader_, column_));
+	return RangeKey::ofElements(SQLValues::ValueUtils::getPromoted<DestType, T>(
+			SQLValues::ValueUtils::readCurrentValue<T>(reader_, column_)), 0,
+			RangeKey::mega());
 }
 
 template<typename T>
 SQLGroupOps::GroupRangeMerge::ValueReader::RetType
 SQLGroupOps::GroupRangeMerge::ValueReader::read(
 		const T&, const SQLValues::Types::PreciseTimestamp&) const {
-	typedef SQLValues::Types::TimestampTag DestType;
-	return SQLValues::ValueUtils::getPromoted<DestType, T>(
+	typedef SQLValues::Types::NanoTimestampTag DestTypeTag;
+	typedef DestTypeTag::LocalValueType DestType;
+
+	const DestType &dest = SQLValues::ValueUtils::getPromoted<DestTypeTag, T>(
 			SQLValues::ValueUtils::readCurrentValue<T>(reader_, column_));
+	return SQLValues::DateTimeElements(dest).toLongInt();
 }
 
 template<typename T, typename C>
 SQLGroupOps::GroupRangeMerge::ValueReader::RetType
 SQLGroupOps::GroupRangeMerge::ValueReader::read(const T&, const C&) const {
 	assert(false);
-	return 0;
+	return RangeKey::invalid();
 }
 
 
@@ -1534,13 +1545,13 @@ SQLGroupOps::GroupRangeMerge::MergeContext::MergeContext(
 		nextFillProj_(findProjection(code, true, true, false)),
 		prevFillProj_(findProjection(code, true, false, true)),
 		bothFillProj_(findProjection(code, true, false, false)),
-		partBegin_(-1),
-		partEnd_(-1),
-		interval_(-1),
+		partBegin_(RangeKey::invalid()),
+		partEnd_(RangeKey::invalid()),
+		interval_(RangeKey::invalid()),
 		windowState_(resolveRangeOptions(
 				code, partBegin_, partEnd_, interval_, limit_,
 				fillingWithPrev_)),
-		pendingKey_(-1),
+		pendingKey_(RangeKey::invalid()),
 		restGenerationLimit_(limit_),
 		firstRowReady_(false),
 		groupFoundLast_(false),
@@ -1572,26 +1583,26 @@ SQLGroupOps::GroupRangeMerge::MergeContext::isFirstRowReady() const {
 
 inline bool
 SQLGroupOps::GroupRangeMerge::MergeContext::isForNormalGroup() const {
-	return windowState_.rangeKey_ <= partEnd_;
+	return windowState_.rangeKey_.isLessThanEq(partEnd_);
 }
 
 inline bool
 SQLGroupOps::GroupRangeMerge::MergeContext::isBeforePartitionTail() const {
-	return windowState_.rangeKey_ < getTailGroupKey();
+	return windowState_.rangeKey_.isLessThan(getTailGroupKey());
 }
 
-inline int64_t
+inline SQLExprs::RangeKey
 SQLGroupOps::GroupRangeMerge::MergeContext::getGroupBegin() const {
 	return windowState_.rangeKey_;
 }
 
-inline int64_t
+inline SQLExprs::RangeKey
 SQLGroupOps::GroupRangeMerge::MergeContext::getGroupEnd() const {
-	const int64_t groupBegin = getGroupBegin();
-	return groupBegin + interval_;
+	const RangeKey &groupBegin = getGroupBegin();
+	return groupBegin.add(interval_);
 }
 
-inline int64_t
+inline SQLExprs::RangeKey
 SQLGroupOps::GroupRangeMerge::MergeContext::getTailGroupKey() const {
 	return partEnd_;
 }
@@ -1672,8 +1683,8 @@ SQLGroupOps::GroupRangeMerge::MergeContext::findProjection(
 
 SQLExprs::WindowState
 SQLGroupOps::GroupRangeMerge::MergeContext::resolveRangeOptions(
-		const OpCode &code, int64_t &partBegin, int64_t &partEnd,
-		int64_t &interval, int64_t &limit, bool &fillingWithPrev) {
+		const OpCode &code, RangeKey &partBegin, RangeKey &partEnd,
+		RangeKey &interval, int64_t &limit, bool &fillingWithPrev) {
 	const SQLExprs::Expression &pred =
 			GroupRange::resolveRangeOptionPredicate(code);
 	{
@@ -1690,7 +1701,7 @@ SQLGroupOps::GroupRangeMerge::MergeContext::resolveRangeOptions(
 		partEnd = getRangeKey(it.get().getCode().getValue());
 
 		it.next();
-		limit = getRangeKey(it.get().getCode().getValue());
+		limit = getRangeKey(it.get().getCode().getValue()).toLong();
 		if (limit < 0) {
 			limit = Constants::ROW_GENERATION_LIMIT;
 		}
@@ -1745,7 +1756,7 @@ SQLGroupOps::GroupRangeMerge::MergeContext::getValueReaderFunction(
 
 
 inline SQLGroupOps::GroupRangeMerge::Directions::Directions() :
-		nextRangeKey_(0),
+		nextRangeKey_(RangeKey::invalid()),
 		partition_(0),
 		group_(0),
 		onNormalGroup_(false),
@@ -1754,7 +1765,7 @@ inline SQLGroupOps::GroupRangeMerge::Directions::Directions() :
 
 inline SQLGroupOps::GroupRangeMerge::Directions
 SQLGroupOps::GroupRangeMerge::Directions::of(
-		int64_t nextRangeKey, int32_t partition, int32_t group,
+		const RangeKey &nextRangeKey, int32_t partition, int32_t group,
 		bool onNormalGroup, bool nextRowForNextGroup) {
 	Directions directions;
 	directions.nextRangeKey_ = nextRangeKey;
@@ -1765,7 +1776,7 @@ SQLGroupOps::GroupRangeMerge::Directions::of(
 	return directions;
 }
 
-inline int64_t
+inline SQLGroupOps::RangeKey
 SQLGroupOps::GroupRangeMerge::Directions::getNextRangeKey() const {
 	return nextRangeKey_;
 }

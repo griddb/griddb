@@ -73,6 +73,45 @@ struct SQLTimeExprs::Specs {
 				ExprSpec::FLAG_INTERNAL> Type;
 	};
 
+	template<int C> struct Spec<SQLType::FUNC_MAKE_TIMESTAMP_MS, C> {
+		typedef Base::Type<TupleTypes::TYPE_TIMESTAMP, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
+				> > Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_MAKE_TIMESTAMP_US, C> {
+		typedef Base::Type<TupleTypes::TYPE_MICRO_TIMESTAMP, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
+				> > Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_MAKE_TIMESTAMP_NS, C> {
+		typedef Base::Type<TupleTypes::TYPE_NANO_TIMESTAMP, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
+				> > Type;
+	};
+
 	template<int C> struct Spec<SQLType::FUNC_NOW, C> {
 		typedef Base::Type<TupleTypes::TYPE_TIMESTAMP, Base::InList<>,
 				ExprSpec::FLAG_DYNAMIC> Type;
@@ -176,16 +215,60 @@ struct SQLTimeExprs::Functions {
 	};
 
 	struct MakeTimestamp {
+	private:
+		template<typename T>
+		struct FractionalSeconds {
+			FractionalSeconds(int64_t second, int64_t fration);
+
+			int64_t second_;
+			int64_t fration_;
+		};
+
+		template<typename T, int = 0>
+		struct SecondsOf {
+			enum {
+				VALUE_SINGLE = (
+						util::IsSame<T, int64_t>::VALUE ||
+						util::IsSame<T, double>::VALUE)
+			};
+			typedef typename util::Conditional<
+					VALUE_SINGLE,
+							SQLValues::Types::TimestampTag,
+							util::FalseType>::Type TagType;
+			typedef typename TagType::LocalValueType RetType;
+		};
+
+		template<typename U, int C>
+		struct SecondsOf<FractionalSeconds<U>, C> {
+			typedef U TagType;
+			typedef typename TagType::LocalValueType RetType;
+		};
+
 	public:
+		template<typename T>
+		struct Fractional {
+			template<typename C, typename R>
+			typename T::LocalValueType operator()(
+					C &cxt, int64_t year, int64_t month, int64_t day,
+					int64_t hour, int64_t min, int64_t second, int64_t fration,
+					R &zone);
+
+			template<typename C>
+			typename T::LocalValueType operator()(
+					C &cxt, int64_t year, int64_t month, int64_t day,
+					int64_t hour, int64_t min, int64_t second, int64_t fration,
+					const util::TimeZone &zone = util::TimeZone());
+		};
+
 		template<typename C, typename Sec, typename R>
-		int64_t operator()(
+		typename SecondsOf<Sec>::RetType operator()(
 				C &cxt, int64_t year, int64_t month, int64_t day,
-				int64_t hour, int64_t min, Sec second, R &zone);
+				int64_t hour, int64_t min, const Sec &second, R &zone);
 
 		template<typename C, typename Sec>
-		int64_t operator()(
+		typename SecondsOf<Sec>::RetType operator()(
 				C &cxt, int64_t year, int64_t month, int64_t day,
-				int64_t hour, int64_t min, Sec second,
+				int64_t hour, int64_t min, const Sec &second,
 				const util::TimeZone &zone = util::TimeZone());
 
 		template<typename C, typename R>
@@ -203,9 +286,22 @@ struct SQLTimeExprs::Functions {
 		static void setFieldValue(
 				util::DateTime::FieldData &fieldData, int64_t value);
 
-		static std::pair<int64_t, int64_t> decomposeSeconds(int64_t value);
-		static std::pair<int64_t, int64_t> decomposeSeconds(double value);
+		static std::pair<int64_t, int64_t> decomposeSeconds(
+				int64_t value, uint32_t &nanos);
+		static std::pair<int64_t, int64_t> decomposeSeconds(
+				double value, uint32_t &nanos);
+
+		template<typename T>
+		static std::pair<int64_t, int64_t> decomposeSeconds(
+				const FractionalSeconds<T> &value, uint32_t &nanos);
 	};
+
+	typedef MakeTimestamp::Fractional<
+			SQLValues::Types::TimestampTag> MakeTimestampMs;
+	typedef MakeTimestamp::Fractional<
+			SQLValues::Types::MicroTimestampTag> MakeTimestampUs;
+	typedef MakeTimestamp::Fractional<
+			SQLValues::Types::NanoTimestampTag> MakeTimestampNs;
 
 	struct Now {
 	public:

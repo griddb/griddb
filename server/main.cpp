@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 7;
+const int32_t GS_MINOR_VERSION = 8;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 40497;
+const int32_t GS_BUILD_NO = 40624;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -171,6 +171,7 @@ int main(int argc, char **argv) {
 					<< " version " << version.str()
 					<< " build " << GS_BUILD_NO
 					<< " " << GS_EDITION_NAME;
+
 
 		GlobalVariableSizeAllocator tableAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "tableAlloc")));
@@ -883,6 +884,7 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, AUDIT_DDL, CRITICAL);
 	MAIN_TRACE_DECLARE(config, AUDIT_DCL, CRITICAL);
 	MAIN_TRACE_DECLARE(config, REDO_MANAGER, WARNING);
+	MAIN_TRACE_DECLARE(config, SITE_REPLICATION, WARNING);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)

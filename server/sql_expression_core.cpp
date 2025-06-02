@@ -46,7 +46,9 @@ void SQLCoreExprs::CustomRegistrar::operator()() const {
 	addNonEvaluable<SQLType::EXPR_AGG_FOLLOWING>();
 	addNoArgs<SQLType::EXPR_HINT_NO_INDEX, NoopExpression>();
 
+	add<SQLType::EXPR_WINDOW_OPTION, SQLExprs::PlanningExpression>();
 	add<SQLType::EXPR_RANGE_GROUP, SQLExprs::PlanningExpression>();
+	addNoArgs<SQLType::EXPR_RANGE_GROUP_ID, RangeGroupIdExpression>();
 	add<SQLType::EXPR_RANGE_KEY, SQLExprs::PlanningExpression>();
 	add<SQLType::EXPR_RANGE_KEY_CURRENT, RangeKeyExpression>();
 	add<SQLType::EXPR_RANGE_AGG, SQLExprs::PlanningExpression>();
@@ -63,8 +65,6 @@ const SQLExprs::ExprRegistrar
 SQLCoreExprs::BasicRegistrar::REGISTRAR_INSTANCE((BasicRegistrar()));
 
 void SQLCoreExprs::BasicRegistrar::operator()() const {
-	add<SQLType::EXPR_RANGE_GROUP_ID, Functions::RangeGroupId>();
-
 	add<SQLType::FUNC_COALESCE, Functions::Coalesce>();
 	add<SQLType::FUNC_IFNULL, Functions::Coalesce>();
 	add<SQLType::FUNC_MAX, Functions::Max>();
@@ -881,17 +881,18 @@ SQLCoreExprs::RangeKeyExpression::RangeKeyExpression(
 
 TupleValue SQLCoreExprs::RangeKeyExpression::eval(ExprContext &cxt) const {
 	const SQLExprs::WindowState *state = cxt.getWindowState();
-	const int64_t &key =
+	const SQLValues::LongInt &key =
 			(forPrev_ ? state->rangePrevKey_ :
 			(forNext_ ? state->rangeNextKey_ : state->rangeKey_));
 	return SQLValues::ValueConverter(getCode().getColumnType())(
-			cxt, SQLValues::ValueUtils::toAnyByNumeric(key));
+			cxt, SQLValues::ValueUtils::toAnyByLongInt(
+					cxt.getValueContext(), key));
 }
 
 
 SQLCoreExprs::LinearExpression::LinearExpression(
 		ExprFactoryContext &cxt, const ExprCode &code) :
-		category_(resolveEvaluationCategory(code.getColumnType())) {
+		interpolationFunc_(resolveInterpolationFunction(code.getColumnType())) {
 	static_cast<void>(cxt);
 }
 
@@ -911,32 +912,12 @@ TupleValue SQLCoreExprs::LinearExpression::eval(ExprContext &cxt) const {
 		}
 	}
 
-	TupleValue ret;
-	switch (category_) {
-	case SQLValues::TypeUtils::TYPE_CATEGORY_LONG:
-		ret = TupleValue(FunctionUtils::NumberArithmetic::interpolateLinear(
-				SQLValues::ValueUtils::toLong(argList[0]),
-				SQLValues::ValueUtils::toLong(argList[1]),
-				SQLValues::ValueUtils::toLong(argList[2]),
-				SQLValues::ValueUtils::toLong(argList[3]),
-				SQLValues::ValueUtils::toLong(argList[4])));
-		break;
-	case SQLValues::TypeUtils::TYPE_CATEGORY_DOUBLE:
-		ret = TupleValue(FunctionUtils::NumberArithmetic::interpolateLinear(
-				SQLValues::ValueUtils::toDouble(argList[0]),
-				SQLValues::ValueUtils::toDouble(argList[1]),
-				SQLValues::ValueUtils::toDouble(argList[2]),
-				SQLValues::ValueUtils::toDouble(argList[3]),
-				SQLValues::ValueUtils::toDouble(argList[4])));
-		break;
-	default:
-		return asColumnValue(&cxt.getValueContext(), argList[1]);
-	}
-	return SQLValues::ValueConverter(getCode().getColumnType())(cxt, ret);
+	return (this->*interpolationFunc_)(
+			cxt, argList[0], argList[1], argList[2], argList[3], argList[4]);
 }
 
-SQLValues::TypeUtils::TypeCategory
-SQLCoreExprs::LinearExpression::resolveEvaluationCategory(
+SQLCoreExprs::LinearExpression::InterpolationFunc
+SQLCoreExprs::LinearExpression::resolveInterpolationFunction(
 		TupleColumnType type) {
 	const TupleColumnType baseType = SQLValues::TypeUtils::toNonNullable(type);
 	const SQLValues::TypeUtils::TypeCategory baseCategory =
@@ -946,33 +927,155 @@ SQLCoreExprs::LinearExpression::resolveEvaluationCategory(
 
 	switch (baseCategory) {
 	case SQLValues::TypeUtils::TYPE_CATEGORY_BOOL:
-		return SQLValues::TypeUtils::TYPE_CATEGORY_LONG;
+		return &LinearExpression::interpolateLong;
 	case SQLValues::TypeUtils::TYPE_CATEGORY_LONG:
-		return baseCategory;
+		return &LinearExpression::interpolateLong;
 	case SQLValues::TypeUtils::TYPE_CATEGORY_DOUBLE:
-		return baseCategory;
+		return &LinearExpression::interpolateDouble;
+	case SQLValues::TypeUtils::TYPE_CATEGORY_TIMESTAMP:
+		switch (baseType) {
+		case TupleTypes::TYPE_MICRO_TIMESTAMP:
+			return &LinearExpression::interpolateMicroTimestamp;
+		case TupleTypes::TYPE_NANO_TIMESTAMP:
+			return &LinearExpression::interpolateNanoTimestamp;
+		default:
+			assert(baseType == TupleTypes::TYPE_TIMESTAMP);
+			return &LinearExpression::interpolateLong;
+		}
 	default:
 		assert(!(SQLValues::TypeUtils::isNumerical(baseType) ||
 				SQLValues::TypeUtils::isSomeFixed(baseType)) ||
 				SQLValues::TypeUtils::isTimestampFamily(baseType));
-		return SQLValues::TypeUtils::TYPE_CATEGORY_NULL;
+		return &LinearExpression::interpolateNonNumeric;
 	}
 }
 
+SQLValues::DateTimeElements SQLCoreExprs::LinearExpression::interpolateDateTime(
+		const TupleValue &x1, const TupleValue &y1, const TupleValue &x2,
+		const TupleValue &y2, const TupleValue &x) const {
+	const SQLValues::LongInt c = SQLValues::ValueUtils::toLongInt(y1);
 
-template<typename C>
-inline std::pair<int64_t, bool>
-SQLCoreExprs::Functions::RangeGroupId::operator()(
-		C &cxt, const TupleValue &value, int64_t interval, int64_t offset) {
-	static_cast<void>(cxt);
-	assert(interval > 0);
+	const SQLValues::LongInt dx =
+			SQLValues::ValueUtils::toLongInt(x2).subtract(
+					SQLValues::ValueUtils::toLongInt(x1));
+	const SQLValues::LongInt dy =
+			SQLValues::ValueUtils::toLongInt(y2).subtract(c);
 
-	int64_t id;
-	if (!cxt.getValueUtils().getRangeGroupId(value, interval, offset, id)) {
-		return std::pair<int64_t, bool>();
+	const SQLValues::LongInt w =
+			SQLValues::ValueUtils::toLongInt(x).subtract(
+					SQLValues::ValueUtils::toLongInt(x1));
+	const SQLValues::LongInt h = (dx.isZero() ? dx : w.multiply(dy).divide(dx));
+
+	const SQLValues::LongInt y = c.add(h);
+	return SQLValues::DateTimeElements::ofLongInt(y);
+}
+
+TupleValue SQLCoreExprs::LinearExpression::interpolateLong(
+		ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+		const TupleValue &x2, const TupleValue &y2, const TupleValue &x) const {
+	const int64_t c = SQLValues::ValueUtils::toLong(y1);
+
+	const SQLValues::LongInt dx =
+			SQLValues::ValueUtils::toLongInt(x2).subtract(
+					SQLValues::ValueUtils::toLongInt(x1));
+	const SQLValues::LongInt dy =
+			SQLValues::ValueUtils::toLongInt(y2).subtract(
+					SQLValues::ValueUtils::toLongInt(TupleValue(c)));
+
+	const SQLValues::LongInt w =
+			SQLValues::ValueUtils::toLongInt(x).subtract(
+					SQLValues::ValueUtils::toLongInt(x1));
+	const int64_t h = (dx.isZero() ? 0 : w.multiply(dy).divide(dx).toLong());
+
+	const int64_t y = c + h;
+	return convertToResultValue(cxt, TupleValue(y));
+}
+
+TupleValue SQLCoreExprs::LinearExpression::interpolateDouble(
+		ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+		const TupleValue &x2, const TupleValue &y2, const TupleValue &x) const {
+	const double c = SQLValues::ValueUtils::toDouble(y1);
+
+	const double dx =
+			SQLValues::ValueUtils::toLongInt(x2).subtract(
+					SQLValues::ValueUtils::toLongInt(x1)).toDouble();
+	const double dy = SQLValues::ValueUtils::toDouble(y2) - c;
+
+	const double w =
+			SQLValues::ValueUtils::toLongInt(x).subtract(
+					SQLValues::ValueUtils::toLongInt(x1)).toDouble();
+	const double h = (w * dy) / dx;
+
+	const double y = c + h;
+	return convertToResultValue(cxt, TupleValue(y));
+}
+
+TupleValue SQLCoreExprs::LinearExpression::interpolateMicroTimestamp(
+		ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+		const TupleValue &x2, const TupleValue &y2, const TupleValue &x) const {
+	const SQLValues::DateTimeElements &dt =
+			interpolateDateTime(x1, y1, x2, y2, x);
+	return SQLValues::ValueUtils::toAnyByWritable<
+			TupleTypes::TYPE_MICRO_TIMESTAMP>(
+			cxt, dt.toTimestamp(SQLValues::Types::MicroTimestampTag()));
+}
+
+TupleValue SQLCoreExprs::LinearExpression::interpolateNanoTimestamp(
+		ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+		const TupleValue &x2, const TupleValue &y2, const TupleValue &x) const {
+	const SQLValues::DateTimeElements &dt =
+			interpolateDateTime(x1, y1, x2, y2, x);
+	return SQLValues::ValueUtils::toAnyByWritable<
+			TupleTypes::TYPE_NANO_TIMESTAMP>(
+			cxt, dt.toTimestamp(SQLValues::Types::NanoTimestampTag()));
+}
+
+TupleValue SQLCoreExprs::LinearExpression::interpolateNonNumeric(
+		ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+		const TupleValue &x2, const TupleValue &y2, const TupleValue &x) const {
+	static_cast<void>(x1);
+	static_cast<void>(x2);
+	static_cast<void>(y2);
+	static_cast<void>(x);
+	return asColumnValue(&cxt.getValueContext(), y1);
+}
+
+TupleValue SQLCoreExprs::LinearExpression::convertToResultValue(
+		ExprContext &cxt, const TupleValue &src) const {
+	return SQLValues::ValueConverter(getCode().getColumnType())(cxt, src);
+}
+
+
+inline TupleValue SQLCoreExprs::RangeGroupIdExpression::eval(
+		ExprContext &cxt) const {
+	Iterator it(*this);
+
+	assert(it.exists());
+	const TupleValue &value = it.get().eval(cxt);
+
+	it.next();
+	assert(it.exists());
+	const SQLValues::LongInt &interval =
+			SQLValues::ValueUtils::toLongInt(it.get().eval(cxt));
+
+	it.next();
+	assert(it.exists());
+	const SQLValues::LongInt &offset =
+			SQLValues::ValueUtils::toLongInt(it.get().eval(cxt));
+
+	SQLExprs::RangeKey id = SQLExprs::RangeKey::invalid();
+	if (!SQLExprs::FunctionValueUtils().getRangeGroupId(
+			value, interval, offset, id)) {
+		return TupleValue();
 	}
 
-	return std::make_pair(id, true);
+	const NanoTimestamp &nanoTs =
+			SQLValues::DateTimeElements::ofLongInt(id).toTimestamp(
+					SQLValues::Types::NanoTimestampTag());
+	const TupleValue &ret = asColumnValue(
+			&cxt.getValueContext(), TupleNanoTimestamp(&nanoTs));
+
+	return SQLValues::ValueUtils::duplicateValue(cxt, ret);
 }
 
 

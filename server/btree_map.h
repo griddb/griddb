@@ -535,6 +535,8 @@ public:
 		return rootNode.getTailNodeOId();
 	}
 
+	uint64_t estimate(TransactionContext &txn, SearchContext &sc);
+
 	inline bool isEmpty() const {
 		BNode<char, char> rootNode(this, *const_cast<AllocateStrategy*>(&allocateStrategy_));
 		return rootNode.numkeyValues() == 0;
@@ -617,6 +619,39 @@ private:
 			}
 			return ret;
 		}
+	};
+
+	template <typename P, typename K, typename V, CompareComponent C>
+	class BoundaryCmpFunctor {
+	public:
+		BoundaryCmpFunctor(bool lower, bool inclusive) :
+				eqRet_(resolveEqResult(lower, inclusive)) {
+		}
+
+		int32_t operator()(
+				TransactionContext &txn, ObjectManagerV4 &objectManager,
+				AllocateStrategy &strategy, const KeyValue<P, V> &e1,
+				const KeyValue<K, V> &e2, Setting &setting) const {
+			CmpFunctor<P, K, V, C> base;
+			const int32_t baseRet =
+					base(txn, objectManager, strategy, e1, e2, setting);
+			if (baseRet == 0) {
+				return eqRet_;
+			}
+			return baseRet;
+		}
+
+	private:
+		static int32_t resolveEqResult(bool lower, bool inclusive) {
+			if (inclusive) {
+				return 0;
+			}
+			else {
+				return (lower ? 1 : -1);
+			}
+		}
+
+		int32_t eqRet_;
 	};
 
 	/*!
@@ -1232,6 +1267,10 @@ private:
 	};
 
 	struct SearchBulkFunc;
+	struct EstimateFunc;
+
+	typedef std::pair<int32_t, int32_t> LocationEntry;
+	typedef util::Vector<LocationEntry> LocationPath;
 
 	template<typename Action>
 	void switchToBasicType(ColumnType type, Action &action);
@@ -1912,6 +1951,11 @@ private:
 			TransactionContext &txn, SearchContext &sc, util::XArray<R> &idList,
 			Setting &setting, BNode<K, V> &node, int32_t &loc);
 
+	template <typename P, typename K, typename V, typename C>
+	bool findNodeCustom(
+			TransactionContext &txn, KeyValue<P, V> &val, BNode<K, V> &node,
+			int32_t &loc, C &cmp, Setting &setting);
+
 	template <typename P, typename K, typename V, typename R, CompareComponent C>
 	bool findGreaterNext(
 			TransactionContext &txn, KeyValue<P, V> &keyValue,
@@ -1934,6 +1978,41 @@ private:
 	bool findTopNodeNext(
 			TransactionContext &txn, KeyValue<P, V> &val, BNode<K, V> &node,
 			int32_t &loc, CmpFunctor<P, K, V, C> &cmp, Setting &setting);
+
+	template<typename P, typename K, typename V, CompareComponent C>
+	uint64_t estimateAt(TransactionContext &txn, SearchContext &sc);
+
+	template<typename K, typename V>
+	uint64_t estimatePathRange(
+			TransactionContext &txn, const LocationPath &beginPath,
+			const LocationPath &endPath);
+
+	uint64_t estimatePathRangeSub(
+			const LocationPath &beginPath, const LocationPath &endPath);
+
+	static uint64_t mergePathRangeSize(uint64_t size1, uint64_t size2);
+
+	template<typename P, typename K, typename V, CompareComponent C>
+	void findLocationPath(
+			TransactionContext &txn, KeyValue<P, V> &keyValue,
+			bool inclusive, bool less, Setting &setting, LocationPath &path);
+
+	template<typename K, typename V>
+	void getHeadLocationPath(
+			TransactionContext &txn, LocationPath &path);
+	template<typename K, typename V>
+	void getTailLocationPath(
+			TransactionContext &txn, LocationPath &path);
+
+	template<typename K, typename V>
+	bool findMiddleLocationPath(
+			TransactionContext &txn,  const LocationPath &beginPath,
+			const LocationPath &endPath, LocationPath &path);
+
+	template<typename K, typename V>
+	void nodeToLocationPath(
+			TransactionContext &txn, BNode<K, V> &node, int32_t &loc,
+			LocationPath &path);
 
 	static void errorInvalidSearchCondition();
 };

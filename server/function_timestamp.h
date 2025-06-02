@@ -52,6 +52,7 @@ public:
  *
  * @return create timestamp from string
  */
+template<util::DateTime::FieldType Precision, bool Strict>
 class FunctorTimestamp : public TqlFunc {
 public:
 	using TqlFunc::operator();
@@ -67,14 +68,36 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a string value");
 		}
-		util::DateTime d;
-		if (util::DateTime::parse(args[0]->getValueAsString(txn), d,
-				TRIM_MILLISECONDS) == false) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
-				"Cannot parse argument as Timestamp,"
-					<< args[0]->getValueAsString(txn));
+
+		const util::DateTime::FieldType precision = Precision;
+		const util::DateTime::FieldType *precisionForOption =
+				(Strict ? NULL : &precision);
+		const util::DateTime::ZonedOption &option =
+				Expr::newZonedTimeOption(precisionForOption, util::TimeZone());
+
+		util::PreciseDateTime d;
+		util::DateTime::Parser parser = d.getParser(option);
+		parser.setDefaultPrecision(Precision);
+
+		const char8_t *str = args[0]->getValueAsString(txn);
+		const bool throwOnError = false;
+		if (!d.getParser(option)(str, strlen(str), throwOnError)) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+					"Cannot parse argument as Timestamp (value=" << str << ")");
 		}
-		return Expr::newTimestampValue(d, txn);
+
+		const ColumnType retType = (
+				Precision == util::DateTime::FIELD_MILLISECOND ?
+						COLUMN_TYPE_TIMESTAMP :
+				Precision == util::DateTime::FIELD_MICROSECOND ?
+						COLUMN_TYPE_MICRO_TIMESTAMP :
+				Precision == util::DateTime::FIELD_NANOSECOND ?
+						COLUMN_TYPE_NANO_TIMESTAMP :
+						COLUMN_TYPE_NULL);
+		UTIL_STATIC_ASSERT(retType != COLUMN_TYPE_NULL);
+
+		return Expr::newTimestampValue(d, txn, retType);
 	}
 	virtual ~FunctorTimestamp() {}
 };
@@ -254,40 +277,54 @@ public:
 
 		util::PreciseDateTime t1 =
 				ValueProcessor::toDateTime(args[1]->getNanoTimestamp());
-		time_t t2 = args[2]->getValueAsInt();
+		const int64_t t2 = args[2]->getValueAsInt64();
 		util::String s(args[0]->getValueAsString(txn),
 			QP_ALLOCATOR);  
 		std::transform(
 			s.begin(), s.end(), s.begin(), (int (*)(int))std::toupper);
 
-		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, txn.getTimeZone());
-
+		util::DateTime::FieldType fieldType;
 		if (s.compare("YEAR") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_YEAR, zonedOption);
+			fieldType = util::DateTime::FIELD_YEAR;
 		}
 		else if (s.compare("MONTH") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_MONTH, zonedOption);
+			fieldType = util::DateTime::FIELD_MONTH;
 		}
 		else if (s.compare("DAY") == 0) {
-			t1.addField(
-				static_cast<int32_t>(t2), util::DateTime::FIELD_DAY_OF_MONTH, zonedOption);
+			fieldType = util::DateTime::FIELD_DAY_OF_MONTH;
 		}
 		else if (s.compare("HOUR") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_HOUR, zonedOption);
+			fieldType = util::DateTime::FIELD_HOUR;
 		}
 		else if (s.compare("MINUTE") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_MINUTE, zonedOption);
+			fieldType = util::DateTime::FIELD_MINUTE;
 		}
 		else if (s.compare("SECOND") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_SECOND, zonedOption);
+			fieldType = util::DateTime::FIELD_SECOND;
 		}
 		else if (s.compare("MILLISECOND") == 0) {
-			t1.addField(
-				static_cast<int32_t>(t2), util::DateTime::FIELD_MILLISECOND, zonedOption);
+			fieldType = util::DateTime::FIELD_MILLISECOND;
+		}
+		else if (s.compare("MICROSECOND") == 0) {
+			fieldType = util::DateTime::FIELD_MICROSECOND;
+		}
+		else if (s.compare("NANOSECOND") == 0) {
+			fieldType = util::DateTime::FIELD_NANOSECOND;
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
-				"This time kind is invalid or not supported.");
+				"This time field is invalid or not supported.");
+		}
+
+		const util::DateTime::ZonedOption zonedOption =
+				Expr::newZonedTimeOption(&fieldType, txn.getTimeZone());
+
+		try {
+			t1.addField(t2, fieldType, zonedOption);
+		}
+		catch (util::UtilityException &e) {
+			GS_RETHROW_USER_ERROR_CODED(
+					GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE, e, "");
 		}
 
 		const ColumnType valueType = args[1]->resolveValueType();
@@ -369,35 +406,50 @@ public:
 		std::transform(
 			s.begin(), s.end(), s.begin(), (int (*)(int))std::toupper);
 
-		util::DateTime::FieldType field_type;
-
+		util::DateTime::FieldType fieldType;
 		if (s.compare("YEAR") == 0) {
-			field_type = util::DateTime::FIELD_YEAR;
+			fieldType = util::DateTime::FIELD_YEAR;
 		}
 		else if (s.compare("MONTH") == 0) {
-			field_type = util::DateTime::FIELD_MONTH;
+			fieldType = util::DateTime::FIELD_MONTH;
 		}
 		else if (s.compare("DAY") == 0) {
-			field_type = util::DateTime::FIELD_DAY_OF_MONTH;
+			fieldType = util::DateTime::FIELD_DAY_OF_MONTH;
 		}
 		else if (s.compare("HOUR") == 0) {
-			field_type = util::DateTime::FIELD_HOUR;
+			fieldType = util::DateTime::FIELD_HOUR;
 		}
 		else if (s.compare("MINUTE") == 0) {
-			field_type = util::DateTime::FIELD_MINUTE;
+			fieldType = util::DateTime::FIELD_MINUTE;
 		}
 		else if (s.compare("SECOND") == 0) {
-			field_type = util::DateTime::FIELD_SECOND;
+			fieldType = util::DateTime::FIELD_SECOND;
 		}
 		else if (s.compare("MILLISECOND") == 0) {
-			field_type = util::DateTime::FIELD_MILLISECOND;
+			fieldType = util::DateTime::FIELD_MILLISECOND;
+		}
+		else if (s.compare("MICROSECOND") == 0) {
+			fieldType = util::DateTime::FIELD_MICROSECOND;
+		}
+		else if (s.compare("NANOSECOND") == 0) {
+			fieldType = util::DateTime::FIELD_NANOSECOND;
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
-				"This time kind is invalid or not supported.");
+				"This time field is invalid or not supported.");
 		}
-		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, txn.getTimeZone());
-		const int64_t result = dt1.getDifference(dt2, field_type, zonedOption);
+
+		const util::DateTime::ZonedOption &zonedOption =
+				Expr::newZonedTimeOption(&fieldType, txn.getTimeZone());
+
+		int64_t result;
+		try {
+			result = dt1.getDifference(dt2, fieldType, zonedOption);
+		}
+		catch (util::UtilityException &e) {
+			GS_RETHROW_USER_ERROR_CODED(
+					GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE, e, "");
+		}
 
 		return Expr::newNumericValue(result, txn);
 	}

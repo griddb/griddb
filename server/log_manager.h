@@ -33,6 +33,7 @@
 
 
 UTIL_TRACER_DECLARE(LOG_MANAGER);
+struct ManagerSet;
 
 /*!
 	@brief ログの種類
@@ -475,7 +476,7 @@ public:
 
 	bool checkNeedFlushXLog();
 
-	void removeLogFiles(int64_t baseLogVer, int64_t checkpointRange);
+	void removeLogFiles(int64_t baseLogVer, int64_t checkpointRange, int64_t keepLogFileCount);
 
 	LogSequentialNumber getStartLSN();
 
@@ -548,6 +549,10 @@ public:
 		uuid_ = uuid;
 	}
 
+	int64_t getLogOffset() {
+		return xLogFileOffset_;
+	}
+
 private:
 	void setDuplicateStatus(
 			DuplicateLogMode::Status status, bool force = false);
@@ -582,6 +587,7 @@ private:
 	LogManagerStats &stats_;
 	uint16_t logFormatVersion_; 
 	std::string uuid_;
+	ManagerSet* mgrSet_;
 };
 
 
@@ -1279,13 +1285,14 @@ LogSequentialNumber LogManager<L>::getCurrentStartLSN(bool prev) {
 	@note CPログは最低checkpointRange数の世代は残す
 */
 template <class L>
-void LogManager<L>::removeLogFiles(int64_t baseLogVer, int64_t checkpointRange) {
+void LogManager<L>::removeLogFiles(int64_t baseLogVer, int64_t checkpointRange, int64_t keepLogFileCount) {
 	assert(checkpointRange >= 1);
 	if (config_.persistencyMode_ == PERSISTENCY_KEEP_ALL_LOG) {
 		return;
 	}
-	const int64_t retainedFileCount =
-			static_cast<int64_t>(config_.retainedFileCount_);
+	const int64_t retainedFileCount = (keepLogFileCount != -1) ? keepLogFileCount :
+		static_cast<int64_t>(config_.retainedFileCount_);
+
 	int64_t targetCpLogVer = baseLogVer - checkpointRange;
 	if (keepXLogVersion_ != -1 && targetCpLogVer >= keepXLogVersion_) {
 		targetCpLogVer = keepXLogVersion_ - 1;

@@ -417,6 +417,15 @@ public:
 		int64_t emNow,
 		bool diff = false);
 
+	void estimateIndexSearchSize(
+			EventContext &ec, SQLExecution &execution,
+			SQLIndexStatsCache &indexStats, uint64_t requester);
+
+	void applyIndexSearchSize(
+			const SQLIndexStatsCache::KeyList &keyList,
+			const util::Vector<int64_t> &estimationList,
+			SQLIndexStatsCache &indexStats, uint64_t requester);
+
 	void begin();
 
 	void commit();
@@ -824,7 +833,6 @@ private:
 	size_t cacheSize_;
 	NoSQLStoreList basicStoreList_;
 	NoSQLStoreMap storeMap_;
-	int32_t refCount_;
 
 	PartitionTable* pt_;
 

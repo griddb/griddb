@@ -789,11 +789,11 @@ public:
 	SyncContext* createSyncContext(EventContext& ec, PartitionId pId, PartitionRole& role,
 		SyncMode syncMode, PartitionRoleStatus roleStatus);
 
-	void setShortermSyncRequest(
+	void setShorttermSyncRequest(
 		SyncContext* context, SyncRequestInfo& syncRequestInfo,
 		util::Set<NodeId>& syncTargetNodeSet);
 
-	void setShortermSyncStart(
+	void setShorttermSyncStart(
 		SyncContext* context,
 		SyncRequestInfo& syncRequestInfo, NodeId senderNodeId);
 

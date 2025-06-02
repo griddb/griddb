@@ -794,6 +794,13 @@ public:
 			uint32_t partitioningCount, uint32_t clusterPartitionCount,
 			const util::Vector<int64_t> &affinityList,
 			int64_t interval, uint32_t hash);
+
+	static TupleValue duplicateValue(
+			const util::StdAllocator<void, void> &alloc, const TupleValue &src);
+	static void destroyValue(
+			const util::StdAllocator<void, void> &alloc, TupleValue &value);
+
+	static const void* getValueBody(const TupleValue &value, size_t &size);
 };
 
 struct SQLProcessor::OutOption {

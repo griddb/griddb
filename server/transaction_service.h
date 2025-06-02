@@ -91,7 +91,6 @@ struct TablePartitioningInfo;
 class DataStoreLog;
 class TxnLogManager;
 
-
 UTIL_TRACER_DECLARE(TRANSACTION_SERVICE);
 UTIL_TRACER_DECLARE(REPLICATION);
 UTIL_TRACER_DECLARE(SESSION_TIMEOUT);
@@ -156,7 +155,7 @@ public:
 	static const size_t DATABASE_NAME_SIZE_MAX = 64;  
 
 	static const size_t USER_NUM_MAX = 1000;  
-	static const size_t DATABASE_NUM_MAX = 1000;  
+	static const size_t DATABASE_NUM_MAX = TXN_DATABASE_NUM_MAX;  
 
 	enum QueryResponseType {
 		ROW_SET					= 0,
@@ -625,6 +624,10 @@ public:
 			UNUSED_VARIABLE(in);
 		}
 
+		void setNodeAddress(NodeAddress& address) {
+			address_ = address;
+		}
+
 		const FixedRequest& request_;
 		OptionSet* optionSet_;
 		ReplicationId replId_;
@@ -638,6 +641,7 @@ public:
 		size_t closedResourceIdCount_;
 		const util::XArray<uint8_t>** logRecordList_;
 		size_t logRecordCount_;
+		NodeAddress address_;
 	};
 
 
@@ -748,7 +752,7 @@ public:
 	static void setReplyOptionForContinue(
 			OptionSet &optionSet, const ReplicationContext &replContext);
 
-	static void setSQLResonseInfo(
+	static void setSQLResponseInfo(
 			ReplicationContext &replContext, const Request &request);
 
 	static EventType resolveReplyEventType(
@@ -2672,7 +2676,7 @@ private:
 			EventContext& ec, const Event &baseEv,
 			const util::XArray<uint8_t> &suspendedData, size_t extraDataSize);
 	static void decodeSuspendedData(
-			const Event &ev, EventByteInStream &in,
+			const Event &ev, const OptionSet &optionSet, EventByteInStream &in,
 			util::XArray<uint8_t> &suspendedData, size_t &extraDataSize);
 
 	typedef TQLOutputMessage OutMessage;
@@ -3509,7 +3513,7 @@ protected:
 	virtual bool isOptionalFormat() const {
 		return false;
 	}
-private:
+public:
 	struct InMessage : public SimpleInputMessage {
 		InMessage(util::StackAllocator& alloc, const FixedRequest::Source& src, ConnectionOption& connOption)
 			: SimpleInputMessage(alloc, src, connOption), alloc_(alloc), ack_(src.pId_), logVer_(0),
@@ -3546,12 +3550,14 @@ private:
 			uint32_t logRecordCount;
 			decodeIntData<S, uint32_t>(in, logRecordCount);
 			decodeBinaryData<S>(in, logRecordList_, true);
+			lastPosition_ = in.base().position();
 		}
 		util::StackAllocator& alloc_;
 		ReplicationAck ack_;
 		uint16_t logVer_;
 		util::XArray<ClientId> closedResourceIds_;
 		util::XArray<uint8_t> logRecordList_;
+		size_t lastPosition_;
 	};
 
 };
@@ -3628,7 +3634,6 @@ protected:
 		decodeReplicationAck(in, ack);
 	}
 };
-
 
 class DbUserHandler : public StatementHandler {
 public:
@@ -4939,13 +4944,77 @@ private:
 
 class SQLGetContainerHandler : public StatementHandler {
 public:
+	typedef std::pair<ContainerId, BtreeMap::SearchContext*> SearchEntry;
+	typedef util::Vector<SearchEntry> SearchList;
+	typedef util::Vector<int64_t> EstimationList;
+
+	enum SubCommand {
+		SUB_CMD_NONE,
+		SUB_CMD_GET_CONTAINER,
+		SUB_CMD_ESTIMATE_INDEX_SEARCH_SIZE,
+	};
+
+	static const int32_t LATEST_FEATURE_VERSION;
+
 	void operator()(EventContext &ec, Event &ev);
-	void reply(EventContext &ec, Event &ev, TableSchemaInfo &message);
+
+	template<typename S>
+	static void encodeSubCommand(S &out, SubCommand cmd) {
+		encodeIntData(out, static_cast<int32_t>(cmd));
+	}
+
+	template<typename S>
+	static SubCommand decodeSubCommand(S &in) {
+		int32_t cmdNum;
+		decodeIntData(in, cmdNum);
+		return checkSubCommand(cmdNum);
+	}
+
+	template<typename S>
+	static void encodeResult(
+			S &out, SQLVariableSizeGlobalAllocator &varAlloc,
+			TableSchemaInfo *info, const EstimationList &estimationList);
+
+	template<typename S>
+	static void decodeResult(
+			S &in, util::StackAllocator &alloc,
+			SQLVariableSizeGlobalAllocator &varAlloc,
+			util::AllocUniquePtr<TableSchemaInfo> &info,
+			EstimationList &estimationList);
+
+	template<typename S>
+	static void encodeTableSchemaInfo(
+			S &out, SQLVariableSizeGlobalAllocator &varAlloc,
+			TableSchemaInfo *info);
+
+	template<typename S>
+	static util::AllocUniquePtr<TableSchemaInfo>::ReturnType
+	decodeTableSchemaInfo(
+			S &in, util::StackAllocator &alloc,
+			SQLVariableSizeGlobalAllocator &varAlloc);
+
+	template<typename S>
+	static void encodeEstimationList(
+			S &out, const EstimationList &estimationList);
+
+	template<typename S>
+	static void decodeEstimationList(
+			S &in, EstimationList &estimationList);
+
 private:
 	struct InMessage : public SimpleInputMessage {
-		InMessage(util::StackAllocator& alloc, const FixedRequest::Source& src, ConnectionOption& connOption)
-			: SimpleInputMessage(alloc, src, connOption), containerNameBinary_(alloc), 
-			isContainerLock_(false), queryId_(UNDEF_SESSIONID) {}
+		InMessage(
+				util::StackAllocator& alloc, const FixedRequest::Source& src,
+				ConnectionOption& connOption) :
+				SimpleInputMessage(alloc, src, connOption),
+				containerNameBinary_(alloc),
+				isContainerLock_(false),
+				queryId_(UNDEF_SESSIONID),
+				subCmd_(SUB_CMD_NONE),
+				searchList_(alloc) {
+			alloc_ = &alloc;
+		}
+
 		void encode(EventByteOutStream& out) {
 			encode<EventByteOutStream>(out);
 		}
@@ -4959,43 +5028,30 @@ private:
 		void encode(S& out) {
 			UNUSED_VARIABLE(out);
 		}
+
 		template<typename S>
-		void decode(S& in) {
-			SimpleInputMessage::decode(in);
-			int32_t acceptableVersion
-				= request_.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>();
-			if (acceptableVersion > MessageSchema::V4_1_VERSION) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_SQL_MSG_VERSION_NOT_ACCEPTABLE,
-					"SQL container access version unmatch, expected="
-					<< MessageSchema::V4_1_VERSION
-					<< ", actual=" << acceptableVersion);
-			}
-			decodeVarSizeBinaryData<S>(in, containerNameBinary_);
+		void decode(S& in);
 
-			decodeBooleanData<S>(in, isContainerLock_);
-
-			decodeUUID<S>(
-				in, clientId_.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
-
-			in >> queryId_;
-
-			if (connOption_.clientVersion_
-				== TXN_V2_5_X_CLIENT_VERSION) {
-
-				request_.optional_.set<Options::DB_NAME>(GS_PUBLIC);
-			}
-		}
 		util::XArray<uint8_t> containerNameBinary_;
 		bool isContainerLock_;
 		ClientId clientId_;
 		SessionId queryId_;
+		SubCommand subCmd_;
+		SearchList searchList_;
 	};
 
 	struct OutMessage : public SimpleOutputMessage {
-		OutMessage(StatementId stmtId, StatementExecStatus status,
-			OptionSet* optionSet, TableSchemaInfo* info, SQLVariableSizeGlobalAllocator* globalVarAlloc)
-			: SimpleOutputMessage(stmtId, status, optionSet), info_(info), globalVarAlloc_(globalVarAlloc) {}
+		OutMessage(
+				StatementId stmtId, StatementExecStatus status,
+				OptionSet *optionSet, TableSchemaInfo *info,
+				SQLVariableSizeGlobalAllocator *globalVarAlloc,
+				const EstimationList &estimationList) :
+				SimpleOutputMessage(stmtId, status, optionSet),
+				info_(info),
+				globalVarAlloc_(globalVarAlloc),
+				estimationList_(estimationList) {
+		}
+
 		void encode(EventByteOutStream& out) {
 			encode<EventByteOutStream>(out);
 		}
@@ -5013,10 +5069,39 @@ private:
 			UNUSED_VARIABLE(in);
 		}
 
-		TableSchemaInfo* info_;
-		SQLVariableSizeGlobalAllocator* globalVarAlloc_;
+		TableSchemaInfo *info_;
+		SQLVariableSizeGlobalAllocator *globalVarAlloc_;
+
+		EstimationList estimationList_;
 	};
 
+	void estimateIndexSearchSize(
+			EventContext &ec, Event &ev, InMessage &inMes);
+
+	static void checkAcceptableVersion(
+			const StatementMessage::Request &request);
+
+	static SubCommand checkSubCommand(int32_t cmdNum);
+
+	template<typename S>
+	static void decodeContainerCondition(
+			S &in, InMessage &msg, const ConnectionOption &connOption);
+
+	template<typename S>
+	static void decodeSearchList(
+			TransactionContext &txn, S &in, SearchList &searchList);
+
+	template<typename S>
+	static void decodeSearchEntry(
+			TransactionContext &txn, S &in, SearchEntry &entry);
+
+	template<typename S>
+	static void decodeTermCondition(
+			TransactionContext &txn, S &in, BtreeMap::SearchContext &sc,
+			const util::Vector<ColumnId> &columnIdList);
+
+	template<typename S>
+	static void decodeColumnIdList(S &in, util::Vector<ColumnId> &columnIdList);
 };
 
 
@@ -5188,7 +5273,6 @@ public:
 
 	UserCache *userCache_;
 	OpenLDAPFactory* olFactory_;
-
 
 private:
 	static class StatSetUpHandler : public StatTable::SetUpHandler {

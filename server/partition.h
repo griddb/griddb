@@ -34,7 +34,6 @@
 #include <random>
 #include <mutex>
 
-
 class ConfigTable;
 struct ManagerSet;
 struct DataStoreConfig;
@@ -474,6 +473,7 @@ private:
 	TransactionManager* transactionManager_;
 	uint32_t partitionCount_;
 	util::AllocUniquePtr<PartitionListStats> stats_;
+	ManagerSet* managerSet_;
 
 public:
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {

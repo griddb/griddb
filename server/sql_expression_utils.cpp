@@ -285,8 +285,28 @@ SQLExprs::ExprRewriter::createSummaryColumnList(
 		tupleSet.setOrderedDigestRestricted(orderingRestricted);
 	}
 
+	applySummaryTupleOptions(cxt, tupleSet);
+
 	tupleSet.completeColumns();
 	return tupleSet.getReaderColumnList();
+}
+
+void SQLExprs::ExprRewriter::applySummaryTupleOptions(
+		ExprFactoryContext &cxt, SQLValues::SummaryTupleSet &tupleSet) {
+	if (cxt.getDecrementalType() != ExprSpec::DECREMENTAL_NONE) {
+		tupleSet.setValueDecremental(true);
+	}
+}
+
+void SQLExprs::ExprRewriter::applyDecrementalType(
+		ExprFactoryContext &cxt, const SQLExprs::ExprCode &code) {
+	const uint32_t attributes = code.getAttributes();
+	if ((attributes & ExprCode::ATTR_DECREMENTAL_FORWARD) != 0) {
+		cxt.setDecrementalType(ExprSpec::DECREMENTAL_FORWARD);
+	}
+	else if ((attributes & ExprCode::ATTR_DECREMENTAL_BACKWARD) != 0) {
+		cxt.setDecrementalType(ExprSpec::DECREMENTAL_BACKWARD);
+	}
 }
 
 void SQLExprs::ExprRewriter::setCodeSetUpAlways(bool enabled) {
@@ -3393,15 +3413,7 @@ SQLExprs::Expression& SQLExprs::SyntaxExprRewriter::toColumnList(
 
 SQLExprs::Expression& SQLExprs::SyntaxExprRewriter::toProjection(
 		const SyntaxExprList &src) const {
-	ExprFactoryContext cxt(valueCxt_.getAllocator());
-	Expression &expr = cxt.getFactory().create(cxt, SQLType::EXPR_PROJECTION);
-
-	Expression::ModIterator destIt(expr);
-	for (SyntaxExprList::const_iterator it = src.begin(); it != src.end(); ++it) {
-		destIt.append(*toExpr(&(*it)));
-	}
-
-	return expr;
+	return makeExpr(SQLType::EXPR_PROJECTION, &src);
 }
 
 SQLExprs::Expression& SQLExprs::SyntaxExprRewriter::toSelection(
@@ -3456,6 +3468,85 @@ SQLExprs::SyntaxExprList SQLExprs::SyntaxExprRewriter::toSyntaxExprList(
 	}
 
 	return dest;
+}
+
+SQLExprs::Expression& SQLExprs::SyntaxExprRewriter::makeExpr(
+		ExprType type, const SyntaxExprList *argList) const {
+	ExprFactoryContext cxt(valueCxt_.getAllocator());
+	Expression &expr = cxt.getFactory().create(cxt, type);
+
+	if (argList != NULL) {
+		Expression::ModIterator destIt(expr);
+		for (SyntaxExprList::const_iterator it = argList->begin();
+				it != argList->end(); ++it) {
+			destIt.append(*toExpr(&(*it)));
+		}
+	}
+
+	return expr;
+}
+
+bool SQLExprs::SyntaxExprRewriter::findAdjustedRangeValues(
+		const SyntaxExpr &expr,
+		const util::Vector<TupleColumnType> &columnTypeList,
+		const util::Vector<TupleValue> *parameterList,
+		SQLExprs::IndexCondition &cond) const {
+	cond = SQLExprs::IndexCondition();
+
+	assert(!columnTypeList.empty());
+
+	TupleList::Info tupleInfo;
+	tupleInfo.columnCount_ = columnTypeList.size();
+	tupleInfo.columnTypeList_ = &columnTypeList[0];
+
+	const uint32_t indexType = (
+			(1 << SQLType::INDEX_TREE_RANGE) |
+			(1 << SQLType::INDEX_TREE_EQ));
+
+	Expression::InOption option(valueCxt_);
+	option.syntaxExpr_ = &expr;
+	option.parameterList_ = parameterList;
+
+	ExprFactoryContext factoryCxt(valueCxt_.getAllocator());
+	Expression *localExpr = &Expression::importFrom(factoryCxt, option);
+	if (localExpr == NULL) {
+		return false;
+	}
+
+	switch (localExpr->getCode().getType()) {
+	case SQLType::OP_EQ:
+	case SQLType::OP_LT:
+	case SQLType::OP_GT:
+	case SQLType::OP_LE:
+	case SQLType::OP_GE:
+		break;
+	default:
+		return false;
+	}
+
+	Expression::Iterator it(*localExpr);
+	const Expression *columnExpr = &it.get();
+	if (columnExpr->getCode().getType() != SQLType::EXPR_COLUMN) {
+		it.next();
+		columnExpr = &it.get();
+	}
+
+	if (columnExpr->getCode().getType() != SQLType::EXPR_COLUMN) {
+		return false;
+	}
+
+	IndexSelector selector(valueCxt_, SQLType::EXPR_COLUMN, tupleInfo);
+	selector.addIndex(columnExpr->getCode().getColumnPos(), indexType);
+	selector.completeIndex();
+
+	selector.select(*localExpr);
+	const IndexConditionList &condList = selector.getConditionList();
+	if (!selector.isSelected()) {
+		return false;
+	}
+
+	cond = condList.front();
+	return true;
 }
 
 TupleValue SQLExprs::SyntaxExprRewriter::evalConstExpr(
@@ -6715,6 +6806,16 @@ bool SQLExprs::ExprTypeUtils::isCompOp(ExprType type, bool withNe) {
 	return true;
 }
 
+bool SQLExprs::ExprTypeUtils::isNormalWindow(ExprType type) {
+	const ExprSpec &spec = ExprFactory::getDefaultFactory().getSpec(type);
+	return ((spec.flags_ & ExprSpec::FLAG_WINDOW) != 0);
+}
+
+bool SQLExprs::ExprTypeUtils::isDecremental(ExprType type) {
+	const ExprSpec &spec = ExprFactory::getDefaultFactory().getSpec(type);
+	return ((spec.flags_ & ExprSpec::FLAG_AGGR_DECREMENTAL) != 0);
+}
+
 SQLExprs::ExprType SQLExprs::ExprTypeUtils::swapCompOp(ExprType type) {
 	switch (type) {
 	case SQLType::OP_LT:
@@ -6953,7 +7054,7 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 		const SyntaxExpr &expr, bool &uncovered,
 		util::Vector<int64_t> *affinityList, util::Set<int64_t> &affinitySet,
 		const util::Vector<TupleValue> *parameterList,
-		bool &placeholderAffected) {
+		bool &placeholderAffected, util::Set<int64_t> &unmatchAffinitySet) {
 
 	if (partitioning == NULL || (forContainer &&
 			partitioning->partitioningType_ ==
@@ -7185,13 +7286,17 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 			const OutsideEntry &outsideInterval = outsideIntervalList[i];
 
 			for (uint32_t hash = 0; hash < hashCount; hash++) {
-				if (outsideInterval.first >= 0) {
-					affinitySet.insert(intervalToAffinity(
-							*partitioning, outsideInterval.first, hash));
-				}
-				if (outsideInterval.second >= 0) {
-					affinitySet.insert(intervalToAffinity(
-							*partitioning, outsideInterval.second, hash));
+				for (size_t j = 0; j < 2; j++) {
+					const int64_t interval = (j == 0 ?
+							outsideInterval.first : outsideInterval.second);
+					if (interval < 0) {
+						continue;
+					}
+					const int64_t affinity =
+							intervalToAffinity(*partitioning, interval, hash);
+					if (affinitySet.insert(affinity).second) {
+						unmatchAffinitySet.insert(affinity);
+					}
 				}
 			}
 		}
@@ -7207,7 +7312,7 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 	return affinitySet.size() < availableCount;
 }
 
-bool SQLExprs::DataPartitionUtils::isReduceableTablePartitionCondition(
+bool SQLExprs::DataPartitionUtils::isReducibleTablePartitionCondition(
 		const PlanPartitioningInfo &partitioning, TupleColumnType columnType,
 		const util::Vector<uint32_t> &affinityRevList, int64_t nodeAffinity,
 		ExprType condType, uint32_t condColumn, const TupleValue &condValue) {
@@ -7614,18 +7719,115 @@ bool SQLExprs::RangeGroupUtils::isRangeGroupSupportedType(
 	return SQLValues::TypeUtils::isTimestampFamily(type);
 }
 
-TupleValue SQLExprs::RangeGroupUtils::getRangeGroupBoundary(
-		util::StackAllocator &alloc, TupleColumnType keyType, TupleValue base,
-		bool forLower, bool inclusive) {
+void SQLExprs::RangeGroupUtils::resolveRangeGroupInterval(
+		TupleColumnType type, int64_t baseInterval, int64_t baseOffset,
+		util::DateTime::FieldType unit, const util::TimeZone &timeZone,
+		RangeKey &interval, RangeKey &offset) {
+	RangeKey outInterval =
+			resolveRangeGroupIntervalValue(baseInterval, unit, true);
+	RangeKey outOffset =
+			resolveRangeGroupIntervalValue(baseOffset, unit, false);
+	adjustRangeGroupInterval(outInterval, outOffset, timeZone);
+
+	checkRangeGroupInterval(type, outInterval);
+
+	interval = outInterval;
+	offset = outOffset;
+}
+
+SQLExprs::RangeKey SQLExprs::RangeGroupUtils::resolveRangeGroupIntervalValue(
+		int64_t baseInterval, util::DateTime::FieldType unit,
+		bool forInterval) {
+	util::DateTime::ZonedOption option;
+	util::PreciseDateTime dt;
+	try {
+		dt.addField(baseInterval, unit, option);
+	}
+	catch (util::UtilityException &e) {
+		const char8_t *target = (forInterval ? "interval" : "offset");
+		GS_RETHROW_USER_ERROR_CODED(
+				GS_ERROR_SQL_PROC_LIMIT_EXCEEDED,
+				e, "Too large range group " << target <<" (reason=" <<
+				e.getField(util::Exception::FIELD_MESSAGE) << ")");
+	}
+	return SQLValues::DateTimeElements(dt).toLongInt();
+}
+
+void SQLExprs::RangeGroupUtils::adjustRangeGroupInterval(
+		RangeKey &interval, RangeKey &offset, const util::TimeZone &timeZone) {
+	const RangeKey::Unit &keyUnit = interval.getUnit();
+
+	RangeKey outInterval = interval.getMax(RangeKey::ofElements(0, 1, keyUnit));
+	RangeKey outOffset =
+			offset.getMax(RangeKey::zero(keyUnit)).remainder(outInterval);
+
+	if (!timeZone.isEmpty()) {
+		const RangeKey zoneOffset =
+				RangeKey::ofElements(timeZone.getOffsetMillis(), 0, keyUnit);
+
+		const RangeKey diff = (zoneOffset.isNegative() ?
+				outInterval.subtract(
+						zoneOffset.negate(true).remainder(outInterval)) :
+				zoneOffset.remainder(outInterval));
+
+		if (outOffset.isLessThan(outInterval.subtract(diff))) {
+			outOffset = outOffset.add(diff);
+		}
+		else {
+			outOffset = outOffset.add(diff.subtract(outInterval));
+		}
+	}
+
+	interval = outInterval;
+	offset = outOffset;
+}
+
+void SQLExprs::RangeGroupUtils::checkRangeGroupInterval(
+		TupleColumnType type, const RangeKey &interval) {
+	const RangeKey min = getRangeGroupMinInterval(type);
+	if (interval.isLessThan(min)) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_LIMIT_EXCEEDED,
+				"Too small range group interval for the grouping key (keyType=" <<
+				SQLValues::TypeUtils::toString(
+						SQLValues::TypeUtils::toNonNullable(type)) << ")");
+	}
+}
+
+SQLExprs::RangeKey SQLExprs::RangeGroupUtils::getRangeGroupMinInterval(
+		TupleColumnType type) {
+	util::PreciseDateTime base;
+	switch (SQLValues::TypeUtils::toNonNullable(type)) {
+	case TupleTypes::TYPE_TIMESTAMP:
+		base = util::PreciseDateTime::ofNanoSeconds(util::DateTime(1), 0);
+		break;
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		base = util::PreciseDateTime::ofNanoSeconds(util::DateTime(0), 1000);
+		break;
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		base = util::PreciseDateTime::ofNanoSeconds(util::DateTime(0), 1);
+		break;
+	default:
+		return RangeKey::invalid();
+	}
+	return SQLValues::DateTimeElements(base).toLongInt();
+}
+
+bool SQLExprs::RangeGroupUtils::findRangeGroupBoundary(
+		util::StackAllocator &alloc, TupleColumnType keyType,
+		const TupleValue &base, bool forLower, bool inclusive,
+		RangeKey &boundary) {
+	boundary = RangeKey::invalid();
+
 	if (SQLValues::ValueUtils::isNull(base)) {
-		return TupleValue();
+		return false;
 	}
 
 	const TupleColumnType promoType = SQLValues::TypeUtils::toNonNullable(
 			SQLValues::TypeUtils::findPromotionType(
 					keyType, base.getType(), true));
 	if (SQLValues::TypeUtils::isNull(promoType)) {
-		return TupleValue();
+		return false;
 	}
 
 	util::StackAllocator::Scope allocScope(alloc);
@@ -7634,89 +7836,112 @@ TupleValue SQLExprs::RangeGroupUtils::getRangeGroupBoundary(
 	const TupleValue promoBase =
 			SQLValues::ValueConverter(promoType)(valueCxt, base);
 
-	const int64_t longBase = SQLValues::ValueUtils::toLong(promoBase);
+	const RangeKey longBase = SQLValues::ValueUtils::toLongInt(promoBase);
+	const RangeKey::Unit unit = longBase.getUnit();
 
-	int32_t gap;
+	const bool found = true;
+	RangeKey gap = RangeKey::zero(unit);
 	if (!inclusive) {
 		if (forLower) {
-			gap = (SQLValues::ValueUtils::isUpperBoundaryAsLong(promoBase, 1) ?
-					1 : 0);
-			if (gap > 0 && longBase >= std::numeric_limits<int64_t>::max()) {
-				return TupleValue();
+			const RangeKey &max =
+					SQLValues::ValueUtils::getMaxTimestamp().toLongInt();
+			if (max.isLessThanEq(longBase)) {
+				return found;
 			}
 		}
 		else {
-			gap = (SQLValues::ValueUtils::isLowerBoundaryAsLong(promoBase, 1) ?
-					-1 : 0);
-			if (gap < 0 && longBase <= std::numeric_limits<int64_t>::min()) {
-				return TupleValue();
+			const RangeKey &min =
+					SQLValues::ValueUtils::getMinTimestamp().toLongInt();
+			if (longBase.isLessThanEq(min)) {
+				return found;
 			}
 		}
-	}
-	else {
-		gap = 0;
+		gap = RangeKey::ofElements(0, 1, unit).negate(!forLower);
 	}
 
-	return TupleValue(longBase + gap);
+	boundary = longBase.add(gap);
+	return found;
 }
 
 bool SQLExprs::RangeGroupUtils::adjustRangeGroupBoundary(
-		TupleValue &lower, TupleValue &upper, int64_t interval,
-		int64_t offset) {
-	assert(0 <= offset);
-	assert(offset < interval);
+		RangeKey &lower, RangeKey &upper, const RangeKey &interval,
+		const RangeKey &offset) {
+	assert(!offset.isNegative());
+	assert(offset.isLessThan(interval));
 
 	bool normal = true;
 	do {
-		if (SQLValues::TypeUtils::isNull(lower.getType()) ||
-				SQLValues::TypeUtils::isNull(upper.getType())) {
+		if (!lower.isValid() || !upper.isValid()) {
 			break;
 		}
 
-		const int64_t lowerBase = lower.get<int64_t>();
-		const int64_t upperBase = upper.get<int64_t>();
-
-		if (lowerBase > upperBase) {
+		if (upper.isLessThan(lower)) {
 			break;
 		}
 
 		for (size_t i = 0; i < 2; i++) {
-			const int64_t base = (i == 0 ? lowerBase : upperBase);
+			RangeKey &baseRef = (i == 0 ? lower : upper);
+			const RangeKey base = baseRef;
 
-			int64_t gap = 0;
-			if (base < offset) {
-				gap = interval * (base < interval ? 1 : -1);
+			RangeKey gap = RangeKey::zero(base.getUnit());
+			if (base.isLessThan(offset)) {
+				gap = interval.negate(!base.isLessThan(interval));
 				normal = false;
 			}
 
-			const int64_t value = (base - offset + gap) / interval * interval + offset;
-			(i == 0 ? lower : upper) = TupleValue(value);
+			const RangeKey sub = base.subtract(offset).add(gap);
+			baseRef = sub.truncate(interval).add(offset);
+
+			assert(SQLValues::ValueUtils::getMinTimestamp().toLongInt(
+					).isLessThanEq(baseRef));
+			assert(baseRef.isLessThanEq(
+					SQLValues::ValueUtils::getMaxTimestamp().toLongInt()));
 		}
 		return normal;
 	}
 	while (false);
 
-	const int64_t emptyLower = 1;
-	const int64_t emptyUpper = 0;
-	lower = TupleValue(emptyLower);
-	upper = TupleValue(emptyUpper);
+	const RangeKey::Unit unit = interval.getUnit();
+	const RangeKey emptyLower = RangeKey::ofElements(1, 0, unit);
+	const RangeKey emptyUpper = RangeKey::ofElements(0, 0, unit);
+	lower = emptyLower;
+	upper = emptyUpper;
 	return normal;
 }
 
+TupleValue SQLExprs::RangeGroupUtils::mergeRangeGroupBoundary(
+		const TupleValue &base1, const TupleValue &base2, bool forLower) {
+	if (SQLValues::ValueUtils::isNull(base1)) {
+		return base2;
+	}
+	else if (SQLValues::ValueUtils::isNull(base2)) {
+		return base1;
+	}
+
+	const bool sensitive = false;
+	const bool ascending = forLower;
+	const bool ordered = (SQLValues::ValueComparator::ofValues(
+			base1, base2, sensitive, ascending)(base1, base2) < 0);
+
+	return (ordered ? base2 : base1);
+}
+
 bool SQLExprs::RangeGroupUtils::getRangeGroupId(
-		TupleValue key, int64_t interval, int64_t offset, int64_t &id) {
-	assert(0 <= offset);
-	assert(offset < interval);
+		const TupleValue &key, const RangeKey &interval,
+		const RangeKey &offset, RangeKey &id) {
+	assert(SQLValues::LongInt::zero(offset.getUnit()).isLessThanEq(offset));
+	assert(offset.isLessThan(interval));
 
 	if (SQLValues::ValueUtils::isNull(key)) {
-		id = 0;
+		id = RangeKey::invalid();
 		return false;
 	}
 
-	const int64_t base = SQLValues::ValueUtils::toLong(key);
-	const int64_t gap = offset - (base >= offset ? 0 : interval);
+	const RangeKey base = SQLValues::ValueUtils::toLongInt(key);
+	const RangeKey gap = (
+			offset.isLessThanEq(base) ? offset : offset.subtract(interval));
 
-	id = (base - gap) / interval * interval + gap;
+	id = base.subtract(gap).truncate(interval).add(gap);
 	return true;
 }
 
@@ -7864,27 +8089,44 @@ SQLExprs::ExprRegistrar::resolveFactoryFunc(
 	if (cxt.isArgChecking()) {
 		return table.checker_;
 	}
-	const FuncTableByAggr &baseTable = table.base_;
-	const FuncTableByTypes *subTable;
+	const FuncTableByTypes &subTable =
+			resolveAggregationSubTable(cxt, table.base_);
+	const size_t typeVariant = getColumnTypeVariant(cxt, spec);
+	return subTable.list_[typeVariant];
+}
+
+const SQLExprs::ExprRegistrar::FuncTableByTypes&
+SQLExprs::ExprRegistrar::resolveAggregationSubTable(
+		ExprFactoryContext &cxt, const FuncTableByAggr &baseTable) {
 	switch (cxt.getAggregationPhase(false)) {
 	case SQLType::AGG_PHASE_ADVANCE_PIPE:
-		subTable = &baseTable.advance_;
-		break;
+		return resolveDecrementalSubTable(cxt, baseTable);
 	case SQLType::AGG_PHASE_ADVANCE_FINISH:
-		subTable = &baseTable.finish_;
-		break;
+		return baseTable.finish_;
 	case SQLType::AGG_PHASE_MERGE_PIPE:
-		subTable = &baseTable.merge_;
-		break;
+		return baseTable.merge_;
 	case SQLType::AGG_PHASE_MERGE_FINISH:
-		subTable = &baseTable.finish_;
-		break;
+		return baseTable.finish_;
 	default:
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
-	const size_t typeVariant = getColumnTypeVariant(cxt, spec);
-	return subTable->list_[typeVariant];
+}
+
+const SQLExprs::ExprRegistrar::FuncTableByTypes&
+SQLExprs::ExprRegistrar::resolveDecrementalSubTable(
+		ExprFactoryContext &cxt, const FuncTableByAggr &baseTable) {
+	switch (cxt.getDecrementalType()) {
+	case ExprSpec::DECREMENTAL_NONE:
+		return baseTable.advance_;
+	case ExprSpec::DECREMENTAL_FORWARD:
+		return baseTable.decrForward_;
+	case ExprSpec::DECREMENTAL_BACKWARD:
+		return baseTable.decrBackward_;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
 }
 
 size_t SQLExprs::ExprRegistrar::getArgCountVariant(
@@ -8013,10 +8255,14 @@ SQLExprs::ExprRegistrar::FuncTableByCounts::FuncTableByCounts(
 SQLExprs::ExprRegistrar::FuncTableByAggr::FuncTableByAggr(
 		const FuncTableByTypes &advance,
 		const FuncTableByTypes &merge,
-		const FuncTableByTypes &finish) :
+		const FuncTableByTypes &finish,
+		const FuncTableByTypes &decrForward,
+		const FuncTableByTypes &decrBackward) :
 		advance_(advance),
 		merge_(merge),
-		finish_(finish) {
+		finish_(finish),
+		decrForward_(decrForward),
+		decrBackward_(decrBackward) {
 }
 
 SQLExprs::ExprRegistrar::BasicFuncTable::BasicFuncTable(

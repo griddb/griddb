@@ -229,6 +229,7 @@ public:
 	static const int32_t SQL_V4_1_0_MSG_VERSION;
 	static const int32_t SQL_V5_5_MSG_VERSION;
 	static const int32_t SQL_V5_6_MSG_VERSION;
+	static const int32_t SQL_V5_8_MSG_VERSION;
 	static const int32_t SQL_MSG_VERSION;
 	static const bool SQL_MSG_BACKWARD_COMPATIBLE;
 

@@ -38,7 +38,6 @@
 #include "picojson.h"
 #include "sync_manager.h"
 #include "database_manager.h"
-
 using util::ValueFormatter;
 
 
@@ -751,7 +750,7 @@ void SystemService::getPartitions(
 		picojson::value &result, int32_t partitionNo,
 		const ServiceTypeInfo &addressType, bool lossOnly, bool force, bool isSelf,
 		bool lsnDump, bool notDumpRole, uint32_t partitionGroupNo,
-		bool sqlOwnerDump) {
+		bool sqlOwnerDump, bool replication) {
 	try {
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get partitions called");
@@ -818,17 +817,17 @@ void SystemService::getPartitions(
 				if (sqlOwnerDump)
 				{
 					const NodeId nodeId = pt_->getNewSQLOwner(pId);
-					picojson::value &addressValue = partition["sqlOwner"];
+					picojson::value& addressValue = partition["sqlOwner"];
 					if (nodeId != UNDEF_NODEID) {
 						addressValue = picojson::value(picojson::object());
 						getServiceAddress(
-								pt_, nodeId,
-								JsonUtils::as<picojson::object>(addressValue),
-								addressType);
+							pt_, nodeId,
+							JsonUtils::as<picojson::object>(addressValue),
+							addressType);
 					}
 				}
 				{
-					picojson::array &nodeList =
+					picojson::array& nodeList =
 						picojsonUtil::setJsonArray(partition["backup"]);
 					util::XArray<NodeId> backupList(alloc);
 					pt_->getBackup(pId, backupList);
@@ -860,7 +859,7 @@ void SystemService::getPartitions(
 					}
 				}
 				{
-					picojson::array &nodeList =
+					picojson::array& nodeList =
 						picojsonUtil::setJsonArray(partition["catchup"]);
 					util::XArray<NodeId> catchupList(alloc);
 					pt_->getCatchup(pId, catchupList);
@@ -876,7 +875,7 @@ void SystemService::getPartitions(
 							getServiceAddress(
 								pt_, catchupNodeId, catchup, addressType);
 							if ((pt_->isMaster() &&
-									catchupNodeId != UNDEF_NODEID) ||
+								catchupNodeId != UNDEF_NODEID) ||
 								(pt_->isFollower() && catchupNodeId == 0)) {
 								lsn = pt_->getLSN(pId, catchupNodeId);
 								catchup["lsn"] =
@@ -889,10 +888,10 @@ void SystemService::getPartitions(
 
 				{
 					if ((pt_->isMaster() && (lossOnly || force))) {
-						picojson::array &nodeList =
+						picojson::array& nodeList =
 							picojsonUtil::setJsonArray(partition["all"]);
 						for (NodeId nodeId = 0; nodeId < pt_->getNodeNum();
-							 nodeId++) {
+							nodeId++) {
 							picojson::object noneNode;
 							getServiceAddress(
 								pt_, nodeId, noneNode, addressType);
@@ -945,6 +944,7 @@ void SystemService::getPartitions(
 				partition["pgId"] =
 					picojson::value(CommonUtility::makeString(oss, partitionGroupNo));
 			}
+
 			partitionList.push_back(picojson::value(partition));
 		}
 	}
@@ -2747,6 +2747,15 @@ void SystemService::ListenerSocketHandler::dispatch(
 					}
 				}
 
+				bool replicationDump = false;
+				if (request.parameterMap_.find("replication") !=
+					request.parameterMap_.end()) {
+					const std::string retStr = request.parameterMap_["replication"];
+					if (retStr == "true" && pt_->isMaster()) {
+						replicationDump = true;
+					}
+				}
+
 				bool notRoleDump = false;
 				if (request.parameterMap_.find("notRoleDump") !=
 					request.parameterMap_.end()) {
@@ -2777,7 +2786,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				picojson::value result;
 				sysSvc_->getPartitions(alloc_, result, partitionNo, addressType,
 					isLossOnly, isForce, isSelf, lsnDump, notRoleDump,
-					partitionGroupNo, sqlOwnerDump);
+					partitionGroupNo, sqlOwnerDump, replicationDump);
 
 				if (request.parameterMap_.find("callback") !=
 					request.parameterMap_.end()) {
@@ -3953,6 +3962,17 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 
+			if (request.parameterMap_.find("duration") !=
+				request.parameterMap_.end()) {
+				int64_t duration = atoi(request.parameterMap_["duration"].c_str());
+
+				if (duration > 0) {
+					int64_t currentTime = util::DateTime::now(false).getUnixTime();
+					if (currentTime >= duration * 1000) {
+						option.limitStartTime_ = currentTime - duration * 1000;
+					}
+				}
+			}
 			JobManager *jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
 			Event::Source eventSource(varSizeAlloc_);
 			util::Vector<JobId> jobIdList(alloc_);
@@ -3963,6 +3983,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 					jobIdList.push_back(jobId);
 				}
 				catch (std::exception &e) {
+					GS_TRACE_ERROR(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED, "Invalid jobId format=" << jobIdString);
 					isError = true;
 				}
 			}
@@ -4001,6 +4022,17 @@ void SystemService::ListenerSocketHandler::dispatch(
 				startTimeString = request.parameterMap_["startTime"].c_str();
 			}
 			CancelOption option(startTimeString);
+			if (request.parameterMap_.find("duration") !=
+				request.parameterMap_.end()) {
+				int64_t duration = atoi(request.parameterMap_["duration"].c_str());
+
+				if (duration > 0) {
+					int64_t currentTime = util::DateTime::now(false).getUnixTime();
+					if (currentTime >= duration * 1000) {
+						option.limitStartTime_ = currentTime - duration * 1000;
+					}
+				}
+			}
 
 			SQLExecutionManager *executionManager = clsSvc_->getSQLService()->getExecutionManager();
 			Event::Source eventSource(varSizeAlloc_);

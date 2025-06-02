@@ -723,6 +723,45 @@ SQLValues::VarContext& SQLValues::ValueSetHolder::getVarContext() {
 }
 
 
+bool SQLValues::Decremental::Utils::isSupported(TupleColumnType type) {
+	switch (TypeUtils::toNonNullable(type)) {
+	case TupleTypes::TYPE_LONG:
+		return true;
+	case TupleTypes::TYPE_DOUBLE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+uint32_t SQLValues::Decremental::Utils::getFixedSize(TupleColumnType type) {
+	switch (TypeUtils::toNonNullable(type)) {
+	case TupleTypes::TYPE_LONG:
+		return sizeof(AsLong);
+	case TupleTypes::TYPE_DOUBLE:
+		return sizeof(AsDouble);
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLValues::Decremental::Utils::assignInitialValue(
+		TupleColumnType type, void *addr) {
+	switch (TypeUtils::toNonNullable(type)) {
+	case TupleTypes::TYPE_LONG:
+		*static_cast<AsLong*>(addr) = AsLong();
+		break;
+	case TupleTypes::TYPE_DOUBLE:
+		*static_cast<AsDouble*>(addr) = AsDouble();
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+
 SQLValues::SummaryColumn::SummaryColumn(const Source &src) :
 		tupleColumn_(src.tupleColumn_),
 		offset_(src.offset_),
@@ -1045,9 +1084,6 @@ void SQLValues::SummaryTuple::swapValue(
 	assert(pos1 + count <= totalColumnList.size());
 	assert(pos2 + count <= totalColumnList.size());
 
-	ColumnList::const_iterator colIt1  = totalColumnList.begin() + pos1;
-	ColumnList::const_iterator colIt2  = totalColumnList.begin() + pos2;
-
 	uint64_t localData[2];
 	void *localAddr = &localData;
 	for (uint32_t i = 0; i < count; i++) {
@@ -1117,6 +1153,7 @@ SQLValues::SummaryTupleSet::SummaryTupleSet(
 		orderedDigestRestricted_(false),
 		readerColumnsDeep_(false),
 		headNullAccessible_(false),
+		valueDecremental_(false),
 		columnsCompleted_(false),
 		bodySize_(0),
 		initialBodyImage_(NULL),
@@ -1184,6 +1221,11 @@ void SQLValues::SummaryTupleSet::setReaderColumnsDeep(bool deep) {
 void SQLValues::SummaryTupleSet::setHeadNullAccessible(bool accessible) {
 	assert(!columnsCompleted_);
 	headNullAccessible_ = accessible;
+}
+
+void SQLValues::SummaryTupleSet::setValueDecremental(bool decremental) {
+	assert(!columnsCompleted_);
+	valueDecremental_ = decremental;
 }
 
 bool SQLValues::SummaryTupleSet::isDeepReaderColumnSupported(
@@ -1271,7 +1313,11 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 
 		const TupleColumnType type = it->type_;
 		uint32_t fieldSize = 0;
-		if (TypeUtils::isSomeFixed(type)) {
+		if (valueDecremental_ && readerPos < 0 &&
+				Decremental::Utils::isSupported(type)) {
+			fieldSize = Decremental::Utils::getFixedSize(type);
+		}
+		else if (TypeUtils::isSomeFixed(type)) {
 			fieldSize = static_cast<uint32_t>(TypeUtils::getFixedSize(type));
 		}
 		else if (!TypeUtils::isAny(type)) {
@@ -1419,7 +1465,14 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 				it != columnSourceList_.end(); ++it) {
 			if (firstModPos >= it->pos_) {
 				const TupleColumnType type = it->type_;
-				if (!TypeUtils::isSomeFixed(type) && !TypeUtils::isAny(type) &&
+				if (valueDecremental_ && it->tupleColumnPos_ < 0 &&
+						Decremental::Utils::isSupported(type)) {
+					Decremental::Utils::assignInitialValue(
+							type,
+							static_cast<uint8_t*>(initialBodyImage) + offset);
+				}
+				else if (!TypeUtils::isSomeFixed(type) &&
+						!TypeUtils::isAny(type) &&
 						bodySizeList[it->pos_] > 0) {
 					const void *data = NULL;
 					if (!nullableList[it->pos_]) {
@@ -2774,6 +2827,99 @@ SQLValues::ValueDigester SQLValues::TupleDigester::initialDigesterAt(
 }
 
 
+SQLValues::LongInt SQLValues::LongInt::multiply(const LongInt &base) const {
+	const bool negative = isNegative();
+	const bool baseNegative = base.isNegative();
+	if (negative || baseNegative) {
+		const bool retNegative = !(negative && baseNegative);
+		return negate(negative).multiplyUnsigned(
+				base.negate(baseNegative)).negate(retNegative);
+	}
+
+	return multiplyUnsigned(base);
+}
+
+SQLValues::LongInt SQLValues::LongInt::divide(const LongInt &base) const {
+	const bool negative = isNegative();
+	const bool baseNegative = base.isNegative();
+	if (negative || baseNegative) {
+		const bool retNegative = !(negative && baseNegative);
+		return negate(negative).divideUnsigned(
+				base.negate(baseNegative)).negate(retNegative);
+	}
+
+	return divideUnsigned(base);
+}
+
+SQLValues::LongInt SQLValues::LongInt::multiplyUnsigned(
+		const LongInt &base) const {
+	assert(isUnsignedWith(base));
+	const High highUnit = static_cast<High>(unit_);
+
+	const High v11 = static_cast<High>(low_) * static_cast<High>(base.low_);
+	const High v12 = static_cast<High>(low_) * base.high_;
+	const High v21 = high_ * static_cast<High>(base.low_);
+	const High v22 = high_ * base.high_;
+
+	const High high = (v22 * highUnit) + (v12 + v21) + (v11 / highUnit);
+	const Low low = static_cast<Low>(v11 % highUnit);
+
+	return LongInt(high, low, unit_);
+}
+
+SQLValues::LongInt SQLValues::LongInt::divideUnsigned(
+		const LongInt &base) const {
+	assert(isUnsignedWith(base));
+
+	if (base.isZero()) {
+		return errorZeroDivision();
+	}
+
+	const uint64_t u = static_cast<uint64_t>(unit_);
+
+	const uint64_t t1 = static_cast<uint64_t>(high_);
+	const uint64_t t2 = static_cast<uint64_t>(low_);
+
+	const uint64_t b1 = static_cast<uint64_t>(base.high_);
+	const uint64_t b2 = static_cast<uint64_t>(base.low_);
+
+
+	uint64_t r1;
+	uint64_t r2;
+	if (b1 > 0) {
+		const uint64_t m = std::numeric_limits<uint64_t>::max();
+		const uint64_t ct = std::max<uint64_t>(t1 / (m / u), 1);
+		const uint64_t cb = std::max<uint64_t>(b1 / (m / u), 1);
+		const uint64_t c = std::max(ct, cb);
+		const uint64_t db = b1 / c * u + b2 / c;
+		if (db > 0) {
+			const uint64_t dt = t1 / c * u + t2 / c;
+			const uint64_t r = dt / db;
+			r1 = r / u;
+			r2 = r % u;
+		}
+		else {
+			const uint64_t sb = b1 / cb * u + b2 / cb;
+			const uint64_t s1 = t1 / sb * cb;
+			const uint64_t s2 = t2 / sb * cb;
+			r1 = (s2 / u) + s1;
+			r2 = (s2 % u);
+		}
+	}
+	else {
+		const uint64_t s2 = t1 % b2 * u + t2;
+		r1 = t1 / b2;
+		r2 = s2 / b2;
+	}
+
+	return LongInt(static_cast<High>(r1), static_cast<Low>(r2), unit_);
+}
+
+SQLValues::LongInt SQLValues::LongInt::errorZeroDivision() {
+	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_DIVIDE_BY_ZERO, "Divide by 0");
+}
+
+
 void SQLValues::StringBuilder::expandCapacity(size_t actualSize) {
 	reserve(capacity() * 2, actualSize);
 
@@ -3236,6 +3382,19 @@ double SQLValues::ValueUtils::toDouble(const TupleValue &src) {
 		return dest;
 	}
 	return src.get<double>();
+}
+
+SQLValues::LongInt SQLValues::ValueUtils::toLongInt(const TupleValue &src) {
+	const TupleColumnType type = src.getType();
+
+	if (TypeUtils::isNull(type)) {
+		return LongInt::invalid();
+	}
+
+	return (TypeUtils::isTimestampFamily(type) ?
+			DateTimeElements(promoteValue<TupleTypes::TYPE_NANO_TIMESTAMP>(
+					src)).toLongInt() :
+			LongInt::ofElements(toLong(src), 0, LongInt::mega()));
 }
 
 SQLValues::DateTimeElements SQLValues::ValueUtils::toTimestamp(
@@ -3749,8 +3908,7 @@ TupleColumnType SQLValues::ValueUtils::toColumnType(const TupleValue &value) {
 
 SQLValues::DateTimeElements SQLValues::ValueUtils::checkTimestamp(
 		const DateTimeElements &tsValue) {
-	util::DateTime::Option option;
-	applyDateTimeOption(option);
+	const util::DateTime::Option &option = getDefaultDateTimeOption();
 
 	util::DateTime dateTime;
 	try {
@@ -3772,6 +3930,22 @@ SQLValues::DateTimeElements SQLValues::ValueUtils::checkTimestamp(
 
 	return DateTimeElements(
 			util::PreciseDateTime::ofNanoSeconds(dateTime, nanos));
+}
+
+SQLValues::DateTimeElements SQLValues::ValueUtils::getMinTimestamp() {
+	const int64_t epochMillis = 0;
+	return DateTimeElements(epochMillis);
+}
+
+SQLValues::DateTimeElements SQLValues::ValueUtils::getMaxTimestamp() {
+	const util::DateTime::Option &option = getDefaultDateTimeOption();
+	return DateTimeElements(util::PreciseDateTime::max(option));
+}
+
+util::DateTime::Option SQLValues::ValueUtils::getDefaultDateTimeOption() {
+	util::DateTime::Option option;
+	applyDateTimeOption(option);
+	return option;
 }
 
 void SQLValues::ValueUtils::applyDateTimeOption(
@@ -3885,6 +4059,80 @@ void SQLValues::ValueUtils::destroyValue(
 		ValueContext &cxt, TupleValue &value) {
 	cxt.getVarContext().destroyValue(value);
 	value = TupleValue();
+}
+
+TupleValue SQLValues::ValueUtils::duplicateAllocValue(
+		const util::StdAllocator<void, void> &alloc, const TupleValue &src) {
+	const TupleColumnType type = src.getType();
+	if (TypeUtils::isNormalFixed(type)) {
+		return src;
+	}
+	else if (type == TupleTypes::TYPE_NANO_TIMESTAMP) {
+		const TupleNanoTimestamp srcTs(src);
+		const size_t size = sizeof(NanoTimestamp);
+
+		util::StdAllocator<uint8_t, void> subAlloc = alloc;
+		void *addr = subAlloc.allocate(size);
+
+		NanoTimestamp *dest = static_cast<NanoTimestamp*>(addr);
+		*dest = srcTs;
+
+		return TupleValue(TupleNanoTimestamp(dest));
+	}
+	else if (type == TupleTypes::TYPE_STRING) {
+		const uint8_t *head = static_cast<const uint8_t*>(src.getRawData());
+		const uint8_t *body = static_cast<const uint8_t*>(src.varData());
+
+		const size_t headSize = static_cast<size_t>(body - head);
+		const size_t totalSize = headSize + src.varSize();
+
+		util::StdAllocator<uint8_t, void> subAlloc = alloc;
+		void *addr = subAlloc.allocate(totalSize);
+		memcpy(addr, head, totalSize);
+
+		return TupleValue(TupleString(addr));
+	}
+	else {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLValues::ValueUtils::destroyAllocValue(
+		const util::StdAllocator<void, void> &alloc, TupleValue &src) {
+	const TupleColumnType type = src.getType();
+	if (type == TupleTypes::TYPE_NANO_TIMESTAMP) {
+		util::StdAllocator<uint8_t, void> subAlloc = alloc;
+		subAlloc.deallocate(static_cast<uint8_t*>(src.getRawData()), 0);
+	}
+	else if (type == TupleTypes::TYPE_STRING) {
+		util::StdAllocator<uint8_t, void> subAlloc = alloc;
+		subAlloc.deallocate(static_cast<uint8_t*>(src.getRawData()), 0);
+	}
+	else if (!TypeUtils::isNormalFixed(type)) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	src = TupleValue();
+}
+
+const void* SQLValues::ValueUtils::getValueBody(
+		const TupleValue &value, size_t &size) {
+	const TupleList::TupleColumnType type = value.getType();
+	if (TupleColumnTypeUtils::isNormalFixed(type)) {
+		size = TupleColumnTypeUtils::getFixedSize(type);
+		return value.fixedData();
+	}
+	else if (TupleColumnTypeUtils::isLargeFixed(type)) {
+		size = TupleColumnTypeUtils::getFixedSize(type);
+		return value.getRawData();
+	}
+	else if (TupleColumnTypeUtils::isSingleVar(type)) {
+		size = value.varSize();
+		return value.varData();
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
 }
 
 void SQLValues::ValueUtils::moveValueToRoot(

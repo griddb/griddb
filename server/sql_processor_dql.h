@@ -581,14 +581,20 @@ public:
 			UTIL_OBJECT_CODER_OPTIONAL(subLimit_, -1),
 			orderColumns_,
 			output_,
-			UTIL_OBJECT_CODER_OPTIONAL(forWindow_, false));
+			UTIL_OBJECT_CODER_OPTIONAL(forWindow_, false),
+			windowOption_);
 
 private:
+	static void planExprToOptions(
+			const ProcPlan::Node::Expr &expr, SortColumnList &orderColumns,
+			ProcPlan::Node::ExprList *windowOption);
+
 	int64_t subOffset_;
 	int64_t subLimit_;
 	SortColumnList orderColumns_;
 	Expression *output_;
 	bool forWindow_;
+	Expression *windowOption_;
 };
 
 class DQLProcs::UnionOption {

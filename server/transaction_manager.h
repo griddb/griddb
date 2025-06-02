@@ -203,7 +203,7 @@ public:
 
 	int32_t getStatementType() const;
 
-	const ClientId &getClientId() const;
+	const ClientId& getClientId() const;
 
 	PartitionId getPartitionId() const;
 
@@ -214,7 +214,7 @@ public:
 
 	StatementId getStatementId() const;
 
-	const NodeDescriptor &getConnectionND() const;
+	const NodeDescriptor& getConnectionND() const;
 
 	void incrementAckCounter(uint32_t count = 1);
 	bool decrementAckCounter();
@@ -244,19 +244,19 @@ public:
 		return replyEventType_;
 	}
 
-	void copyClientId(ClientId &clientId) const {
+	void copyClientId(ClientId& clientId) const {
 		clientId = clientId_;
 	}
 
-	void copyAckClientId(ClientId &ackClientId) const {
+	void copyAckClientId(ClientId& ackClientId) const {
 		ackClientId = ackClientId_;
 	}
 
-	void setSQLResonseInfo(
-			PartitionId replPId, EventType replEventType, SessionId queryId,
-			const ClientId &clientId, bool isSync, StatementId execId,
-			int32_t subContainerId, ClientId &ackClientId,
-			int64_t syncId, uint8_t jobVersionId) {
+	void setSQLResponseInfo(
+		PartitionId replPId, EventType replEventType, SessionId queryId,
+		const ClientId& clientId, bool isSync, StatementId execId,
+		int32_t subContainerId, ClientId& ackClientId,
+		int64_t syncId, uint8_t jobVersionId) {
 		replyPId_ = replPId;
 		replyEventType_ = replEventType;
 		queryId_ = queryId;
@@ -289,7 +289,7 @@ public:
 		return subContainerId_;
 	};
 
-	void setContainerStatus(LargeContainerStatusType &status, NodeAffinityNumber &affinityNumber, IndexInfo &indexInfo) const;
+	void setContainerStatus(LargeContainerStatusType& status, NodeAffinityNumber& affinityNumber, IndexInfo& indexInfo) const;
 
 	/*!
 		@brief Task status
@@ -300,7 +300,7 @@ public:
 	};
 
 	void setTaskStatus(TaskStatus status) {
-		taskStatus_ =  status;
+		taskStatus_ = status;
 	}
 	TaskStatus getTaskStatus() const {
 		return taskStatus_;
@@ -312,10 +312,10 @@ public:
 		return originalStmtId_;
 	}
 
-	void addExtraMessage(const void *data, size_t size);
+	void addExtraMessage(const void* data, size_t size);
 	const std::vector<BinaryData*>& getExtraMessages() const;
 	void setMessage(const void* data, size_t size);
-	void setMessage(Serializable *mes);
+	void setMessage(Serializable* mes);
 	const BinaryData2* getMessage() const;
 
 private:

@@ -20,6 +20,7 @@
 */
 #include "database_manager.h"
 #include "sql_common.h"
+#include "transaction_context.h"
 
 Database::~Database() {
 	for (auto& dbEntry : dbMap_) {
@@ -132,6 +133,7 @@ void Database::getStats(util::StackAllocator& alloc, util::Map<DatabaseId, Datab
 	}
 }
 
+
 DatabaseManager::DatabaseManager(ConfigTable& configTable, GlobalVariableSizeAllocator& varAlloc, const PartitionGroupConfig& groupConfig) :
 	varAlloc_(varAlloc), config_(groupConfig),
 	enable_(configTable.get<bool>(CONFIG_TABLE_TXN_USE_MULTITENANT_MODE)), 
@@ -139,11 +141,16 @@ DatabaseManager::DatabaseManager(ConfigTable& configTable, GlobalVariableSizeAll
 	useRequestConstraint_(configTable.get<bool>(CONFIG_TABLE_TXN_USE_REQUEST_CONSTRAINT)),
 	checkInterval_(configTable.get<int32_t>(CONFIG_TABLE_TXN_CHECK_DATABASE_STATS_INTERVAL)),
 	limitDelayTime_(1000 * configTable.get<int32_t>(CONFIG_TABLE_TXN_LIMIT_DELAY_TIME)),
-	constraintMap_(varAlloc) {
+	constraintMap_(varAlloc), requestCountMap_(varAlloc) {
 	for (PartitionId pId = 0; pId < groupConfig.getPartitionCount(); pId++) {
 		databaseList_.push_back(ALLOC_VAR_SIZE_NEW(varAlloc_) Database(varAlloc_, pId, this));
 	}
 	databaseCounterList_.assign(groupConfig.getPartitionCount(), 0);
+	directMaxDbId_ = TXN_DATABASE_NUM_MAX;
+	util::Atomic<int64_t> initValue;
+	initValue = 0;
+	nosqlDirectRequestCounter_.assign(directMaxDbId_, initValue);
+	sqlDirectRequestCounter_.assign(directMaxDbId_, initValue);
 }
 
 DatabaseManager::~DatabaseManager()  {

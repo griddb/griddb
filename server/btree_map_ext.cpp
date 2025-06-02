@@ -24,6 +24,12 @@
 #include "btree_map.cpp"
 
 
+uint64_t BtreeMap::estimate(TransactionContext &txn, SearchContext &sc) {
+	EstimateFunc estimateFunc(txn, sc, this);
+	switchToBasicType(getKeyType(), estimateFunc);
+	return estimateFunc.ret_;
+}
+
 int32_t BtreeMap::searchBulk(
 		TransactionContext &txn, SearchContext &sc, util::XArray<OId> &idList,
 		OutputOrder outputOrder) {
@@ -516,6 +522,95 @@ bool BtreeMap::findNodeNext(
 	return false;
 }
 
+template <typename P, typename K, typename V, typename C>
+bool BtreeMap::findNodeCustom(
+		TransactionContext &txn, KeyValue<P, V> &val, BNode<K, V> &node,
+		int32_t &loc, C &cmp, Setting &setting) {
+	if (isEmpty()) {
+		node.reset();  
+		loc = 0;
+		return false;
+	}
+	else {
+		bool isUniqueKey = isUnique();
+		int32_t size;
+		getRootBNodeObject<K, V>(node);
+		BNode<K, V> *currentNode = &node;
+		while (1) {
+			OId nodeId;
+			size = currentNode->numkeyValues();
+			if (cmp(txn, *getObjectManager(), allocateStrategy_, val,
+					currentNode->getKeyValue(size - 1), setting) > 0) {
+				if (currentNode->isLeaf()) {
+					loc = size;
+					return false;
+				}
+				else {
+					nodeId = currentNode->getChild(txn, size);
+				}
+			}
+			else {
+				int32_t l = 0, r = size;
+				while (l < r) {
+					int32_t i = (l + r) >> 1;
+					int32_t currentCmpResult =
+						cmp(txn, *getObjectManager(), allocateStrategy_, val,
+							currentNode->getKeyValue(i), setting);
+					if (currentCmpResult > 0) {
+						l = i + 1;
+					}
+					else if (isUniqueKey && currentCmpResult == 0) {
+						loc = i;
+						return true;
+					}
+					else {
+						r = i;
+					}
+				}
+				assert(r == l);
+				int32_t cmpResult = cmp(txn, *getObjectManager(),
+					allocateStrategy_, val, currentNode->getKeyValue(l), setting);
+				if (cmpResult < 0) {
+					if (currentNode->isLeaf()) {
+						loc = l;
+						return false;
+					}
+					else {
+						nodeId = currentNode->getChild(txn, l);
+					}
+				}
+				else if (cmpResult > 0) {
+					if (currentNode->isLeaf()) {
+						loc = l + 1;
+						return false;
+					}
+					else {
+						nodeId = currentNode->getChild(txn, l + 1);
+					}
+				}
+				else {
+					if (currentNode->isRoot()) {
+						getRootBNodeObject<K, V>(node);
+					}
+					loc = l;
+					return true;
+				}
+			}
+			if (nodeId != UNDEF_OID) {
+				node.load(nodeId, false);
+				currentNode = &node;
+			}
+			else {
+				break;
+			}
+		}
+		assert(0);
+	}
+	node.reset();  
+	loc = 0;
+	return false;
+}
+
 template<typename P, typename K, typename V, BtreeMap::CompareComponent C>
 bool BtreeMap::findTopNodeNext(
 		TransactionContext &txn, KeyValue<P, V> &val, BNode<K, V> &node,
@@ -591,6 +686,278 @@ bool BtreeMap::findTopNodeNext(
 	return false;
 }
 
+template<
+		typename P, typename K, typename V,
+		BtreeMap::CompareComponent C>
+uint64_t BtreeMap::estimateAt(
+		TransactionContext &txn, SearchContext &sc) {
+	UTIL_STATIC_ASSERT(C != KEY_VALUE_COMPONENT);
+	UTIL_STATIC_ASSERT((!util::IsSame<V, uint32_t>::VALUE));
+
+	const OutputOrder outputOrder = ORDER_UNDEFINED;
+
+	TermConditionRewriter<P, K, V, OId> rewriter(txn, sc);
+	rewriter.rewrite();
+
+	Setting setting(getKeyType(), sc.isCaseSensitive(), getFuncInfo());
+	setting.initialize(txn.getDefaultAllocator(), sc, outputOrder);
+
+	TermCondition *startCond = setting.getStartKeyCondition();
+	TermCondition *endCond = setting.getEndKeyCondition();
+
+	LocationPath beginPath(txn.getDefaultAllocator());
+	LocationPath endPath(txn.getDefaultAllocator());
+
+	if (startCond != NULL) {
+		KeyValue<P, V> startKeyVal(
+				*reinterpret_cast<const P *>(startCond->value_), V());
+
+		if (endCond != NULL) {
+			KeyValue<P, V> endKeyVal(
+					*reinterpret_cast<const P *>(endCond->value_), V());
+
+			findLocationPath<P, K, V, C>(
+					txn, startKeyVal, startCond->isIncluded(), false, setting,
+					beginPath);
+			findLocationPath<P, K, V, C>(
+					txn, endKeyVal, endCond->isIncluded(), true, setting,
+					endPath);
+		}
+		else if (startCond->opType_ == DSExpression::EQ) {
+			KeyValue<P, V> endKeyVal(
+					*reinterpret_cast<const P *>(startCond->value_), V());
+
+			findLocationPath<P, K, V, C>(
+					txn, startKeyVal, startCond->isIncluded(), false, setting,
+					beginPath);
+			findLocationPath<P, K, V, C>(
+					txn, endKeyVal, endCond->isIncluded(), true, setting,
+					endPath);
+		}
+		else {
+			findLocationPath<P, K, V, C>(
+					txn, startKeyVal, startCond->isIncluded(), false, setting,
+					beginPath);
+			getTailLocationPath<K, V>(txn, endPath);
+		}
+	}
+	else if (endCond != NULL) {
+		KeyValue<P, V> endKeyVal(
+				*reinterpret_cast<const P *>(endCond->value_), V());
+
+		getHeadLocationPath<K, V>(txn, beginPath);
+		findLocationPath<P, K, V, C>(
+				txn, endKeyVal, endCond->isIncluded(), true, setting,
+				endPath);
+	}
+	else {
+		getHeadLocationPath<K, V>(txn, beginPath);
+		getTailLocationPath<K, V>(txn, endPath);
+	}
+
+	return estimatePathRange<K, V>(txn, beginPath, endPath);
+}
+
+template<typename K, typename V>
+uint64_t BtreeMap::estimatePathRange(
+		TransactionContext &txn, const LocationPath &beginPath,
+		const LocationPath &endPath) {
+	typedef std::list<
+			LocationPath,
+			util::StdAllocator<LocationPath, util::StackAllocator> > PathList;
+
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	PathList totalPathList(alloc);
+	totalPathList.push_back(beginPath);
+	totalPathList.push_back(endPath);
+
+	const uint32_t repeat = 3;
+	for (uint32_t i = 0; i < repeat; i++) {
+		bool found = false;
+		for (PathList::iterator it = totalPathList.begin();;) {
+			PathList::iterator nextIt = it;
+			if (++nextIt == totalPathList.end()) {
+				break;
+			}
+
+			if (!it->empty() && !nextIt->empty()) {
+				LocationPath path(alloc);
+				if (findMiddleLocationPath<K, V>(txn, *it, *nextIt, path)) {
+					found = true;
+					totalPathList.insert(it, path);
+				}
+			}
+
+			it = nextIt;
+		}
+		if (!found) {
+			break;
+		}
+	}
+
+	uint64_t size = 0;
+	if (!totalPathList.empty()) {
+		for (PathList::iterator it = totalPathList.begin();;) {
+			PathList::iterator nextIt = it;
+			if (++nextIt == totalPathList.end()) {
+				break;
+			}
+			size = mergePathRangeSize(
+					size, estimatePathRangeSub(*it, *nextIt));
+			it = nextIt;
+		}
+	}
+
+	return size;
+}
+
+uint64_t BtreeMap::estimatePathRangeSub(
+		const LocationPath &beginPath, const LocationPath &endPath) {
+	uint64_t size = std::numeric_limits<uint64_t>::max();
+	for (uint32_t i = 0;; i++) {
+		if (i >= beginPath.size() || i >= endPath.size()) {
+			if (i <= 0) {
+				size = 0;
+			}
+			break;
+		}
+
+		const int32_t width = (endPath[i].first - beginPath[i].first);
+		if (width < 0 ||
+				beginPath[i].second == 0 || endPath[i].second == 0) {
+			size = 0;
+			break;
+		}
+
+		size = size / beginPath[i].second * std::max<uint64_t>(width, 1);
+		if (width > 0) {
+			break;
+		}
+	}
+
+	return size;
+}
+
+uint64_t BtreeMap::mergePathRangeSize(uint64_t size1, uint64_t size2) {
+	const uint64_t max = std::numeric_limits<uint64_t>::max();
+	if (size1 > max - size2) {
+		return max;
+	}
+	return size1 + size2;
+}
+
+template<typename P, typename K, typename V, BtreeMap::CompareComponent C>
+void BtreeMap::findLocationPath(
+		TransactionContext &txn, KeyValue<P, V> &keyValue,
+		bool inclusive, bool less, Setting &setting, LocationPath &path) {
+	const bool cmpInclusive = (less ? false : inclusive);
+	BoundaryCmpFunctor<P, K, V, C> cmpFunc(true, cmpInclusive);
+	setting.setCompareNum((less ?
+			setting.getLessCompareNum() : setting.getGreaterCompareNum()));
+
+	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+	getRootBNodeObject<K, V>(node);
+	int32_t loc = 0;
+
+	findNodeCustom(txn, keyValue, node, loc, cmpFunc, setting);
+	nodeToLocationPath(txn, node, loc, path);
+}
+
+template<typename K, typename V>
+void BtreeMap::getHeadLocationPath(
+		TransactionContext &txn, LocationPath &path) {
+	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+	getRootBNodeObject<K, V>(node);
+	int32_t loc = 0;
+
+	nextPos(txn, node, loc);
+	nodeToLocationPath(txn, node, loc, path);
+}
+
+template<typename K, typename V>
+void BtreeMap::getTailLocationPath(
+		TransactionContext &txn, LocationPath &path) {
+	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+	getRootBNodeObject<K, V>(node);
+	int32_t loc = node.numkeyValues();
+
+	prevPos(txn, node, loc);
+	nodeToLocationPath(txn, node, loc, path);
+}
+
+template<typename K, typename V>
+bool BtreeMap::findMiddleLocationPath(
+		TransactionContext &txn, const LocationPath &beginPath,
+		const LocationPath &endPath, LocationPath &path) {
+	path.clear();
+
+	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+	getRootBNodeObject<K, V>(node);
+
+	for (uint32_t i = 0;; i++) {
+		const int32_t loc = beginPath[i].first;
+		if (i >= beginPath.size() ||
+				i >= endPath.size() ||
+				loc != endPath[i].first ||
+				node.isLeaf()) {
+			break;
+		}
+
+		const OId nodeId = node.getChild(txn, loc);
+		if (nodeId == UNDEF_OID) {
+			break;
+		}
+
+		path.push_back(LocationEntry(loc, node.numkeyValues()));
+		node.load(nodeId, false);
+	}
+
+	size_t pos = path.size();
+	int32_t startLoc = (pos < beginPath.size() ? beginPath[pos].first : 0);
+	int32_t endLoc = (pos < endPath.size() ?
+			endPath[pos].first : node.numkeyValues());
+	if (startLoc >= endLoc) {
+		return false;
+	}
+
+	for (;;) {
+		if (node.isLeaf() || startLoc >= endLoc) {
+			break;
+		}
+
+		const int32_t loc = startLoc + (endLoc - startLoc) / 2;
+		const OId nodeId = node.getChild(txn, loc);
+		if (nodeId == UNDEF_OID) {
+			break;
+		}
+
+		path.push_back(LocationEntry(loc, node.numkeyValues()));
+		node.load(node.getChild(txn, loc), false);
+
+		startLoc = 0;
+		endLoc = node.numkeyValues();
+	}
+
+	return true;
+}
+
+template<typename K, typename V>
+void BtreeMap::nodeToLocationPath(
+		TransactionContext &txn, BNode<K, V> &node, int32_t &loc,
+		LocationPath &path) {
+	path.clear();
+	for (;;) {
+		path.push_back(LocationEntry(loc, node.numkeyValues()));
+		if (node.isRoot()) {
+			break;
+		}
+
+		findUpNode(txn, node, loc);
+		node.load(node.getParentOId(), false);
+	}
+	std::reverse(path.begin(), path.end());
+}
+
 void BtreeMap::errorInvalidSearchCondition() {
 	GS_THROW_USER_ERROR(
 		GS_ERROR_DS_UNEXPECTED_ERROR, "Internal error");
@@ -656,4 +1023,9 @@ void BtreeMap::SearchBulkFunc::execute() {
 	else {
 		ret_ = tree_->findBulk<P, K, V, V, KEY_COMPONENT>(txn_, sc_, idList_, outputOrder_);
 	}
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::EstimateFunc::execute() {
+	ret_ = tree_->estimateAt<P, K, V, KEY_COMPONENT>(txn_, sc_);
 }

@@ -659,12 +659,12 @@ void LoginHandler::authInternalUser(util::StackAllocator &alloc, LoginContext &l
 /*!
 	@brief Handler Operator
 */
-void LoginHandler::operator()(EventContext &ec, Event &ev) {
+void LoginHandler::operator()(EventContext& ec, Event& ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 	UTIL_TRACE_DEBUG(AUTH_OPERATION, "LoginHandler::operator()");
 	TEST_PRINT("<<<LoginHandler>>> START\n");
 
-	util::StackAllocator &alloc = ec.getAllocator();
+	util::StackAllocator& alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Request request(alloc, getRequestSource(ev));

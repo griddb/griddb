@@ -142,9 +142,11 @@ bool SQLTableInfo::BasicIndexInfoList::isIndexed(
 			columns_.begin(), columns_.end(), firstColumnId);
 }
 
-SQLTableInfoList::SQLTableInfoList(util::StackAllocator &alloc) :
+SQLTableInfoList::SQLTableInfoList(
+		util::StackAllocator &alloc, SQLIndexStatsCache *indexStats) :
 		list_(alloc),
-		defaultDBName_(NULL) {
+		defaultDBName_(NULL),
+		indexStats_(indexStats) {
 }
 
 const SQLTableInfo& SQLTableInfoList::add(const SQLTableInfo &info) {
@@ -338,6 +340,14 @@ const SQLTableInfo::BasicIndexInfoList* SQLTableInfoList::getIndexInfoList(
 		const SQLTableInfo::IdInfo &idInfo) const {
 	const SQLTableInfo &tableInfo = resolve(idInfo.id_);
 	return tableInfo.basicIndexInfoList_;
+}
+
+SQLIndexStatsCache& SQLTableInfoList::getIndexStats() const {
+	if (indexStats_ == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
+	}
+	return *indexStats_;
 }
 
 util::StackAllocator& SQLTableInfoList::getAllocator() {
@@ -1018,6 +1028,12 @@ SQLPreparedPlan::Constants::CONSTANT_LIST[] = {
 	UTIL_NAME_CODER_ENTRY(STR_EDGE_DEGREE),
 	UTIL_NAME_CODER_ENTRY(STR_EDGE_WEAKNESS),
 
+	UTIL_NAME_CODER_ENTRY(STR_NONE),
+	UTIL_NAME_CODER_ENTRY(STR_TABLE),
+	UTIL_NAME_CODER_ENTRY(STR_INDEX),
+	UTIL_NAME_CODER_ENTRY(STR_SCHEMA),
+	UTIL_NAME_CODER_ENTRY(STR_SYNTAX),
+
 	UTIL_NAME_CODER_ENTRY(STR_HINT)
 };
 
@@ -1049,16 +1065,34 @@ bool SQLPreparedPlan::Profile::clearIfEmpty(Profile *&profile) {
 }
 
 SQLPreparedPlan::OptProfile::OptProfile() :
-		joinReordering_(NULL) {
+		joinReordering_(NULL),
+		joinDriving_(NULL) {
+}
+
+template<>
+util::Vector<SQLPreparedPlan::OptProfile::Join>*&
+SQLPreparedPlan::OptProfile::getEntryList() {
+	return joinReordering_;
+}
+
+template<>
+util::Vector<SQLPreparedPlan::OptProfile::JoinDriving>*&
+SQLPreparedPlan::OptProfile::getEntryList() {
+	return joinDriving_;
 }
 
 bool SQLPreparedPlan::OptProfile::clearIfEmpty(OptProfile *&profile) {
-	if (profile != NULL && (
-			profile->joinReordering_ == NULL ||
-			profile->joinReordering_->empty())) {
+	if (profile != NULL &&
+			isListEmpty(profile->joinReordering_) &&
+			isListEmpty(profile->joinDriving_)) {
 		profile = NULL;
 	}
 	return (profile == NULL);
+}
+
+template<typename T>
+bool SQLPreparedPlan::OptProfile::isListEmpty(const util::Vector<T> *list) {
+	return (list == NULL || list->empty());
 }
 
 SQLPreparedPlan::OptProfile::Join::Join() :
@@ -1096,6 +1130,24 @@ SQLPreparedPlan::OptProfile::JoinCost::JoinCost() :
 		edgeDegree_(0),
 		edgeWeakness_(0),
 		approxSize_(-1) {
+}
+
+SQLPreparedPlan::OptProfile::JoinDriving::JoinDriving() :
+		driving_(NULL),
+		inner_(NULL),
+		left_(NULL),
+		right_(NULL),
+		profileKey_(-1) {
+}
+
+SQLPreparedPlan::OptProfile::JoinDrivingInput::JoinDrivingInput() :
+		qName_(NULL),
+		cost_(NULL),
+		tableScanCost_(NULL),
+		indexScanCost_(NULL),
+		criterion_(Constants::END_STR),
+		indexed_(false),
+		reducible_(false) {
 }
 
 const util::NameCoderEntry<SQLCompiler::Meta::StringConstant>
@@ -1276,7 +1328,9 @@ const uint64_t SQLCompiler::JOIN_SCORE_MAX = UINT64_C(1) << 10;
 const uint64_t SQLCompiler::DEFAULT_MAX_INPUT_COUNT =
 		std::numeric_limits<uint64_t>::max();
 const uint64_t SQLCompiler::DEFAULT_MAX_EXPANSION_COUNT = 100;
+
 const SQLPlanningVersion SQLCompiler::LEGACY_JOIN_REORDERING_VERSION(5, 4);
+const SQLPlanningVersion SQLCompiler::LEGACY_JOIN_DRIVING_VERSION(5, 7);
 
 SQLCompiler::SQLCompiler(
 		TupleValue::VarContext &varCxt, const CompileOption *option) :
@@ -1545,7 +1599,7 @@ bool SQLCompiler::reducePartitionedTargetByTQL(
 	TupleValue::VarContext varCxt;
 	varCxt.setStackAllocator(&alloc);
 
-	TableInfoList infoList(alloc);
+	TableInfoList infoList(alloc, NULL);
 	const TableInfo addedTableInfo = infoList.add(tableInfo);
 
 	SQLCompiler compiler(varCxt);
@@ -1561,9 +1615,10 @@ bool SQLCompiler::reducePartitionedTargetByTQL(
 			inExpr, plan, MODE_NORMAL_SELECT, false, NULL);
 
 	bool placeholderAffected;
+	util::Set<int64_t> unmatchAffinitySet(alloc);
 	return ProcessorUtils::reducePartitionedTarget(
 			varCxt, addedTableInfo, expr, uncovered, affinityList, subList,
-			NULL, placeholderAffected);
+			NULL, placeholderAffected, unmatchAffinitySet);
 }
 
 FullContainerKey* SQLCompiler::predicateToContainerKeyByTQL(
@@ -1670,6 +1725,7 @@ void SQLCompiler::genDistributedPlan(Plan &plan, bool costCheckOnly) {
 		const SQLTableInfo::BasicIndexInfoList *indexInfoList;
 		bool uncovered;
 		util::Vector<uint32_t> subList(alloc_);
+		util::Set<int64_t> unmatchSubSet(alloc_);
 		{
 			const SQLPreparedPlan::Node &orgNode = *orgNodeRef;
 			const Expr &predExpr = (orgNode.predList_.empty() ?
@@ -1684,7 +1740,8 @@ void SQLCompiler::genDistributedPlan(Plan &plan, bool costCheckOnly) {
 			bool placeholderAffected;
 			ProcessorUtils::reducePartitionedTarget(
 					getVarContext(), tableInfo, predExpr, uncovered, NULL,
-					&subList, parameterList, placeholderAffected);
+					&subList, parameterList, placeholderAffected,
+					unmatchSubSet);
 
 			recompileOnBindRequired_ |= placeholderAffected;
 			indexInfoList = orgNode.indexInfoList_;
@@ -1709,6 +1766,9 @@ void SQLCompiler::genDistributedPlan(Plan &plan, bool costCheckOnly) {
 			}
 
 			const int32_t subContainerId = static_cast<int32_t>(*it);
+			const bool subUnmatch = (
+					unmatchSubSet.find(subInfo.nodeAffinity_) !=
+					unmatchSubSet.end());
 
 			PlanNode &subScan = plan.append(SQLType::EXEC_SCAN);
 			const PlanNode &orgNode = *orgNodeRef; 
@@ -1731,6 +1791,9 @@ void SQLCompiler::genDistributedPlan(Plan &plan, bool costCheckOnly) {
 					orgNode.predList_.begin(), orgNode.predList_.end());
 			if (containerExpirable) {
 				subScan.cmdOptionFlag_ |= PlanNode::Config::CMD_OPT_SCAN_EXPIRABLE;
+			}
+			if (subUnmatch) {
+				subScan.limit_ = 0;
 			}
 		}
 
@@ -3368,8 +3431,8 @@ void SQLCompiler::adjustRangeGroupOutput(
 SQLCompiler::Expr SQLCompiler::resolveRangeGroupPredicate(
 		const Plan &plan, const Expr &whereCond, const Expr &keyExpr,
 		const Expr &keyExprInCond, const Expr &optionExpr) {
+	const ColumnType keyType = keyExpr.columnType_;
 	{
-		const ColumnType keyType = keyExpr.columnType_;
 		if (!ColumnTypeUtils::isNull(keyType) &&
 				!ProcessorUtils::isRangeGroupSupportedType(keyType)) {
 			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
@@ -3400,41 +3463,52 @@ SQLCompiler::Expr SQLCompiler::resolveRangeGroupPredicate(
 		}
 	}
 
-	assert(optionExpr.op_ == SQLType::EXPR_RANGE_GROUP);
-	const Type fillType = (*optionExpr.next_)[1]->op_;
-	const int64_t baseInterval = (*optionExpr.next_)[2]->value_.get<int64_t>();
-	const int64_t unit = (*optionExpr.next_)[3]->value_.get<int64_t>();
-	const int64_t baseOffset = (*optionExpr.next_)[4]->value_.get<int64_t>();
-	const TupleValue &timeZone =
-			resolveRangeGroupTimeZone((*optionExpr.next_)[5]->value_);
+	Expr *inKeyExpr;
+	Type fillType;
+	int64_t baseInterval;
+	util::DateTime::FieldType unit;
+	int64_t baseOffset;
+	util::TimeZone timeZone;
+	getRangeGroupOptions(
+			optionExpr, inKeyExpr, fillType, baseInterval, unit, baseOffset,
+			timeZone);
 
-	int64_t interval = resolveRangeGroupIntervalOrOffset(baseInterval, unit, true);
-	int64_t offset = resolveRangeGroupIntervalOrOffset(baseOffset, unit, false);
-	adjustRangeGroupInterval(interval, offset, timeZone);
+	TupleValue interval;
+	TupleValue offset;
+	ProcessorUtils::resolveRangeGroupInterval(
+			alloc_, keyType, baseInterval, baseOffset, unit, timeZone,
+			interval, offset);
+
 	if (!ProcessorUtils::adjustRangeGroupBoundary(
-			lower, upper, interval, offset)) {
+			alloc_, lower, upper, interval, offset)) {
 		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
 				"Boundary value for GROUP BY RANGE clause must not be "
 				"less than offset");
 	}
 
 	const int64_t limit = getMaxGeneratedRows(plan);
-	return makeRangeGroupPredicate(keyExpr, fillType, interval, lower, upper, limit);
+	return makeRangeGroupPredicate(
+			keyExpr, fillType, interval, lower, upper, limit);
 }
 
 SQLCompiler::Expr SQLCompiler::makeRangeGroupIdExpr(
 		Plan &plan, const Expr &optionExpr) {
-	assert(optionExpr.op_ == SQLType::EXPR_RANGE_GROUP);
-	Expr *inKeyExpr = (*optionExpr.next_)[0];
-	const int64_t baseInterval = (*optionExpr.next_)[2]->value_.get<int64_t>();
-	const int64_t unit = (*optionExpr.next_)[3]->value_.get<int64_t>();
-	const int64_t baseOffset = (*optionExpr.next_)[4]->value_.get<int64_t>();
-	const TupleValue &timeZone =
-			resolveRangeGroupTimeZone((*optionExpr.next_)[5]->value_);
+	Expr *inKeyExpr;
+	Type fillType;
+	int64_t baseInterval;
+	util::DateTime::FieldType unit;
+	int64_t baseOffset;
+	util::TimeZone timeZone;
+	getRangeGroupOptions(
+			optionExpr, inKeyExpr, fillType, baseInterval, unit, baseOffset,
+			timeZone);
 
-	int64_t interval = resolveRangeGroupIntervalOrOffset(baseInterval, unit, true);
-	int64_t offset = resolveRangeGroupIntervalOrOffset(baseOffset, unit, false);
-	adjustRangeGroupInterval(interval, offset, timeZone);
+	const ColumnType keyType = inKeyExpr->columnType_;
+	TupleValue interval;
+	TupleValue offset;
+	ProcessorUtils::resolveRangeGroupInterval(
+			alloc_, keyType, baseInterval, baseOffset, unit, timeZone,
+			interval, offset);
 
 	ExprList inPredList(alloc_);
 	inPredList.push_back(inKeyExpr);
@@ -3446,68 +3520,39 @@ SQLCompiler::Expr SQLCompiler::makeRangeGroupIdExpr(
 	outExpr.op_ = SQLType::EXPR_RANGE_GROUP_ID;
 	outExpr.next_ = ALLOC_NEW(alloc_) ExprList(alloc_);
 	outExpr.next_->push_back(outKeyExpr);
-	outExpr.next_->push_back(makeRangeGroupConst(TupleValue(interval)));
-	outExpr.next_->push_back(makeRangeGroupConst(TupleValue(offset)));
+	outExpr.next_->push_back(makeRangeGroupConst(interval));
+	outExpr.next_->push_back(makeRangeGroupConst(offset));
 
 	return outExpr;
 }
 
 SQLCompiler::Expr SQLCompiler::makeRangeGroupPredicate(
-		const Expr &keyExpr, Type fillType, int64_t interval,
-		TupleValue lower, TupleValue upper, int64_t limit) {
+		const Expr &keyExpr, Type fillType, const TupleValue &interval,
+		const TupleValue &lower, const TupleValue &upper, int64_t limit) {
 	Expr expr(alloc_);
 	expr.op_ = SQLType::EXPR_RANGE_GROUP;
 	expr.next_ = ALLOC_NEW(alloc_) ExprList(alloc_);
 	expr.next_->push_back(ALLOC_NEW(alloc_) Expr(keyExpr));
 	expr.next_->push_back(Expr::makeExpr(alloc_, fillType));
-	expr.next_->push_back(makeRangeGroupConst(TupleValue(interval)));
+	expr.next_->push_back(makeRangeGroupConst(interval));
 	expr.next_->push_back(makeRangeGroupConst(lower));
 	expr.next_->push_back(makeRangeGroupConst(upper));
 	expr.next_->push_back(makeRangeGroupConst(TupleValue(limit)));
 	return expr;
 }
 
-int64_t SQLCompiler::resolveRangeGroupIntervalOrOffset(
-		int64_t baseInterval, int64_t unit, bool forInterval) {
-	util::DateTime dt(0);
-	try {
-		dt.addField(baseInterval, static_cast<util::DateTime::FieldType>(unit));
-	}
-	catch (util::UtilityException &e) {
-		const char8_t *target = (forInterval ? "interval" : "offset");
-		GS_RETHROW_USER_ERROR_CODED(
-				GS_ERROR_SQL_COMPILE_LIMIT_EXCEEDED,
-				e, "Too large range group " << target <<" (reason=" <<
-				e.getField(util::Exception::FIELD_MESSAGE) << ")");
-	}
-	return dt.getUnixTime();
-}
-
-void SQLCompiler::adjustRangeGroupInterval(
-		int64_t &interval, int64_t &offset, const TupleValue &timeZone) {
-	int64_t outInterval = std::max<int64_t>(interval, 1);
-	int64_t outOffset = std::max<int64_t>(offset, 0) % outInterval;
-
-	if (!ColumnTypeUtils::isNull(timeZone.getType())) {
-		const int64_t zoneOffset = timeZone.get<int64_t>();
-		int64_t diff;
-		if (zoneOffset >= 0) {
-			diff = zoneOffset % outInterval;
-		}
-		else {
-			diff = outInterval - ((-zoneOffset) % outInterval);
-		}
-
-		if (outOffset >= outInterval - diff) {
-			outOffset += diff - outInterval;
-		}
-		else {
-			outOffset += diff;
-		}
-	}
-
-	interval = outInterval;
-	offset = outOffset;
+void SQLCompiler::getRangeGroupOptions(
+		const Expr &optionExpr, Expr *&inKeyExpr, Type &fillType,
+		int64_t &baseInterval, util::DateTime::FieldType &unit,
+		int64_t &baseOffset, util::TimeZone &timeZone) {
+	assert(optionExpr.op_ == SQLType::EXPR_RANGE_GROUP);
+	inKeyExpr = (*optionExpr.next_)[0];
+	fillType = (*optionExpr.next_)[1]->op_;
+	baseInterval = (*optionExpr.next_)[2]->value_.get<int64_t>();
+	unit = static_cast<util::DateTime::FieldType>(
+			(*optionExpr.next_)[3]->value_.get<int64_t>());
+	baseOffset = (*optionExpr.next_)[4]->value_.get<int64_t>();
+	timeZone = resolveRangeGroupTimeZone((*optionExpr.next_)[5]->value_);
 }
 
 bool SQLCompiler::findRangeGroupBoundary(
@@ -3564,9 +3609,8 @@ bool SQLCompiler::findRangeGroupBoundary(
 				!ProcessorUtils::isRangeGroupSupportedType(valueType)) {
 			return false;
 		}
-		value = ProcessorUtils::getRangeGroupBoundary(
-				alloc_, keyType, rhs->value_, forLower, inclusive);
-		return true;
+		return ProcessorUtils::findRangeGroupBoundary(
+				alloc_, keyType, rhs->value_, forLower, inclusive, value);
 	}
 
 	bool found = false;
@@ -3578,39 +3622,26 @@ bool SQLCompiler::findRangeGroupBoundary(
 		}
 
 		found = true;
-		if (ColumnTypeUtils::isNull(subValue.getType())) {
-			lastValue = TupleValue();
-			break;
-		}
-
-		if (ColumnTypeUtils::isNull(lastValue.getType())) {
-			lastValue = subValue;
-			continue;
-		}
-
-		const int64_t base1 = subValue.get<int64_t>();
-		const int64_t base2 = lastValue.get<int64_t>();
-		lastValue = TupleValue(forLower ?
-				std::max(base1, base2) :
-				std::min(base1, base2));
+		lastValue = ProcessorUtils::mergeRangeGroupBoundary(
+				lastValue, subValue, forLower);
 	}
 
 	value = lastValue;
 	return found;
 }
 
-TupleValue SQLCompiler::resolveRangeGroupTimeZone(const TupleValue &specified) {
+util::TimeZone SQLCompiler::resolveRangeGroupTimeZone(
+		const TupleValue &specified) {
 	if (!ColumnTypeUtils::isNull(specified.getType())) {
-		return specified;
+		return util::TimeZone::ofOffsetMillis(specified.get<int64_t>());
 	}
 
 	const util::TimeZone &zone = getCompileOption().getTimeZone();
 	if (!zone.isEmpty()) {
-		const int64_t offsetMillis = zone.getOffsetMillis();
-		return TupleValue(offsetMillis);
+		return zone;
 	}
 
-	return TupleValue();
+	return util::TimeZone();
 }
 
 SQLCompiler::Expr* SQLCompiler::makeRangeGroupConst(const TupleValue &value) {
@@ -4143,6 +4174,8 @@ void SQLCompiler::genWindowSortPlan(
 		if (cxt.inSubQuery_) {
 			tmpPredList.push_back(genColumnExpr(plan, 0, 0));
 		}
+
+
 		tmpPredList.insert(
 				tmpPredList.end(),
 				overCxt.windowPartitionByList_.begin(),
@@ -4187,6 +4220,367 @@ void SQLCompiler::appendUniqueExpr(const PlanExprList &appendList, PlanExprList 
 	}
 }
 
+void SQLCompiler::genFrameOptionExpr(
+		GenOverContext& overCxt, PlanExprList& tmpFrameOptionList,
+		Plan& plan) {
+	const Expr *windowExpr = overCxt.windowExpr_;
+
+	const SyntaxTree::WindowOption *windowOption = windowExpr->windowOpt_;
+	const SyntaxTree::WindowFrameOption *frameOption =
+			windowOption->frameOption_;
+
+	const SyntaxTree::WindowFrameBoundary *frameStartBoundary =
+			frameOption->frameStartBoundary_;
+	const SyntaxTree::WindowFrameBoundary *frameFinishBoundary =
+			frameOption->frameFinishBoundary_;
+
+	assert(windowExpr);
+	checkWindowFrameFunctionType(*windowExpr);
+
+	int64_t frameFlags = windowFrameModeToFlag(frameOption->frameMode_);
+
+	if (!frameStartBoundary) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, windowExpr,
+				"Frame range not specified");
+	}
+	bool existStartValue = false;
+	switch (frameStartBoundary->boundaryType_) {
+	case SyntaxTree::WindowFrameBoundary::BOUNDARY_CURRENT_ROW:
+		break;
+	case SyntaxTree::WindowFrameBoundary::BOUNDARY_UNBOUNDED_PRECEDING:
+		frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_START_PRECEDING);
+		break;
+	case SyntaxTree::WindowFrameBoundary::BOUNDARY_UNBOUNDED_FOLLOWING:
+		frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_START_FOLLOWING);
+		break;
+	case SyntaxTree::WindowFrameBoundary::BOUNDARY_N_PRECEDING:
+		frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_START_PRECEDING);
+		existStartValue = true;
+		break;
+	case SyntaxTree::WindowFrameBoundary::BOUNDARY_N_FOLLOWING:
+		frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_START_FOLLOWING);
+		existStartValue = true;
+		break;
+	default:
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+		break;
+	}
+
+	bool existFinishValue = false;
+	if (frameFinishBoundary) {
+		switch (frameFinishBoundary->boundaryType_) {
+		case SyntaxTree::WindowFrameBoundary::BOUNDARY_CURRENT_ROW:
+			break;
+		case SyntaxTree::WindowFrameBoundary::BOUNDARY_UNBOUNDED_PRECEDING:
+			frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_FINISH_PRECEDING);
+			break;
+		case SyntaxTree::WindowFrameBoundary::BOUNDARY_UNBOUNDED_FOLLOWING:
+			frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_FINISH_FOLLOWING);
+			break;
+		case SyntaxTree::WindowFrameBoundary::BOUNDARY_N_PRECEDING:
+			frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_FINISH_PRECEDING);
+			existFinishValue = true;
+			break;
+		case SyntaxTree::WindowFrameBoundary::BOUNDARY_N_FOLLOWING:
+			frameFlags |= windowFrameTypeToFlag(SQLType::FRAME_FINISH_FOLLOWING);
+			existFinishValue = true;
+			break;
+		default:
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+			break;
+		}
+	}
+
+	frameFlags |= getWindowFrameOrderingFlag(overCxt.windowOrderByList_);
+
+	const TupleValue &startValue = (existStartValue ?
+			getWindowFrameBoundaryValue(*frameStartBoundary, plan) :
+			TupleValue());
+	const TupleValue &finishValue = (existFinishValue ?
+			getWindowFrameBoundaryValue(*frameFinishBoundary, plan) :
+			TupleValue());
+
+	checkWindowFrameValues(startValue, finishValue, frameFlags, windowExpr);
+
+	checkWindowFrameBoundaryOptions(
+			frameFlags, startValue, finishValue, windowExpr);
+	checkWindowFrameFlags(frameFlags, windowExpr);
+
+	checkWindowFrameOrdering(
+			overCxt.windowOrderByList_, frameFlags, startValue, finishValue,
+			windowExpr);
+
+	const Mode mode = MODE_NORMAL_SELECT;
+	const Expr frameFlagsExpr = genConstExpr(plan, TupleValue(frameFlags), mode);
+	const Expr startValueExpr = genConstExpr(plan, startValue, mode);
+	const Expr finishValueExpr = genConstExpr(plan, finishValue, mode);
+
+	tmpFrameOptionList.push_back(frameFlagsExpr);
+	tmpFrameOptionList.push_back(startValueExpr);
+	tmpFrameOptionList.push_back(finishValueExpr);
+}
+
+TupleValue SQLCompiler::getWindowFrameBoundaryValue(
+		const SyntaxTree::WindowFrameBoundary &boundary, Plan &plan) {
+	const Expr *expr = boundary.boundaryValueExpr_;
+	if (expr) {
+		const int64_t intRange = genFrameRangeValue(expr, plan);
+		if (intRange < 0) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, expr,
+					"Frame range expression must be positive integral value");
+		}
+		return TupleValue(intRange);
+	}
+	else {
+		const int64_t timeRange = boundary.boundaryLongValue_;
+		if (timeRange < 0) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, expr,
+					"Frame range expression must be positive integral value");
+		}
+
+		const util::DateTime::FieldType timeUnit =
+				static_cast<util::DateTime::FieldType>(
+						boundary.boundaryTimeUnit_);
+		util::PreciseDateTime time;
+		try {
+			time.addField(timeRange, timeUnit, util::DateTime::ZonedOption());
+		}
+		catch (util::UtilityException &e) {
+			SQL_COMPILER_RETHROW_ERROR(
+					e, expr, "Failed to check time range (reason=" <<
+					GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+
+		return ProcessorUtils::makeTimestampValue(alloc_, time);
+	}
+}
+
+int64_t SQLCompiler::genFrameRangeValue(const Expr *inExpr, Plan &plan) {
+	const Mode mode = MODE_NORMAL_SELECT;
+
+	if (inExpr == NULL) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	const Expr targetExpr = genScalarExpr(*inExpr, plan, mode, false, NULL);
+	if (targetExpr.op_ != SQLType::EXPR_CONSTANT) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Frame range expression must be constant");
+	}
+
+	const TupleValue& targetValue = targetExpr.value_;
+	if (!ColumnTypeUtils::isIntegral(targetValue.getType())) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Frame range expression must be evaluated as integral value");
+	}
+
+	const bool implicit = true;
+	const TupleValue& value = ProcessorUtils::convertType(
+		getVarContext(), targetValue, TupleList::TYPE_LONG, implicit);
+
+	assert(value.getType() == TupleList::TYPE_LONG);
+
+	return value.get<int64_t>();
+}
+
+void SQLCompiler::checkWindowFrameFunctionType(const Expr &windowExpr) {
+	Type opType = windowExpr.op_;
+	if (opType == SQLType::EXPR_FUNCTION) {
+		opType = resolveFunction(windowExpr);
+	}
+
+	bool windowOnly;
+	bool pseudoWindow;
+	const bool forWindow = ProcessorUtils::isWindowExprType(
+			opType, windowOnly, pseudoWindow);
+	if (!forWindow || windowOnly || pseudoWindow) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &windowExpr,
+				"Frame is not allowed for the speficied window function");
+	}
+}
+
+void SQLCompiler::checkWindowFrameValues(
+		const TupleValue &startValue, const TupleValue &finishValue,
+		int64_t flags, const Expr *inExpr) {
+	const bool withStartValue = !ColumnTypeUtils::isNull(startValue.getType());
+	const bool withFinishValue = !ColumnTypeUtils::isNull(finishValue.getType());
+	if (!withStartValue || !withFinishValue) {
+		return;
+	}
+
+	if ((flags & windowFrameTypeToFlag(SQLType::FRAME_ROWS)) != 0) {
+		const ColumnType promoType = ProcessorUtils::findPromotionType(
+				startValue.getType(), finishValue.getType());
+		if (ColumnTypeUtils::isNull(promoType)) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+					"Incompatible type between window frame range values");
+		}
+	}
+
+	const bool startPreceding = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_START_PRECEDING)) != 0);
+	const bool startFollowing = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_START_FOLLOWING)) != 0);
+
+	const bool finishPreceding = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_FINISH_PRECEDING)) != 0);
+	const bool finishFollowing = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_FINISH_FOLLOWING)) != 0);
+
+	do {
+		int32_t direction;
+		if (startPreceding && finishPreceding) {
+			direction = -1;
+		}
+		else if (startFollowing && finishFollowing) {
+			direction = 1;
+		}
+		else {
+			break;
+		}
+
+		if (SQLProcessor::ValueUtils::orderValue(
+				startValue, finishValue) * direction > 0) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+					"Empty window frame range");
+		}
+	}
+	while (false);
+}
+
+void SQLCompiler::checkWindowFrameBoundaryOptions(
+		int64_t flags, const TupleValue &startValue,
+		const TupleValue &finishValue, const Expr *inExpr) {
+	const bool startFollowing = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_START_FOLLOWING)) != 0);
+	const bool finishPreceding = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_FINISH_PRECEDING)) != 0);
+
+	const bool withStartValue = !ColumnTypeUtils::isNull(startValue.getType());
+	const bool withFinishValue = !ColumnTypeUtils::isNull(finishValue.getType());
+
+	if (startFollowing && !withStartValue) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Unacceptable frame directions (following unbounded, ...)");
+	}
+
+	if (finishPreceding && !withFinishValue) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Unacceptable frame directions (..., preceding unbounded)");
+	}
+}
+
+void SQLCompiler::checkWindowFrameFlags(int64_t flags, const Expr *inExpr) {
+	const bool startPreceding = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_START_PRECEDING)) != 0);
+	const bool startFollowing = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_START_FOLLOWING)) != 0);
+
+	const bool finishPreceding = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_FINISH_PRECEDING)) != 0);
+	const bool finishFollowing = ((flags & windowFrameTypeToFlag(
+			SQLType::FRAME_FINISH_FOLLOWING)) != 0);
+
+	if (startFollowing && finishPreceding) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Unacceptable frame directions (following, preceding)");
+	}
+
+	if ((!startPreceding && !startFollowing) && finishPreceding) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Unacceptable frame directions (current, preceding)");
+	}
+
+	if (startFollowing && (!finishPreceding && !finishFollowing)) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Unacceptable frame directions (following, current)");
+	}
+}
+
+void SQLCompiler::checkWindowFrameOrdering(
+		const PlanExprList &orderByList, int64_t flags,
+		const TupleValue &startValue, const TupleValue &finishValue,
+		const Expr *inExpr) {
+	if (orderByList.empty()) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"ORDER BY not specified in OVER clause with window frame");
+	}
+
+	if (orderByList.size() != 1) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+				"Multiple ORDER BY columns are not allowed "
+				"in OVER clause with window frame");
+	}
+
+	const ColumnType columnType = orderByList.front().columnType_;
+	for (size_t i = 0; i < 2; i++) {
+		const TupleValue &value = (i == 0 ? startValue : finishValue);
+		const ColumnType valueType = value.getType();
+		if (ColumnTypeUtils::isNull(valueType)) {
+			continue;
+		}
+
+		if ((flags & windowFrameTypeToFlag(SQLType::FRAME_ROWS)) == 0) {
+			const ColumnType promoType =
+					ProcessorUtils::findPromotionType(columnType, valueType);
+			if (ColumnTypeUtils::isNull(promoType)) {
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+						"Incompatible range value type with ORDER BY "
+						"column specified in OVER clause with window frame");
+			}
+		}
+		else {
+			if (valueType != TupleList::TYPE_LONG) {
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, inExpr,
+						"Unacceptable range value type specified "
+						"in ROWS mode of window frame");
+			}
+		}
+	}
+}
+
+int64_t SQLCompiler::windowFrameModeToFlag(
+		SyntaxTree::WindowFrameOption::FrameMode mode) {
+	switch (mode) {
+	case SyntaxTree::WindowFrameOption::FRAME_MODE_ROW:
+		return windowFrameTypeToFlag(SQLType::FRAME_ROWS);
+	case SyntaxTree::WindowFrameOption::FRAME_MODE_RANGE:
+		return 0;
+	default:
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+}
+
+int64_t SQLCompiler::getWindowFrameOrderingFlag(
+		const PlanExprList &orderByList) {
+	if (!orderByList.empty() && orderByList.front().sortAscending_) {
+		return windowFrameTypeToFlag(SQLType::FRAME_ASCENDING);
+	}
+	return 0;
+}
+
+int64_t SQLCompiler::windowFrameTypeToFlag(SQLType::WindowFrameType type) {
+	return static_cast<int64_t>(1) << type;
+}
+
 void SQLCompiler::genWindowMainPlan(
 		GenRAContext &cxt, GenOverContext &overCxt, Plan &plan) {
 
@@ -4196,6 +4590,9 @@ void SQLCompiler::genWindowMainPlan(
 	size_t predSize = (cxt.inSubQuery_ ? 1 : 0)
 			+ overCxt.windowPartitionByList_.size();
 
+	const bool hasFrame = (overCxt.windowExpr_->windowOpt_ && overCxt.windowExpr_->windowOpt_->frameOption_);
+	predSize += (hasFrame ? 3 : 0);
+
 	windowNode.inputList_.push_back(inputId);
 	windowNode.predList_.reserve(predSize);
 	windowNode.outputList_ = inputListToOutput(plan);
@@ -4203,6 +4600,11 @@ void SQLCompiler::genWindowMainPlan(
 	PlanExprList tmpPredList(alloc_);
 	if (cxt.inSubQuery_) {
 		tmpPredList.push_back(genColumnExpr(plan, 0, 0));
+	}
+	PlanExprList tmpFrameOptionList(alloc_);
+	if (hasFrame) {
+		genFrameOptionExpr(overCxt, tmpFrameOptionList, plan);
+		assert(tmpFrameOptionList.size() == 3);
 	}
 	tmpPredList.insert(
 		tmpPredList.end(),
@@ -4227,6 +4629,10 @@ void SQLCompiler::genWindowMainPlan(
 	}
 	for (size_t i = 0; i < tmpPredList.size(); i++) {
 		tmpPredList[i].sortAscending_ = (i < orderByStartPos);
+	}
+	if (hasFrame) {
+		tmpPredList.insert(
+				tmpPredList.begin(), tmpFrameOptionList.begin(), tmpFrameOptionList.end());
 	}
 	appendUniqueExpr(tmpPredList, windowNode.predList_);
 	assert(cxt.selectTopColumnId_ != UNDEF_COLUMNID);
@@ -9120,21 +9526,24 @@ void SQLCompiler::relocateOptimizationProfile(Plan &plan) {
 	bool relocatedFull = true;
 	relocatedFull &= relocateOptimizationProfile(
 			plan, keyToNodeIdList, optProfile.joinReordering_);
+	relocatedFull &= relocateOptimizationProfile(
+			plan, keyToNodeIdList, optProfile.joinDriving_);
 
 	if (relocatedFull) {
 		SQLPreparedPlan::TotalProfile::clearIfEmpty(*totalProfile);
 	}
 }
 
+template<typename T>
 bool SQLCompiler::relocateOptimizationProfile(
 		Plan &plan, const KeyToNodeIdList &keyToNodeIdList,
-		util::Vector<SQLPreparedPlan::OptProfile::Join> *&joinList) {
-	if (joinList == NULL) {
+		util::Vector<T> *&entryList) {
+	if (entryList == NULL) {
 		return true;
 	}
 
-	for (util::Vector<SQLPreparedPlan::OptProfile::Join>::iterator it =
-			joinList->begin(); it != joinList->end();) {
+	for (typename util::Vector<T>::iterator it = entryList->begin();
+			it != entryList->end();) {
 		KeyToNodeIdList::const_iterator nodeIt = std::lower_bound(
 				keyToNodeIdList.begin(), keyToNodeIdList.end(),
 				KeyToNodeId(it->profileKey_, 0));
@@ -9143,23 +9552,23 @@ bool SQLCompiler::relocateOptimizationProfile(
 				nodeIt->first == it->profileKey_) {
 			addOptimizationProfile(
 					NULL, &plan.nodeList_[nodeIt->second], &(*it));
-			it = joinList->erase(it);
+			it = entryList->erase(it);
 		}
 		else {
 			++it;
 		}
 	}
 
-	if (joinList->empty()) {
-		joinList = NULL;
+	if (entryList->empty()) {
+		entryList = NULL;
 		return true;
 	}
 	return false;
 }
 
+template<typename T>
 void SQLCompiler::addOptimizationProfile(
-		Plan *plan, PlanNode *node,
-		SQLPreparedPlan::OptProfile::Join *profile) {
+		Plan *plan, PlanNode *node, T *profile) {
 	if (profile == NULL) {
 		return;
 	}
@@ -9167,14 +9576,19 @@ void SQLCompiler::addOptimizationProfile(
 	PlanNode *nodeForAdd = (plan == NULL ? node : NULL);
 	SQLPreparedPlan::OptProfile &optProfile =
 			prepareOptimizationProfile(plan, nodeForAdd);
-	if (optProfile.joinReordering_ == NULL) {
-		optProfile.joinReordering_ = ALLOC_NEW(alloc_) util::Vector<
-				SQLPreparedPlan::OptProfile::Join>(alloc_);
+
+	util::Vector<T> *&entryList = optProfile.getEntryList<T>();
+	if (entryList == NULL) {
+		entryList = ALLOC_NEW(alloc_) util::Vector<T>(alloc_);
 	}
 
 	profile->profileKey_ = prepareProfileKey(*node);
-	optProfile.joinReordering_->push_back(*profile);
+	entryList->push_back(*profile);
 }
+
+template
+void SQLCompiler::addOptimizationProfile(
+		Plan *plan, PlanNode *node, Plan::OptProfile::JoinDriving *profile);
 
 SQLPreparedPlan::OptProfile&
 SQLCompiler::prepareOptimizationProfile(Plan *plan, PlanNode *node) {
@@ -9350,7 +9764,7 @@ void SQLCompiler::optimize(Plan &plan) {
 
 	{
 		OptimizationUnit unit(cxt, OPT_MAKE_INDEX_JOIN);
-		if (unit(unit() && makeIndexJoin(plan, unit.isCheckOnly()))) {
+		if (unit(unit() && selectJoinDriving(plan, unit.isCheckOnly()))) {
 			removeEmptyNodes(cxt, plan);
 		}
 		if (unit.isCheckOnly()) {
@@ -10640,8 +11054,8 @@ bool SQLCompiler::assignJoinPrimaryCond(Plan &plan, bool &complexFound) {
 	return found;
 }
 
-bool SQLCompiler::makeIndexJoin(Plan &plan, bool checkOnly) {
-	const size_t joinCount = 2;
+bool SQLCompiler::selectJoinDrivingLegacy(Plan &plan, bool checkOnly) {
+	const size_t joinCount = JOIN_INPUT_COUNT;
 	util::Vector<uint32_t> nodeRefList(alloc_);
 
 	const PlanNode::CommandOptionFlag drivingMask = getJoinDrivingOptionMask();
@@ -10694,7 +11108,7 @@ bool SQLCompiler::makeIndexJoin(Plan &plan, bool checkOnly) {
 			const uint32_t smaller = (i + start) % joinCount;
 
 			const uint32_t larger = (smaller == 0 ? 1 : 0);
-			if (!findIndexedPredicate(plan, node, larger, checkOnly)) {
+			if (!findIndexedPredicate(plan, node, larger, checkOnly, NULL)) {
 				continue;
 			}
 
@@ -12216,6 +12630,33 @@ bool SQLCompiler::isLegacyJoinReordering(const Plan &plan) {
 	}
 
 	if (compileOption_->isCostBasedJoin()) {
+		return false;
+	}
+	return true;
+}
+
+bool SQLCompiler::isLegacyJoinDriving(const Plan &plan) {
+	if (plan.hintInfo_ != NULL) {
+		if (plan.hintInfo_->hasHint(SQLHint::COST_BASED_JOIN_DRIVING)) {
+			return false;
+		}
+		if (plan.hintInfo_->hasHint(SQLHint::NO_COST_BASED_JOIN_DRIVING)) {
+			return true;
+		}
+
+		if (plan.hintInfo_->hasHint(SQLHint::COST_BASED_JOIN)) {
+			return false;
+		}
+		if (plan.hintInfo_->hasHint(SQLHint::NO_COST_BASED_JOIN)) {
+			return true;
+		}
+	}
+
+	if (isLegacyPlanning(plan, LEGACY_JOIN_DRIVING_VERSION)) {
+		return true;
+	}
+
+	if (compileOption_->isCostBasedJoinDriving()) {
 		return false;
 	}
 	return true;
@@ -18235,7 +18676,7 @@ const SQLCompiler::Expr* SQLCompiler::reduceTablePartitionCondSub(
 			return outExpr;
 		}
 	}
-	else if (ProcessorUtils::isReduceableTablePartitionCondition(
+	else if (ProcessorUtils::isReducibleTablePartitionCondition(
 			expr, tableInfo, affinityRevList, subContainerId)) {
 		return NULL;
 	}
@@ -18245,28 +18686,50 @@ const SQLCompiler::Expr* SQLCompiler::reduceTablePartitionCondSub(
 
 bool SQLCompiler::findIndexedPredicate(
 		const Plan &plan, const PlanNode &node, uint32_t inputId,
-		bool withUnionScan) {
-	const PlanNode &baseInNode = node.getInput(plan, inputId);
-
-	if (!withUnionScan || baseInNode.type_ != SQLType::EXEC_UNION) {
-		return findIndexedPredicateSub(plan, node, inputId, NULL);
+		bool withUnionScan, bool *unique) {
+	if (unique != NULL) {
+		*unique = false;
 	}
 
+	const PlanNode &baseInNode = node.getInput(plan, inputId);
+
+	if (!withUnionScan || !(
+			baseInNode.type_ == SQLType::EXEC_UNION &&
+			baseInNode.unionType_ == SQLType::UNION_ALL)) {
+		return findIndexedPredicateSub(plan, node, inputId, NULL, unique);
+	}
+
+	bool retUnique = true;
 	bool found = true;
 	for (PlanNode::IdList::const_iterator it = baseInNode.inputList_.begin();
 			it != baseInNode.inputList_.end(); ++it) {
+		bool uniqueLocal;
+		bool *uniqueSub = (unique == NULL ? NULL : &uniqueLocal);
+
 		const uint32_t unionInputId =
 				static_cast<uint32_t>(it - baseInNode.inputList_.begin());
-		if (!findIndexedPredicateSub(plan, node, inputId, &unionInputId)) {
+		if (!findIndexedPredicateSub(
+				plan, node, inputId, &unionInputId, uniqueSub)) {
 			return false;
 		}
+
+		if (uniqueSub != NULL) {
+			retUnique &= *uniqueSub;
+		}
+	}
+
+	if (unique != NULL) {
+		*unique = retUnique;
 	}
 	return found;
 }
 
 bool SQLCompiler::findIndexedPredicateSub(
 		const Plan &plan, const PlanNode &node, uint32_t inputId,
-		const uint32_t *unionInputId) {
+		const uint32_t *unionInputId, bool *unique) {
+	if (unique != NULL) {
+		*unique = false;
+	}
 
 	const PlanNode &baseInNode = node.getInput(plan, inputId);
 	const PlanNode &inNode = (unionInputId == NULL ?
@@ -18286,6 +18749,9 @@ bool SQLCompiler::findIndexedPredicateSub(
 		return false;
 	}
 
+	const bool uniquePossible = (unique != NULL &&
+			getTableInfoList().resolve(inNode.tableIdInfo_.id_).hasRowKey_);
+
 	bool firstUnmatched = false;
 	bool found = false;
 	for (PlanExprList::const_iterator it = node.predList_.begin();
@@ -18300,8 +18766,14 @@ bool SQLCompiler::findIndexedPredicateSub(
 
 		if (findIndexedPredicateSub(
 				plan, node, *indexInfoList, inputId, unionInputId, *it,
-				firstUnmatched)) {
+				firstUnmatched, NULL)) {
 			found = true;
+
+			if (uniquePossible) {
+				findIndexedPredicateSub(
+						plan, node, *indexInfoList, inputId, unionInputId, *it,
+						firstUnmatched, unique);
+			}
 		}
 	}
 
@@ -18312,25 +18784,41 @@ bool SQLCompiler::findIndexedPredicateSub(
 		const Plan &plan, const PlanNode &node,
 		const SQLTableInfo::BasicIndexInfoList &indexInfoList,
 		uint32_t inputId, const uint32_t *unionInputId, const Expr &expr,
-		bool &firstUnmatched) {
-	if (firstUnmatched) {
+		bool &firstUnmatched, bool *unique) {
+	if (unique != NULL) {
+		*unique = false;
+	}
+
+	if (unique == NULL && firstUnmatched) {
 		return false;
 	}
 
 	if (expr.op_ == SQLType::EXPR_AND) {
-		if (findIndexedPredicateSub(
+		bool uniqueLocal;
+		bool *uniqueSub = (unique == NULL ? NULL : &uniqueLocal);
+		bool retUnique = false;
+
+		bool continuable = true;
+		bool found = false;
+		if (continuable && findIndexedPredicateSub(
 				plan, node, indexInfoList, inputId, unionInputId, *expr.left_,
-				firstUnmatched)) {
-			return true;
+				firstUnmatched, uniqueSub)) {
+			found = true;
+			retUnique |= uniqueLocal;
+			continuable = (unique != NULL);
 		}
 
-		if (findIndexedPredicateSub(
+		if (continuable && findIndexedPredicateSub(
 				plan, node, indexInfoList, inputId, unionInputId, *expr.right_,
-				firstUnmatched)) {
-			return true;
+				firstUnmatched, uniqueSub)) {
+			found = true;
+			retUnique |= uniqueLocal;
 		}
 
-		return false;
+		if (unique != NULL) {
+			*unique = retUnique;
+		}
+		return found;
 	}
 	else if (expr.op_ == SQLType::OP_EQ) {
 		if (expr.left_->op_ != SQLType::EXPR_COLUMN ||
@@ -18361,13 +18849,17 @@ bool SQLCompiler::findIndexedPredicateSub(
 		ColumnId orgColumnId = baseTableExpr.columnId_;
 		if (unionInputId != NULL) {
 			const Expr &orgTableExpr = baseInNode.getInput(
-					plan, inputId).outputList_[orgColumnId];
+					plan, *unionInputId).outputList_[orgColumnId];
 			if (orgTableExpr.op_ != SQLType::EXPR_COLUMN) {
 				return false;
 			}
 			orgColumnId = orgTableExpr.columnId_;
 		}
 
+		if (unique != NULL) {
+			const bool byFrontColumn = (orgColumnId == 0);
+			*unique = byFrontColumn;
+		}
 		return indexInfoList.isIndexed(orgColumnId);
 	}
 	else {
@@ -22401,6 +22893,8 @@ const SQLCompiler::CompileOption SQLCompiler::CompileOption::EMPTY_OPTION;
 
 SQLCompiler::CompileOption::CompileOption(const CompilerSource *src) :
 		costBasedJoin_(false),
+		costBasedJoinDriving_(false),
+		indexStatsRequester_(NULL),
 		baseCompiler_(NULL) {
 	const SQLCompiler *baseCompiler = CompilerSource::findBaseCompiler(src);
 	if (baseCompiler != NULL) {
@@ -22434,6 +22928,24 @@ void SQLCompiler::CompileOption::setCostBasedJoin(bool value) {
 
 bool SQLCompiler::CompileOption::isCostBasedJoin() const {
 	return costBasedJoin_;
+}
+
+void SQLCompiler::CompileOption::setCostBasedJoinDriving(bool value) {
+	costBasedJoinDriving_ = value;
+}
+
+bool SQLCompiler::CompileOption::isCostBasedJoinDriving() const {
+	return costBasedJoinDriving_;
+}
+
+void SQLCompiler::CompileOption::setIndexStatsRequester(
+		SQLIndexStatsCache::RequesterHolder *value) {
+	indexStatsRequester_ = value;
+}
+
+SQLIndexStatsCache::RequesterHolder*
+SQLCompiler::CompileOption::getIndexStatsRequester() const {
+	return indexStatsRequester_;
 }
 
 const SQLCompiler::CompileOption&
@@ -23502,6 +24014,8 @@ SQLHint::Coder::NameTable::NameTable() : entryEnd_(entryList_) {
 	SQL_HINT_CODER_NAME_TABLE_ADD(LEGACY_PLAN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(COST_BASED_JOIN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(NO_COST_BASED_JOIN);
+	SQL_HINT_CODER_NAME_TABLE_ADD(COST_BASED_JOIN_DRIVING);
+	SQL_HINT_CODER_NAME_TABLE_ADD(NO_COST_BASED_JOIN_DRIVING);
 	SQL_HINT_CODER_NAME_TABLE_ADD(OPTIMIZER_FAILURE_POINT);
 	SQL_HINT_CODER_NAME_TABLE_ADD(TABLE_ROW_COUNT);
 #undef SQL_HINT_CODER_NAME_TABLE_ADD
@@ -23743,7 +24257,6 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 				if (!checkArgSQLOpType(hintExpr, SQLType::EXPR_COLUMN)) {
 					return false;
 				}
-				ExprList::const_iterator itr = hintExpr.next_->begin();
 				for (size_t pos = 0; pos < hintExpr.next_->size(); ++pos) {
 					if (!checkArgIsTable(hintExpr, pos)) {
 						return false;
@@ -23769,6 +24282,16 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 		}
 		break;
 	case SQLHint::NO_COST_BASED_JOIN:
+		if (!checkArgCount(hintExpr, 0, false)) {
+			return false;
+		}
+		break;
+	case SQLHint::COST_BASED_JOIN_DRIVING:
+		if (!checkArgCount(hintExpr, 0, false)) {
+			return false;
+		}
+		break;
+	case SQLHint::NO_COST_BASED_JOIN_DRIVING:
 		if (!checkArgCount(hintExpr, 0, false)) {
 			return false;
 		}
@@ -23832,6 +24355,8 @@ void SQLHintInfo::makeHintMap(const SyntaxTree::ExprList *hintList) {
 						case SQLHint::LEGACY_PLAN:
 						case SQLHint::COST_BASED_JOIN:
 						case SQLHint::NO_COST_BASED_JOIN:
+						case SQLHint::COST_BASED_JOIN_DRIVING:
+						case SQLHint::NO_COST_BASED_JOIN_DRIVING:
 							{
 								util::NormalOStringStream strstrm;
 								strstrm << "Hint(" << hintKey->c_str() <<
@@ -23886,6 +24411,9 @@ void SQLHintInfo::makeHintMap(const SyntaxTree::ExprList *hintList) {
 		}
 		checkExclusiveHints(
 				SQLHint::COST_BASED_JOIN, SQLHint::NO_COST_BASED_JOIN);
+		checkExclusiveHints(
+				SQLHint::COST_BASED_JOIN_DRIVING,
+				SQLHint::NO_COST_BASED_JOIN_DRIVING);
 	}
 }
 

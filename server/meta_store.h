@@ -106,6 +106,8 @@ private:
 	class ContainerRefHandler; 
 	class ContainerDetailStatsHandler;
 
+	class ReplicationStatsHandler;
+
 	struct ScanPositionData {
 		ScanPositionData();
 
@@ -586,6 +588,16 @@ class MetaProcessor::ContainerDetailStatsHandler :
 	public MetaProcessor::StoreCoreHandler {
 public:
 	explicit ContainerDetailStatsHandler(Context& cxt);
+
+	virtual void operator()(
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* container) const;
+};
+
+class MetaProcessor::ReplicationStatsHandler :
+	public MetaProcessor::StoreCoreHandler {
+public:
+	explicit ReplicationStatsHandler(Context& cxt);
 
 	virtual void operator()(
 		TransactionContext& txn, ContainerId id, DatabaseId dbId,

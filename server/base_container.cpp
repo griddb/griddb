@@ -557,6 +557,74 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
 	}
 }
 
+int64_t BaseContainer::estimateIndexSearchSize(
+		TransactionContext &txn, BtreeMap::SearchContext &sc) {
+	const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
+
+	uint64_t estimationSize;
+	if (getContainerType() == TIME_SERIES_CONTAINER &&
+			columnIds.size() == 1 && columnIds.front() == 0) {
+		estimateRowIdIndexSearchSize(txn, sc, estimationSize);
+	}
+	else {
+		if (!estimateColumnIdIndexSearchSize(txn, sc, estimationSize)) {
+			return -1;
+		}
+	}
+
+	return static_cast<int64_t>(std::min(
+			estimationSize,
+			static_cast<uint64_t>(std::numeric_limits<int64_t>::max())));
+}
+
+void BaseContainer::estimateRowIdIndexSearchSize(
+		TransactionContext &txn, BtreeMap::SearchContext &sc,
+		uint64_t &estimationSize) {
+	estimationSize = 0;
+
+	const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
+	assert(columnIds.size() == 1 && columnIds.front() == 0);
+	static_cast<void>(columnIds);
+
+	StackAllocAutoPtr<BtreeMap> rowIdMap(
+			txn.getDefaultAllocator(), getRowIdMap(txn));
+	estimationSize = toEstimationSize(rowIdMap.get()->estimate(txn, sc));
+}
+
+bool BaseContainer::estimateColumnIdIndexSearchSize(
+		TransactionContext &txn, BtreeMap::SearchContext &sc,
+		uint64_t &estimationSize) {
+	estimationSize = 0;
+
+	const MapType mapType = MAP_TYPE_BTREE;
+	const bool withUncommitted = false;
+
+	const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
+	IndexData &indexData = sc.prepareIndexData(txn.getDefaultAllocator());
+	if (!getIndexData(txn, columnIds, mapType, withUncommitted, indexData)) {
+		return false;
+	}
+
+	ValueMap valueMap(txn, this, indexData);
+	estimationSize = toEstimationSize(valueMap.estimate<BtreeMap>(txn, sc));
+	return true;
+}
+
+uint64_t BaseContainer::toEstimationSize(uint64_t base) {
+	if (base <= 0) {
+		return 0;
+	}
+
+	const uint64_t max = std::numeric_limits<uint64_t>::max();
+	const uint64_t total = getRowNum();
+
+	const double rate = static_cast<double>(base) / static_cast<double>(max);
+	const double rawSize = rate * static_cast<double>(total);
+
+	const uint64_t size = static_cast<uint64_t>(rawSize);
+	return std::min(std::max<uint64_t>(size, 1), total);
+}
+
 /*!
 	@brief Get list of Row in Message format
 */
@@ -1984,6 +2052,8 @@ void BaseContainer::resolveExclusiveStatus(TransactionContext& txn) {
 		return;
 	}
 
+	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+
 	BtreeMap::SearchContext sc (txn.getDefaultAllocator(), UNDEF_COLUMNID);
 	const bool checkOnly = true;
 	util::XArray<OId> dummyList(txn.getDefaultAllocator());
@@ -2614,6 +2684,13 @@ int32_t BaseContainer::ValueMap::search<BtreeMap>(TransactionContext &txn,
 	return 0;
 }
 
+template <typename T>
+uint64_t BaseContainer::ValueMap::estimate(
+		TransactionContext &txn, typename T::SearchContext &sc) {
+	const bool forNull = false;
+	T *map = static_cast<T*>(getValueMap(txn, forNull));
+	return map->estimate(txn, sc);
+}
 
 /*!
 	@brief Check if Container has data of uncommited transaction

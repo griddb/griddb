@@ -44,6 +44,8 @@ struct SQLExprs {
 	typedef SQLValues::SummaryTupleSet SummaryTupleSet;
 	typedef util::Vector<SummaryColumn> SummaryColumnList;
 
+	typedef SQLValues::LongInt RangeKey;
+
 
 	class ExprCode;
 
@@ -106,7 +108,10 @@ public:
 		ATTR_AGGREGATED = 1 << 2,
 		ATTR_GROUPING = 1 << 3,
 		ATTR_WINDOWING = 1 << 4,
-		ATTR_COLUMN_UNIFIED = 1 << 5
+		ATTR_COLUMN_UNIFIED = 1 << 5,
+		ATTR_AGGR_DECREMENTAL = 1 << 6,
+		ATTR_DECREMENTAL_FORWARD = 1 << 7,
+		ATTR_DECREMENTAL_BACKWARD = 1 << 8
 	};
 
 	enum InputSourceType {
@@ -406,8 +411,8 @@ struct SQLExprs::FunctionValueUtils {
 	bool isSpaceChar(util::CodePoint c) const;
 
 	bool getRangeGroupId(
-			TupleValue key, int64_t interval, int64_t offset,
-			int64_t &id) const;
+			const TupleValue &key, const RangeKey &interval,
+			const RangeKey &offset, RangeKey &id) const;
 };
 
 struct SQLExprs::WindowState {
@@ -416,9 +421,9 @@ struct SQLExprs::WindowState {
 	int64_t partitionTupleCount_;
 	int64_t partitionValueCount_;
 
-	int64_t rangeKey_;
-	int64_t rangePrevKey_;
-	int64_t rangeNextKey_;
+	RangeKey rangeKey_;
+	RangeKey rangePrevKey_;
+	RangeKey rangeNextKey_;
 };
 
 class SQLExprs::NormalFunctionContext {
@@ -549,6 +554,20 @@ public:
 			typename SQLValues::TypeUtils::template Traits<
 					T::COLUMN_TYPE>::ReadableRefType value);
 
+	template<typename T, typename F>
+	bool checkDecrementalCounterAs(const SummaryColumn &column);
+
+	template<typename T, typename F>
+	void setDecrementalValueBy(
+			const SummaryColumn &column, const typename T::ValueType &value);
+
+	template<typename T, typename F>
+	void incrementDecrementalValueBy(const SummaryColumn &column);
+
+	template<typename T, typename F>
+	void addDecrementalValueBy(
+			const SummaryColumn &column, const typename T::ValueType &value);
+
 	void initializeAggregationValues();
 
 	const WindowState* getWindowState();
@@ -591,7 +610,7 @@ struct SQLExprs::ExprSpec {
 	enum Constants {
 		IN_TYPE_COUNT = 2,
 		IN_EXPANDED_TYPE_COUNT = 3,
-		IN_LIST_SIZE = 7,
+		IN_LIST_SIZE = 8,
 		AGGR_LIST_SIZE = 3,
 		IN_MAX_OPTS_COUNT = 3
 	};
@@ -631,12 +650,20 @@ struct SQLExprs::ExprSpec {
 		FLAG_ARGS_LISTING = 1 << 20,
 		FLAG_AGGR_FINISH_DEFAULT = 1 << 21,
 		FLAG_AGGR_ORDERING = 1 << 22,
+		FLAG_AGGR_DECREMENTAL = 1 << 23,
 
-		FLAG_WINDOW_POS_BEFORE = 1 << 23,
-		FLAG_WINDOW_POS_AFTER = 1 << 24,
-		FLAG_WINDOW_VALUE_COUNTING = 1 << 25,
+		FLAG_WINDOW_POS_BEFORE = 1 << 24,
+		FLAG_WINDOW_POS_AFTER = 1 << 25,
+		FLAG_WINDOW_VALUE_COUNTING = 1 << 26,
 
-		FLAG_COMP_SENSITIVE = 1 << 26
+		FLAG_COMP_SENSITIVE = 1 << 27
+	};
+
+	enum DecrementalType {
+		DECREMENTAL_NONE,
+		DECREMENTAL_FORWARD,
+		DECREMENTAL_BACKWARD,
+		DECREMENTAL_SOME
 	};
 
 	ExprSpec();
@@ -676,6 +703,7 @@ private:
 class SQLExprs::ExprFactoryContext {
 public:
 	typedef ExprCode::InputSourceType InputSourceType;
+	typedef ExprSpec::DecrementalType DecrementalType;
 
 	class Scope;
 
@@ -738,6 +766,9 @@ public:
 	AggregationPhase getAggregationPhase(bool forSrc);
 	void setAggregationPhase(bool forSrc, AggregationPhase aggrPhase);
 
+	DecrementalType getDecrementalType();
+	void setDecrementalType(DecrementalType type);
+
 	void setAggregationTypeListRef(
 			const util::Vector<TupleColumnType> *typeListRef);
 
@@ -780,6 +811,7 @@ private:
 
 		AggregationPhase srcAggrPhase_;
 		AggregationPhase destAggrPhase_;
+		DecrementalType decrementalType_;
 
 		const TypeList *aggrTypeListRef_;
 		SummaryTuple *aggrTupleRef_;
@@ -1018,6 +1050,34 @@ inline void SQLExprs::ExprContext::appendAggregationValueBy(
 				T::COLUMN_TYPE>::ReadableRefType value) {
 	assert(aggrTuple_ != NULL);
 	aggrTuple_->template appendValueBy<T>(*aggrTupleSet_, column, value);
+}
+
+template<typename T, typename F>
+inline bool SQLExprs::ExprContext::checkDecrementalCounterAs(
+		const SummaryColumn &column) {
+	assert(aggrTuple_ != NULL);
+	return aggrTuple_->template checkDecrementalCounterAs<T, F>(column);
+}
+
+template<typename T, typename F>
+inline void SQLExprs::ExprContext::setDecrementalValueBy(
+		const SummaryColumn &column, const typename T::ValueType &value) {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->template setDecrementalValueBy<T, F>(column, value);
+}
+
+template<typename T, typename F>
+inline void SQLExprs::ExprContext::incrementDecrementalValueBy(
+		const SummaryColumn &column) {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->template incrementDecrementalValueBy<T, F>(column);
+}
+
+template<typename T, typename F>
+inline void SQLExprs::ExprContext::addDecrementalValueBy(
+		const SummaryColumn &column, const typename T::ValueType &value) {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->template addDecrementalValueBy<T, F>(column, value);
 }
 
 inline void SQLExprs::ExprContext::initializeAggregationValues() {

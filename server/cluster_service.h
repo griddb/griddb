@@ -173,6 +173,7 @@ struct ManagerSet {
 		execMgr_(NULL),
 		jobMgr_(NULL),
 		pt_(NULL),
+		partitionList_(NULL),
 		clsMgr_(NULL),
 		syncMgr_(NULL),
 		txnMgr_(NULL),
@@ -357,8 +358,8 @@ static const uint32_t CS_HANDLER_HEARTBEAT_CHECK_PARTITION_ID = 1;
 class ClusterHandler : public EventHandler {
 public:
 
-	ClusterHandler()
-		: pt_(NULL),
+	ClusterHandler(): 
+		pt_(NULL),
 		clsMgr_(NULL),
 		clsEE_(NULL),
 		clsSvc_(NULL),
@@ -367,6 +368,9 @@ public:
 		cpSvc_(NULL),
 		cpEE_(NULL),
 		sysSvc_(NULL),
+		syncSvc_(NULL),
+		sqlSvc_(NULL),
+		sqlEE_(NULL),
 		syncEE_(NULL),
 		syncMgr_(NULL),
 		chunkMgr_(NULL) {}
@@ -770,6 +774,10 @@ public:
 
 	SQLService* getSQLService() {
 		return sqlSvc_;
+	}
+
+	ClusterVersionId getClusterVersion() {
+		return versionId_;
 	}
 
 	void checkVersion(ClusterVersionId decodedVersion);

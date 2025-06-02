@@ -100,6 +100,7 @@ struct MetaType {
 		TYPE_CONTAINER_RA_STATS,
 		TYPE_STATEMENT_RES,
 		TYPE_TASK_RES,
+//		TYPE_REPLICATION_STATS,
 		END_TYPE,
 
 		START_TYPE_SQL = 100000,
@@ -347,6 +348,8 @@ struct MetaType {
 		DATABASE_STATS_SQL_TASK_COUNT,
 		DATABASE_STATS_SQL_PENDING_JOB_COUNT,
 		DATABASE_STATS_SQL_SEND_MESSAGE_SIZE,
+		DATABASE_STATS_SQL_TOTAL_REQUEST_COUNT,
+		DATABASE_STATS_TRANSACTION_TOTAL_REQUEST_COUNT,
 		END_DATABASE_STATS
 	};
 
@@ -406,6 +409,23 @@ struct MetaType {
 		TASK_RES_NETWORK_TIME,
 		TASK_RES_PLAN,
 		END_TASK_RES
+	};
+
+	enum ReplicationStatsMeta {
+		REPLICATION_STATS_CLUSTER_PARTITION_INDEX,
+		REPLICATION_STATS_CLUSTER_REPLICATION_ROLE,
+		REPLICATION_STATS_PRIMARY_ADDRESS,
+		REPLICATION_STATS_PRIMARY_PORT,
+		REPLICATION_STATS_STANDBY_ADDRESS,
+		REPLICATION_STATS_STANDBY_PORT,
+		REPLICATION_STATS_PRIMARY_LSN,
+		REPLICATION_STATS_STANDBY_LSN,
+		REPLICATION_STATS_PRIMARY_LAST_UPDATED_TIME,
+		REPLICATION_STATS_STANDBY_LAST_UPDATED_TIME,
+		REPLICATION_STATS_REPLICATION_STATUS,
+		REPLICATION_STATS_LAST_ERROR_CODE,
+		REPLICATION_STATS_LAST_ERROR_TIME,
+		END_REPLICATION_STATS
 	};
 
 	enum StringConstants {
@@ -552,6 +572,22 @@ struct MetaType {
 		STR_TASK_TYPE,
 		STR_PLAN,
 
+		STR_SQL_TOTAL_REQUEST_COUNT,
+		STR_TRANSACTION_TOTAL_REQUEST_COUNT,
+
+		STR_CLUSTER_REPLICATION_ROLE,
+		STR_PRIMARY_ADDRESS,
+		STR_PRIMARY_PORT,
+		STR_STANDBY_ADDRESS,
+		STR_STANDBY_PORT,
+		STR_PRIMARY_LSN,
+		STR_STANDBY_LSN,
+		STR_PRIMARY_LAST_UPDATED_TIME,
+		STR_STANDBY_LAST_UPDATED_TIME,
+		STR_REPLICATION_STATUS,
+		STR_LAST_ERROR_CODE,
+		STR_LAST_ERROR_TIME,
+
 		END_STR
 	};
 };
@@ -575,6 +611,7 @@ struct MetaType::Coders {
 	static const util::NameCoderEntry<PartitionStatsMeta> LIST_PARTITION_STATS[];
 	static const util::NameCoderEntry<DatabaseStatsMeta> LIST_DATABASE_STATS[];
 	static const util::NameCoderEntry<DatabaseMeta> LIST_DATABASE[];
+	static const util::NameCoderEntry<ReplicationStatsMeta> LIST_REPLICATION_STATS[];
 
 	static const util::NameCoder<ContainerMeta, END_CONTAINER> CODER_CONTAINER;
 	static const util::NameCoder<ColumnMeta, END_COLUMN> CODER_COLUMN;
@@ -594,6 +631,7 @@ struct MetaType::Coders {
 	static const util::NameCoder<PartitionStatsMeta, END_PARTITION_STATS> CODER_PARTITION_STATS;
 	static const util::NameCoder<DatabaseStatsMeta, END_DATABASE_STATS> CODER_DATABASE_STATS;
 	static const util::NameCoder<DatabaseMeta, END_DATABASE> CODER_DATABASE;
+	static const util::NameCoder<ReplicationStatsMeta, END_REPLICATION_STATS> CODER_REPLICATION_STATS;
 
 	static const util::NameCoderEntry<StringConstants> LIST_STR[];
 	static const util::NameCoder<StringConstants, END_STR> CODER_STR;
@@ -644,6 +682,7 @@ struct MetaType::CoreColumns {
 	static const Entry<PartitionStatsMeta> COLUMNS_PARTITION_STATS[];
 	static const Entry<DatabaseStatsMeta> COLUMNS_DATABASE_STATS[];
 	static const Entry<DatabaseMeta> COLUMNS_DATABASE[];
+	static const Entry<ReplicationStatsMeta> COLUMNS_REPLICATION_STATS[];
 
 	template<typename T>
 	static Entry<T> of(T id);
@@ -677,6 +716,7 @@ struct MetaType::RefColumns {
 	static const Entry<PartitionStatsMeta> COLUMNS_PARTITION_STATS[];
 	static const Entry<DatabaseStatsMeta> COLUMNS_DATABASE_STATS[];
 	static const Entry<DatabaseMeta> COLUMNS_DATABASE[];
+	static const Entry<ReplicationStatsMeta> COLUMNS_REPLICATION_STATS[];
 
 	template<typename T>
 	static Entry<T> of(

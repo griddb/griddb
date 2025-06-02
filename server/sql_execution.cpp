@@ -186,6 +186,8 @@ SQLConfigParam::SQLConfigParam(const ConfigTable& config) :
 		partitioningRowKeyConstraint_(config.get<bool>(
 				CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT)),
 		costBasedJoin_(config.get<bool>(CONFIG_TABLE_SQL_COST_BASED_JOIN)),
+		costBasedJoinDriving_(
+				config.get<bool>(CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING)),
 		planningVersion_(
 				getPlanningVersion(config, CONFIG_TABLE_SQL_PLAN_VERSION)) {
 }
@@ -204,6 +206,7 @@ SQLExecutionManager::SQLExecutionManager(
 	ConfigTable& config, SQLVariableSizeGlobalAllocator& globalVarAlloc) try :
 	globalVarAlloc_(globalVarAlloc), jobManager_(NULL), dbConnection_(NULL),
 	executionMap_(SQLExecutionMap::key_compare(), globalVarAlloc_),
+	indexStats_(globalVarAlloc, SQLIndexStatsCache::Option()),
 	fixedAllocator_(
 		util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK, "ExecutionAllocator"),
 		1 << DEFAULT_ALLOCATOR_BLOCK_SIZE),
@@ -549,6 +552,7 @@ SQLExecution::~SQLExecution()  try {
 	}
 	ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, syncContext_);
 	ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, scope_);
+	clearIndexStatsRequester();
 	updateConnection();
 	cleanupSerializedData();
 
@@ -615,6 +619,11 @@ SQLTableInfoList* SQLExecution::generateTableInfo(SQLExpandViewContext& cxt) {
 		}
 	}
 	return tableInfoList;
+}
+
+SQLTableInfoList* SQLExecution::createEmptyTableInfo(
+		util::StackAllocator &alloc) {
+	return ALLOC_NEW(alloc) SQLTableInfoList(alloc, &getIndexStats());
 }
 
 const SQLTableInfo* SQLExecution::getTableInfo(
@@ -766,6 +775,39 @@ const SQLTableInfo* SQLExecution::getTableInfo(
 	}
 }
 
+void SQLExecution::clearIndexStatsRequester() {
+	indexStatsRequester_.reset();
+}
+
+bool SQLExecution::checkIndexStatsResolved() {
+	const uint64_t *requester = indexStatsRequester_.get();
+	if (requester == NULL) {
+		return true;
+	}
+
+	SQLIndexStatsCache &indexStats = getIndexStats();
+	return indexStats.checkKeyResolved(*requester);
+}
+
+void SQLExecution::resolveIndexStats(EventContext &ec) {
+	const uint64_t *requester = indexStatsRequester_.get();
+	if (requester == NULL) {
+		return;
+	}
+
+	SQLIndexStatsCache &indexStats = getIndexStats();
+
+	DBConnection *conn = executionManager_->getDBConnection();
+	NoSQLStore *store = conn->getNoSQLStore(
+			getContext().getDBId(), getContext().getDBName());
+
+	store->estimateIndexSearchSize(ec, *this, indexStats, *requester);
+}
+
+SQLIndexStatsCache& SQLExecution::getIndexStats() {
+	return executionManager_->getIndexStats();
+}
+
 void SQLExecution::checkCancel() {
 	if (isCancelled_) {
 		isCancelled_ = false;
@@ -854,6 +896,7 @@ void SQLExecution::execute(EventContext& ec,
 	pt->getLiveNodeIdList(liveNodeIdList);
 	int32_t maxNodeNum = pt->getNodeNum();
 
+	bool first = true;
 	for (;currentVersionId < MAX_JOB_VERSIONID + 1; currentVersionId++) {
 		try {
 
@@ -902,7 +945,7 @@ void SQLExecution::execute(EventContext& ec,
 			int64_t startTime = util::DateTime::now(false).getUnixTime();
 			if (request.requestType_ == REQUEST_TYPE_PREPARE || prepareBinded) {
 				TRACE_SQL_START(clientId_, jobManager_->getHostName(), "PARSE");
-				tableInfoList = ALLOC_NEW(alloc) SQLTableInfoList(alloc);
+				tableInfoList = createEmptyTableInfo(alloc);
 				tableInfoList->setDefaultDBName(context_.getDBName());
 
 				cxt.tableInfoList_ = tableInfoList;
@@ -933,10 +976,12 @@ void SQLExecution::execute(EventContext& ec,
 				tableInfoList = generateTableInfo(cxt);
 
 				if (request.requestType_ == REQUEST_TYPE_PREPARE) {
-					TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
-					compile(alloc, connectionControl,
-						parameterTypeList, tableInfoList, bindParamSet_.getParamList(batchCurrentPos_), varCxt, startTime);
-					TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
+					const bool prepared = true;
+					compile(
+							ec, connectionControl, parameterTypeList,
+							tableInfoList, varCxt, startTime, request, prepared,
+							first, isPreparedRetry);
+
 					SQLReplyContext replyCxt;
 					replyCxt.set(&ec, &parameterTypeList, UNDEF_JOB_VERSIONID, NULL);
 					replyClient(replyCxt);
@@ -961,7 +1006,7 @@ void SQLExecution::execute(EventContext& ec,
 			}
 
 			if (tableInfoList == NULL) {
-				tableInfoList = ALLOC_NEW(alloc) SQLTableInfoList(alloc);
+				tableInfoList = createEmptyTableInfo(alloc);
 				tableInfoList->setDefaultDBName(context_.getDBName());
 				cxt.tableInfoList_ = tableInfoList;
 				tableInfoList = generateTableInfo(cxt);
@@ -970,14 +1015,13 @@ void SQLExecution::execute(EventContext& ec,
 
 			watcher.lap(ExecutionProfilerWatcher::PARSE);
 
-			TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
-			compile(alloc, connectionControl,
-				parameterTypeList, tableInfoList, 
-				bindParamSet_.getParamList(batchCurrentPos_), 
-				varCxt, startTime);
-
-			setPreparedOption(request, isPreparedRetry);
-			TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
+			{
+				const bool prepared = false;
+				compile(
+						ec, connectionControl, parameterTypeList,
+						tableInfoList, varCxt, startTime, request, prepared,
+						first, isPreparedRetry);
+			}
 
 			if (analyzedQueryInfo_.isExplain()) {
 				SQLReplyContext replyCxt;
@@ -1020,6 +1064,7 @@ void SQLExecution::execute(EventContext& ec,
 		}
 		isException = false;
 		e = NULL;
+		first = false;
 	}
 	GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_RETRY_QUERY_LIMIT,
 		"Sql statement execution is reached retry max count="
@@ -2210,6 +2255,10 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 		bool remoteUpdateCache = false;
 		bool needSchemaRefresh = false;
 		int64_t totalRowCount = 0;
+
+		DatabaseId dbId = context_.getDBId();
+		jobManager_->getTransactionService()->getManager()->getDatabaseManager().incrementRequest(dbId, true);
+
 		try {
 			latch = ALLOC_NEW(eventStackAlloc) TableLatch(ec,
 				conn, this, currentDBName, tableName, useCache);
@@ -3021,10 +3070,42 @@ bool SQLExecution::checkJobVersionId(
 	return true;
 }
 
-void SQLExecution::compile(util::StackAllocator& alloc,
-	SQLConnectionControl& connectionControl,
-	ValueTypeList& parameterTypeList, SQLTableInfoList* tableInfoList,
-	util::Vector<BindParam*>& bindParamInfos, TupleValue::VarContext& varCxt, int64_t startTime) {
+void SQLExecution::compile(
+		EventContext &ec, SQLConnectionControl &connectionControl,
+		ValueTypeList &parameterTypeList, SQLTableInfoList *tableInfoList,
+		TupleValue::VarContext &varCxt, int64_t startTime,
+		RequestInfo& request, bool prepared, bool first,
+		bool isPreparedRetry) {
+	if (first) {
+		clearIndexStatsRequester();
+	}
+
+	util::Vector<BindParam*> &bindParamInfos =
+			bindParamSet_.getParamList(batchCurrentPos_);
+
+	for (size_t i = 0; i < 2; i++) {
+		TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
+		compileSub(
+				ec.getAllocator(), connectionControl, parameterTypeList,
+				tableInfoList, bindParamInfos, varCxt, startTime);
+
+		if (!prepared) {
+			setPreparedOption(request, isPreparedRetry);
+		}
+		TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
+
+		if (i > 0 || checkIndexStatsResolved()) {
+			break;
+		}
+		resolveIndexStats(ec);
+	}
+}
+
+void SQLExecution::compileSub(
+		util::StackAllocator &alloc, SQLConnectionControl &connectionControl,
+		ValueTypeList &parameterTypeList, SQLTableInfoList *tableInfoList,
+		util::Vector<BindParam*> &bindParamInfos,
+		TupleValue::VarContext &varCxt, int64_t startTime) {
 
 	SQLPreparedPlan* plan;
 	SQLParsedInfo& parsedInfo = getParsedInfo();
@@ -3035,6 +3116,8 @@ void SQLExecution::compile(util::StackAllocator& alloc,
 		option.setTimeZone(getContext().getTimezone());
 		option.setPlanningVersion(param.getPlanningVersion());
 		option.setCostBasedJoin(param.isCostBasedJoin());
+		option.setCostBasedJoinDriving(param.isCostBasedJoinDriving());
+		option.setIndexStatsRequester(&indexStatsRequester_);
 	}
 
 	SQLCompiler compiler(varCxt, &option);
@@ -3064,6 +3147,7 @@ void SQLExecution::compile(util::StackAllocator& alloc,
 		util::XArrayOutStream<> arrayOut(binary);
 		util::ByteStream< util::XArrayOutStream<> > out(arrayOut);
 		TupleValue::coder(util::ObjectCoder(), NULL).encode(out, plan);
+		cleanupSerializedData();
 		copySerializedData(binary);
 	}
 }
@@ -4017,6 +4101,10 @@ PartitionTable* SQLExecutionManager::getPartitionTable() {
 	return pt_;
 }
 
+SQLIndexStatsCache& SQLExecutionManager::getIndexStats() {
+	return indexStats_;
+}
+
 SQLExecution::SQLReplyType SQLExecution::checkReplyType(
 	int32_t errorCode, bool& clearCache) {
 	switch (errorCode) {
@@ -4395,18 +4483,20 @@ bool SQLExecution::checkExecutionConstraint(uint32_t& delayStartTime, uint32_t& 
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_DENY_REQUEST,
 			"Deny updatable query (standby mode)");
 	}
+	DatabaseId dbId = context_.getDBId();
+	DatabaseManager& dbManager = jobManager_->getTransactionService()->getManager()->getDatabaseManager();
 
-	if (!jobManager_->getTransactionService()->getManager()->getDatabaseManager().isEnableRequestConstraint()) {
+	dbManager.incrementRequest(getContext().getDBId(), true);
+
+	if (!dbManager.isEnableRequestConstraint()) {
 		return false;
 	}
-	DatabaseId dbId = context_.getDBId();
 	DatabaseManager::Option option;
 	SQLParsedInfo& parsedInfo = getParsedInfo();
 	if (parsedInfo.syntaxTreeList_.size() > 0) {
 		option.dropOnly_ = parsedInfo.syntaxTreeList_[0]->isDropOnlyCommand();
 	}
-	return jobManager_->getTransactionService()->getManager()->getDatabaseManager().getExecutionConstraint(
-		dbId, delayStartTime, delayExecutionTime, true, &option);
+	return dbManager.getExecutionConstraint(dbId, delayStartTime, delayExecutionTime, true, &option);
 }
 
 void SQLExecution::checkBatchRequest(RequestInfo& request) {

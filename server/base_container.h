@@ -123,12 +123,20 @@ public:
 		MapType getMapType() {
 			return indexData_.mapType_;
 		}
+
 		template <typename T>
-		int32_t search(TransactionContext &txn, typename T::SearchContext &sc,
-			util::XArray<OId> &oIdList, OutputOrder outputOrder);
+		int32_t search(
+				TransactionContext &txn, typename T::SearchContext &sc,
+				util::XArray<OId> &oIdList, OutputOrder outputOrder);
+
+		template <typename T>
+		uint64_t estimate(
+				TransactionContext &txn, typename T::SearchContext &sc);
+
 		TreeFuncInfo *getFuncInfo(TransactionContext &txn) {
 			return getValueMap(txn, false)->getFuncInfo();
 		}
+
 	private:
 		BaseContainer *container_;
 		IndexAutoPtr valueMap_;
@@ -394,6 +402,16 @@ public:
 	void searchColumnIdIndex(TransactionContext &txn,
 		BtreeMap::SearchContext &sc, util::XArray<OId> &normalRowList,
 		util::XArray<OId> &mvccRowList);
+
+	int64_t estimateIndexSearchSize(
+			TransactionContext &txn, BtreeMap::SearchContext &sc);
+	void estimateRowIdIndexSearchSize(
+			TransactionContext &txn, BtreeMap::SearchContext &sc,
+			uint64_t &estimationSize);
+	bool estimateColumnIdIndexSearchSize(
+			TransactionContext &txn, BtreeMap::SearchContext &sc,
+			uint64_t &estimationSize);
+	uint64_t toEstimationSize(uint64_t base);
 
 	void getRowList(TransactionContext &txn, util::XArray<OId> &oIdList,
 		ResultSize limit, ResultSize &resultNum,

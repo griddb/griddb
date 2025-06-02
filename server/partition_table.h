@@ -497,7 +497,7 @@ public:
 	class PartitionRevision {
 
 	public:
-		friend class PartitionRevisionMesage;
+		friend class PartitionRevisionMessage;
 
 		static const PartitionRevisionNo INITIAL_CLUSTER_REVISION = 1;
 
@@ -2103,16 +2103,20 @@ public:
 		return std::string();
 	}
 
-	std::string dumpCurrentClusterStatus() {
-		if (masterNodeId_ == SELF_NODEID) {
+	static std::string dumpClusterStatus(NodeId nodeId) {
+		if (nodeId == SELF_NODEID) {
 			return "MASTER";
 		}
-		else if (masterNodeId_ == UNDEF_NODEID) {
+		else if (nodeId == UNDEF_NODEID) {
 			return "SUB_MASTER";
 		}
 		else {
 			return "FOLLOWER";
 		}
+	}
+
+	std::string dumpCurrentClusterStatus() {
+		return dumpClusterStatus(masterNodeId_);
 	}
 
 	static inline const std::string dumpPartitionStatus(
@@ -2872,8 +2876,7 @@ private:
 		LogSequentialNumber ownerLSN,
 		LogSequentialNumber backupLSN, int32_t gapFactor = 1) {
 		uint64_t gapValue =
-			static_cast<uint64_t>(
-				config_.limitOwnerBackupLsnGap_ * gapFactor);
+			static_cast<uint64_t>(config_.limitOwnerBackupLsnGap_) * static_cast<uint64_t>(gapFactor);
 		if (ownerLSN >= backupLSN) {
 			return (ownerLSN - backupLSN > gapValue);
 		}

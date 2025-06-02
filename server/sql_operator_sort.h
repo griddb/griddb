@@ -87,6 +87,7 @@ struct SQLSortOps {
 	class Window;
 	class WindowPartition;
 	class WindowRankPartition;
+	class WindowFramePartition;
 	class WindowMerge;
 };
 
@@ -753,7 +754,8 @@ private:
 	static OpCode createSingleCode(
 			OpCodeBuilder &builder, const SQLValues::CompColumnList *keyList,
 			SQLOpUtils::ProjectionPair &projections,
-			ExprRefList &windowExprList);
+			ExprRefList &windowExprList,
+			const SQLExprs::Expression *windowOption);
 
 	static void splitWindowExpr(
 			OpCodeBuilder &builder, Projection &src,
@@ -765,9 +767,15 @@ private:
 
 	static Projection& createProjectionWithWindow(
 			OpCodeBuilder &builder, const Projection &pipeProj,
-			Projection &src, ExprRefList &windowExprList);
+			Projection &src, ExprRefList &windowExprList, bool withFrame);
+	static Projection& createProjectionWithWindowSub(
+			OpCodeBuilder &builder, const Projection &pipeProj,
+			ExprRefList *windowExprList);
 	static Projection& createUnmatchWindowPipeProjection(
 			OpCodeBuilder &builder, const Projection &src);
+
+	static void applyFrameAttributes(
+			Projection &proj, bool forWindowPipe, bool forward);
 
 	static void setUpUnmatchWindowExpr(
 			SQLExprs::ExprFactoryContext &factoryCxt,
@@ -779,6 +787,9 @@ private:
 	static void duplicateExprList(
 			OpCodeBuilder &builder, const ExprRefList &src, ExprRefList &dest);
 
+	static SQLOpTypes::Type getSingleNodeType(
+			OpCodeBuilder &builder, const Projection &pipeProj,
+			const SQLExprs::Expression *windowOption);
 	static bool isRanking(
 			OpCodeBuilder &builder, const Projection &pipeProj);
 };
@@ -863,6 +874,10 @@ public:
 	virtual void compile(OpContext &cxt) const;
 	virtual void execute(OpContext &cxt) const;
 
+	static void resolveKeyListAt(
+			const OpCode &code, SQLValues::CompColumnList &partKeyList,
+			SQLValues::CompColumnList &rankKeyList);
+
 private:
 	typedef WindowPartition::TupleEq TupleEq;
 
@@ -893,6 +908,266 @@ private:
 			OpContext &cxt, PartitionContext &partCxt);
 	static TupleListReader& preparePipeReader(OpContext &cxt);
 	static TupleListReader& prepareSubFinishReader(OpContext &cxt);
+};
+
+class SQLSortOps::WindowFramePartition : public SQLOps::Operator {
+public:
+	virtual void compile(OpContext &cxt) const;
+	virtual void execute(OpContext &cxt) const;
+
+	static bool isFrameEnabled(const SQLExprs::Expression *windowOption);
+
+private:
+	typedef SQLOps::TupleColumn TupleColumn;
+	typedef WindowPartition::TupleEq TupleEq;
+
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::less<SQLValues::ValueComparator::PredArgType>,
+			false, false, false, true,
+			SQLValues::ValueAccessor::ByReader> ReaderTupleLess;
+	typedef SQLValues::TupleComparator::WithAccessor<
+			SQLValues::ValueComparator::ThreeWay,
+			false, false, false, true,
+			SQLValues::ValueAccessor::ByReader> ReaderTupleComp;
+
+	enum {
+		IN_KEY = 0,
+		IN_PIPE = 1,
+		IN_LOWER = 2,
+		IN_SUB_FINISH = 3,
+		IN_AGGR = 4
+	};
+
+	struct OrderedAggregatorKey;
+	struct OrderedAggregatorKeyLess;
+	struct OrderedAggregatorPosition;
+	struct OrderedAggregatorInfo;
+
+	class OrderedAggregator;
+
+	struct Boundary;
+	struct PartitionContext;
+
+	static bool isPartTail(
+			PartitionContext &partCxt, bool totalTail,
+			TupleListReader &tailReader, TupleListReader &keyReader);
+
+	static bool isLowerInside(
+			PartitionContext &partCxt, TupleListReader &subFinishReader,
+			TupleListReader &lowerReader);
+	static bool isUpperInside(
+			PartitionContext &partCxt, TupleListReader &subFinishReader,
+			TupleListReader &pipeReader);
+
+	static bool isInsideByCurrent(
+			PartitionContext &partCxt, TupleListReader &lastReader,
+			TupleListReader &nextReader);
+	static bool isInsideByRange(
+			PartitionContext &partCxt, bool upper, TupleListReader &lastReader,
+			TupleListReader &nextReader);
+
+	static bool resoveActivePipeReader(
+			OpContext &cxt, OrderedAggregator *aggregator, bool upper,
+			TupleListReader &base, TupleListReader *&activeReaderRef);
+	static void clearAggregation(
+			OpContext &cxt, OrderedAggregator *aggregator,
+			TupleListReader &tailReader);
+
+	void getProjections(
+			const Projection *&pipeProj, const Projection *&lowerProj,
+			const Projection *&subFinishProj) const;
+	PartitionContext& preparePartitionContext(
+			OpContext &cxt, const Projection &pipeProj) const;
+
+	void tryPrepareAggregatorInfo(
+			OpContext &cxt, PartitionContext &partCxt,
+			const Projection &pipeProj) const;
+
+	static void applyWindowOption(
+			PartitionContext &partCxt,
+			const SQLExprs::Expression *windowOption);
+
+	static void applyBoundaryOption(
+			PartitionContext &partCxt, int64_t flags, const TupleValue &value,
+			bool start);
+
+	static bool prepareAggregator(
+			OpContext &cxt, PartitionContext &partCxt,
+			TupleListReader &pipeReader,
+			util::LocalUniquePtr<OrderedAggregator> &aggregator);
+
+	static TupleListReader* prepareKeyReader(
+			OpContext &cxt, PartitionContext &partCxt);
+	static TupleListReader& preparePipeReader(OpContext &cxt);
+	static TupleListReader& prepareLowerReader(OpContext &cxt);
+	static TupleListReader& prepareSubFinishReader(OpContext &cxt);
+};
+
+struct SQLSortOps::WindowFramePartition::OrderedAggregatorKey {
+	OrderedAggregatorKey(
+			TupleListReader &reader, uint32_t level, bool upper);
+
+	TupleListReader &reader_;
+	uint32_t level_;
+	bool upper_;
+};
+
+struct SQLSortOps::WindowFramePartition::OrderedAggregatorKeyLess {
+	typedef OrderedAggregatorKey Key;
+
+	explicit OrderedAggregatorKeyLess(const ReaderTupleComp &aggrComp);
+
+	bool operator()(const Key &key1, const Key &key2) const;
+
+	ReaderTupleComp aggrComp_;
+};
+
+struct SQLSortOps::WindowFramePartition::OrderedAggregatorPosition {
+	OrderedAggregatorPosition(uint32_t keyReaderId, uint32_t tailReaderId);
+
+	uint32_t keyReaderId_;
+
+	uint32_t tailReaderId_;
+	uint64_t tailPos_;
+
+	bool active_;
+};
+
+struct SQLSortOps::WindowFramePartition::OrderedAggregatorInfo {
+	typedef OrderedAggregatorPosition Position;
+	typedef util::AllocVector<Position> PositionList;
+
+	OrderedAggregatorInfo(
+			SQLValues::ValueContext &valueCxt,
+			const SQLValues::CompColumnList &aggrKeyList);
+
+	uint64_t lowerTargetPos_;
+	uint64_t upperTargetPos_;
+
+	PositionList lowerPosList_;
+	PositionList upperPosList_;
+
+	SQLValues::CompColumnList aggrKeyList_;
+	SQLValues::TupleComparator baseAggrComp_;
+	ReaderTupleComp aggrComp_;
+	ReaderTupleComp aggrLess_;
+	OrderedAggregatorKeyLess keyLess_;
+
+	bool updating_;
+	bool updatingReady_;
+	bool upperUpdating_;
+};
+
+class SQLSortOps::WindowFramePartition::OrderedAggregator {
+public:
+	typedef OrderedAggregatorInfo Info;
+
+	OrderedAggregator(
+			OpContext &cxt, Info &info, TupleListReader &curReader);
+
+	bool update(OpContext &cxt, bool upper, TupleListReader &baseReader);
+	bool resumeUpdates(OpContext &cxt);
+
+	void reset(OpContext &cxt, TupleListReader &tailReader);
+
+	TupleListReader* getTop();
+
+private:
+	typedef OrderedAggregatorKey Key;
+	typedef OrderedAggregatorKeyLess KeyLess;
+	typedef OrderedAggregatorPosition Position;
+	typedef Info::PositionList PositionList;
+
+	typedef util::AllocSet<Key, KeyLess> KeySet;
+	typedef KeySet::iterator KeyIterator;
+
+	typedef std::pair<KeyIterator, KeyIterator> KeyIteratorPair;
+	typedef util::AllocVector<KeyIteratorPair> KeyIteratorList;
+
+	void initializeKeys(OpContext &cxt);
+	void initializeKeysAt(OpContext &cxt, bool upper);
+
+	void resetReaders(OpContext &cxt, TupleListReader &reader, bool resumeOnly);
+	void resetReadersAt(
+			OpContext &cxt, TupleListReader &reader, bool resumeOnly,
+			bool upper);
+
+	bool updateKeysAt(OpContext &cxt, bool upper);
+	bool updateKey(OpContext &cxt, bool upper, uint32_t level);
+	bool updateKeyDetail(
+			OpContext &cxt, bool upper, uint32_t level, Position &pos);
+
+	void clearAllKeys();
+	void eraseKey(bool upper, uint32_t level);
+	void insertKey(OpContext &cxt, bool upper, uint32_t level);
+
+	bool isKeyUpdatable(uint64_t lastPos, bool upper, uint32_t level);
+
+	uint32_t resolveEffectiveEndLevel(bool upper, bool last);
+	static uint32_t resolveEffectiveEndLevelAt(
+			uint64_t lowerPos, uint64_t upperPos, bool upper);
+
+	uint64_t getTargetPosition(bool upper, bool last);
+	uint64_t& getTargetPositionRef(bool upper);
+
+	void inheritActivePosition(OpContext &cxt, bool upper, uint32_t level);
+	Position& resolvePosition(bool upper, uint32_t level);
+
+	static uint32_t toReaderId(bool upper, bool forTail, uint32_t level);
+	static TupleListReader& getReader(OpContext &cxt, uint32_t id);
+
+	static void assignInitialReader(
+			OpContext &cxt, Position &pos, TupleListReader &reader);
+	static void assignReader(
+			OpContext &cxt, Position &pos, TupleListReader &keyReader,
+			TupleListReader &tailReader);
+
+	static bool isPositionActive(const Position &pos);
+	static void activatePosition(Position &pos, uint64_t tailPos);
+	static void deactivatePosition(Position &pos);
+
+	static std::pair<uint64_t, uint64_t> getEffectivePositionRange(
+			uint64_t pos, bool upper, uint32_t level);
+
+	static uint64_t roundPosition(uint64_t pos, bool upper, uint32_t level);
+	static uint64_t getPositionRangeSize(uint32_t level);
+
+	Info &info_;
+	KeySet keySet_;
+	KeyIteratorList keyItList_;
+};
+
+struct SQLSortOps::WindowFramePartition::Boundary {
+	Boundary();
+
+	SQLValues::LongInt distance_;
+	bool unbounded_;
+	bool rows_;
+	bool current_;
+};
+
+struct SQLSortOps::WindowFramePartition::PartitionContext {
+	explicit PartitionContext(util::StackAllocator &alloc);
+
+	TupleEq *partEq_;
+	TupleEq *rankEq_;
+	util::LocalUniquePtr<TupleEq> partEqBase_;
+	util::LocalUniquePtr<TupleEq> rankEqBase_;
+	SQLValues::CompColumnList partKeyList_;
+	SQLValues::CompColumnList rankKeyList_;
+
+	std::pair<Boundary, Boundary> boundary_;
+
+	bool keyReaderStarted_;
+	bool rankAscending_;
+
+	int64_t lowerPos_;
+	int64_t upperPos_;
+
+	int64_t currentPos_;
+	int64_t initialPipePos_;
+
+	util::LocalUniquePtr<OrderedAggregatorInfo> aggrInfo_;
 };
 
 class SQLSortOps::WindowMerge : public SQLOps::Operator {

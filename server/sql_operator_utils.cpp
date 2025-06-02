@@ -144,6 +144,7 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::toNormalProjectionByExpr(
 	cxt.setAggregationPhase(true, aggrPhase);
 
 	Projection &proj = createProjection(SQLOpTypes::PROJ_OUTPUT);
+	applyDecrementalType(cxt, proj);
 	rewriter_.rewrite(cxt, *src, &proj);
 
 	return proj;
@@ -170,6 +171,7 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::toGroupingProjectionByExpr(
 	code.getExprCode().setAttributes(attributes);
 
 	Projection &proj = createProjection(SQLOpTypes::PROJ_OUTPUT, code);
+	applyDecrementalType(cxt, proj);
 	rewriter_.rewrite(getExprFactoryContext(), *src, &proj);
 
 	return proj;
@@ -290,6 +292,7 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::rewriteProjection(
 		if (srcAggrPhase != SQLType::END_AGG_PHASE) {
 			factoryCxt.setAggregationPhase(false, srcAggrPhase);
 		}
+		applyDecrementalType(factoryCxt, src);
 
 		if (srcCode.getColumnTypeList() != NULL) {
 			factoryCxt.setAggregationTypeListRef(srcCode.getColumnTypeList());
@@ -531,6 +534,7 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::createMultiStageAggregation(
 	}
 
 	factoryCxt.setAggregationPhase(false, destPhase);
+	applyDecrementalType(factoryCxt, src);
 	SQLOps::Projection *proj = &rewriteProjection(src);
 
 	if (forFinish) {
@@ -553,6 +557,8 @@ SQLOps::OpCodeBuilder::arrangeProjections(
 		*distinctProj = NULL;
 	}
 
+	SQLExprs::ExprFactoryContext &factoryCxt = getExprFactoryContext();
+
 	const Projection *srcPipe = code.getPipeProjection();
 	const Projection *srcFinish = code.getFinishProjection();
 	assert(srcPipe != NULL);
@@ -563,8 +569,6 @@ SQLOps::OpCodeBuilder::arrangeProjections(
 	Projection *destPipe = NULL;
 	Projection *destFinish = NULL;
 	if (isAggregationArrangementRequired(srcPipe, srcFinish)) {
-		SQLExprs::ExprFactoryContext &factoryCxt = getExprFactoryContext();
-
 		SQLType::AggregationPhase pipePhase;
 		SQLType::AggregationPhase finishPhase;
 		const SQLType::AggregationPhase orgPhase = code.getAggregationPhase();
@@ -590,18 +594,27 @@ SQLOps::OpCodeBuilder::arrangeProjections(
 			SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
 			factoryCxt.setAggregationPhase(true, orgPhase);
 			factoryCxt.setAggregationPhase(false, pipePhase);
+			applyDecrementalType(factoryCxt, *srcPipe);
 			destPipe = &rewriteProjection(*srcPipe);
 		}
 		{
 			SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
 			factoryCxt.setAggregationPhase(true, orgPhase);
 			factoryCxt.setAggregationPhase(false, finishPhase);
+			applyDecrementalType(factoryCxt, *srcPipe);
 			destFinish = &rewriteProjection(*srcPipe, distinctProj);
 		}
 	}
 	else {
-		destPipe = &rewriteProjection(*srcPipe);
+		{
+			SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+			applyDecrementalType(factoryCxt, *srcPipe);
+			destPipe = &rewriteProjection(*srcPipe);
+		}
+
 		if (srcFinish != NULL) {
+			SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+			applyDecrementalType(factoryCxt, *srcFinish);
 			destFinish = &rewriteProjection(*srcFinish);
 		}
 	}
@@ -628,6 +641,7 @@ SQLExprs::Expression& SQLOps::OpCodeBuilder::arrangePredicate(
 		factoryCxt.setAggregationPhase(true, SQLType::AGG_PHASE_ADVANCE_PIPE);
 	}
 
+	SQLExprs::ExprRewriter::applyDecrementalType(factoryCxt, src.getCode());
 	return rewriter_.rewrite(factoryCxt, src, NULL);
 }
 
@@ -644,7 +658,6 @@ void SQLOps::OpCodeBuilder::replaceColumnToConstExpr(Projection &proj) {
 	}
 }
 
-#include <iostream>
 const SQLExprs::Expression* SQLOps::OpCodeBuilder::extractJoinKeyColumns(
 		const SQLExprs::Expression *srcExpr,
 		const SQLType::JoinType *joinTypeOfFilter,
@@ -683,6 +696,8 @@ const SQLExprs::Expression* SQLOps::OpCodeBuilder::extractJoinKeyColumns(
 
 			SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
 			factoryCxt.setAggregationPhase(true, SQLType::AGG_PHASE_ALL_PIPE);
+			SQLExprs::ExprRewriter::applyDecrementalType(
+					factoryCxt, srcExpr->getCode());
 
 			destExprBase = &rewriter.rewrite(factoryCxt, *srcExpr, NULL);
 		}
@@ -996,6 +1011,15 @@ void SQLOps::OpCodeBuilder::applySummaryAggregationColumns(
 	const SQLValues::CompColumnList *keyList =
 			factoryCxt.getArrangedKeyList(orderingRestricted);
 
+	SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+
+	const Projection *aggrOrBaseProj = (aggrProj == NULL ? &proj : aggrProj);
+	if (((proj.getProjectionCode().getExprCode().getAttributes() |
+			aggrOrBaseProj->getProjectionCode().getExprCode().getAttributes()) &
+			SQLExprs::ExprCode::ATTR_AGGR_DECREMENTAL) != 0) {
+		factoryCxt.setDecrementalType(SQLExprs::ExprSpec::DECREMENTAL_SOME);
+	}
+
 	if (aggrProj != NULL && !aggrTupleSet->isColumnsCompleted()) {
 		const uint32_t input = 0;
 		if (keyList != NULL &&
@@ -1011,6 +1035,9 @@ void SQLOps::OpCodeBuilder::applySummaryAggregationColumns(
 		}
 
 		applyAggregationColumns(*aggrProj, *aggrTupleSet);
+		SQLExprs::ExprRewriter::applySummaryTupleOptions(
+				factoryCxt, *aggrTupleSet);
+
 		aggrTupleSet->completeColumns();
 	}
 	while (false);
@@ -1055,6 +1082,12 @@ void SQLOps::OpCodeBuilder::applyAggregationColumns(
 			it != aggrTypeList->end(); ++it) {
 		tupleSet.addColumn(*it, NULL);
 	}
+}
+
+void SQLOps::OpCodeBuilder::applyDecrementalType(
+		SQLExprs::ExprFactoryContext &cxt, const Projection &proj) {
+	SQLExprs::ExprRewriter::applyDecrementalType(
+			cxt, proj.getProjectionCode().getExprCode());
 }
 
 void SQLOps::OpCodeBuilder::addColumnUsage(const OpCode &code, bool withId) {
@@ -2928,6 +2961,7 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_PARTITION),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_RANK_PARTITION),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_FRAME_PARTITION),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_MERGE),
 
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN),

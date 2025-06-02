@@ -52,6 +52,8 @@ const double TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE = -1.0;
 
 const size_t TXN_CLIENT_UUID_BYTE_SIZE = 16;
 
+const size_t TXN_DATABASE_NUM_MAX = 1000;
+
 /*!
 	@brief Represents transaction context id (clientID)
 */

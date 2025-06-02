@@ -1613,11 +1613,12 @@ public:
 
 
 struct CancelOption {
-	CancelOption() : startTime_(0), forced_(false), allocateMemory_(0) {};
+	CancelOption() : startTime_(0), forced_(false), allocateMemory_(0), limitStartTime_(0) {};
 	CancelOption(util::String& startTimeStr);
 	int64_t startTime_;
 	bool forced_;
 	int64_t allocateMemory_;
+	int64_t limitStartTime_;
 };
 
 struct TaskProf {

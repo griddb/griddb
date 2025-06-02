@@ -559,7 +559,8 @@ bool SQLExprs::FunctionValueUtils::isSpaceChar(util::CodePoint c) const {
 }
 
 bool SQLExprs::FunctionValueUtils::getRangeGroupId(
-		TupleValue key, int64_t interval, int64_t offset, int64_t &id) const {
+		const TupleValue &key, const RangeKey &interval,
+		const RangeKey &offset, RangeKey &id) const {
 	return RangeGroupUtils::getRangeGroupId(key, interval, offset, id);
 }
 
@@ -567,9 +568,9 @@ bool SQLExprs::FunctionValueUtils::getRangeGroupId(
 SQLExprs::WindowState::WindowState() :
 		partitionTupleCount_(-1),
 		partitionValueCount_(-1),
-		rangeKey_(-1),
-		rangePrevKey_(-1),
-		rangeNextKey_(-1) {
+		rangeKey_(RangeKey::invalid()),
+		rangePrevKey_(RangeKey::invalid()),
+		rangeNextKey_(RangeKey::invalid()) {
 }
 
 
@@ -1177,6 +1178,15 @@ void SQLExprs::ExprFactoryContext::setAggregationPhase(
 			aggrPhase;
 }
 
+SQLExprs::ExprSpec::DecrementalType
+SQLExprs::ExprFactoryContext::getDecrementalType() {
+	return scopedEntry_->decrementalType_;
+}
+
+void SQLExprs::ExprFactoryContext::setDecrementalType(DecrementalType type) {
+	scopedEntry_->decrementalType_ = type;
+}
+
 void SQLExprs::ExprFactoryContext::setAggregationTypeListRef(
 		const util::Vector<TupleColumnType> *typeListRef) {
 	scopedEntry_->aggrTypeListRef_ = typeListRef;
@@ -1260,6 +1270,7 @@ SQLExprs::ExprFactoryContext::ScopedEntry::ScopedEntry() :
 		summaryColumnsArranging_(true),
 		srcAggrPhase_(SQLType::END_AGG_PHASE),
 		destAggrPhase_(SQLType::END_AGG_PHASE),
+		decrementalType_(ExprSpec::DECREMENTAL_NONE),
 		aggrTypeListRef_(NULL),
 		aggrTupleRef_(NULL),
 		aggrTupleSet_(NULL),

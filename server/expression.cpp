@@ -2886,6 +2886,33 @@ char *Expr::dequote(util::StackAllocator &alloc, const char *str, bool &isQuoted
 	}
 }
 
+util::DateTime::ZonedOption Expr::newZonedTimeOption(
+		const util::DateTime::FieldType *precision,
+		const util::TimeZone &zone) {
+	UTIL_STATIC_ASSERT(!TRIM_MILLISECONDS);
+
+	util::DateTime::ZonedOption option =
+			util::DateTime::ZonedOption::create(TRIM_MILLISECONDS, zone);
+
+	if (precision == NULL || isTimeRangeValidationStrict(*precision)) {
+		option.baseOption_.maxTimeMillis_ =
+				ValueProcessor::makeMaxTimestamp(TRIM_MILLISECONDS);
+	}
+
+	return option;
+}
+
+bool Expr::isTimeRangeValidationStrict(util::DateTime::FieldType precision) {
+	switch (precision) {
+	case util::DateTime::FIELD_MICROSECOND:
+		return true;
+	case util::DateTime::FIELD_NANOSECOND:
+		return true;
+	default:
+		return false;
+	}
+}
+
 bool Expr::aggregate(TransactionContext &txn, Collection &collection,
 	util::XArray<OId> &resultRowIdList, Value &result) {
 	assert(this->type_ == AGGREGATION);

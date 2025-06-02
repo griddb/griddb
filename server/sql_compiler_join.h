@@ -618,4 +618,291 @@ private:
 	CostComparator costComparator_;
 };
 
+struct SQLCompiler::SelectJoinDriving {
+	class SubConstants;
+	class NodeCursor;
+	class Cost;
+	class CostResolver;
+	class Rewriter;
+	class SubOptimizer;
+
+	enum CostFactor {
+		FACTOR_NONE,
+		FACTOR_TABLE,
+		FACTOR_INDEX,
+		FACTOR_SCHEMA,
+		FACTOR_SYNTAX,
+		FACTOR_HINT
+	};
+
+	typedef SQLPreparedPlan::OptProfile OptProfile;
+	typedef SQLPreparedPlan::Constants Constants;
+
+	typedef util::Vector<int64_t> TableSizeList;
+};
+
+class SQLCompiler::SelectJoinDriving::SubConstants {
+public:
+	enum {
+		JOIN_UNKNOWN_INPUT = -1,
+		DEFAULT_REDUCIBLE_RATE = 2000,
+		DEFAULT_CONDITION_LIMIT = 10,
+		DEFAULT_META_TABLE_SIZE = 1000
+	};
+};
+
+class SQLCompiler::SelectJoinDriving::NodeCursor {
+public:
+	NodeCursor(Plan &plan, bool modifiable);
+
+	PlanNode* next();
+
+	void markCurrent();
+	bool isSomeMarked();
+
+private:
+	bool tryRestart();
+
+	Plan &plan_;
+	bool modifiable_;
+
+	size_t nextPos_;
+	bool someMarked_;
+	bool markedAfterRestart_;
+};
+
+class SQLCompiler::SelectJoinDriving::Cost {
+public:
+	Cost();
+
+	static Cost ofMin();
+	static Cost ofMax();
+
+	static Cost ofExact(int64_t count, CostFactor factor);
+	static Cost ofApprox(int64_t count, CostFactor factor);
+
+	bool isAssigned() const;
+	bool isIndexed() const;
+	bool isReducible() const;
+
+	CostFactor getFactor() const;
+
+	int32_t compareTo(const Cost &another) const;
+	int32_t approxCompareTo(const Cost &another, uint32_t rate) const;
+
+	static Cost ofSumMerged(const Cost &cost1, const Cost &cost2);
+	static Cost ofMinMerged(const Cost &cost1, const Cost &cost2);
+	static Cost ofEqJoinMerged(const Cost &cost1, const Cost &cost2);
+	static Cost ofCrossMerged(const Cost &cost1, const Cost &cost2);
+
+	void mergeSum(const Cost &another);
+	void mergeMin(const Cost &another);
+	void mergeEqJoin(const Cost &another);
+	void mergeCross(const Cost &another);
+
+	Cost withAttributes(const bool *indexed, const bool *reducible) const;
+
+	OptProfile::JoinCost toProfile() const;
+	Constants::StringConstant getCriterion() const;
+
+private:
+	bool tryMergeNonAssigned(const Cost &another, bool unifying);
+
+	static Cost ofInt(int64_t intValue, bool exatct, CostFactor factor);
+	static Cost of(
+			int64_t intValue, double floatVaue, bool exatct, CostFactor factor);
+
+	CostFactor mergeFactor(const Cost &another, bool byMin);
+
+	static int32_t approxCompareInt(int64_t v1, int64_t v2, uint32_t rate);
+	static int32_t approxCompareFloat(double v1, double v2, uint32_t rate);
+
+	static int32_t compareBool(bool v1, bool v2);
+	static int32_t compareInt(int64_t v1, int64_t v2);
+	static int32_t compareFloat(double v1, double v2);
+
+	void addInt(const Cost &another);
+	void addFloat(const Cost &another, int64_t intResult);
+
+	void multiplyInt(const Cost &another);
+	void multiplyFloat(const Cost &another, int64_t intResult);
+
+	bool resolveExactStatus(const Cost &another, bool unifying);
+
+	int64_t intValue_;
+	double floatVaue_;
+	bool exatct_;
+
+	CostFactor factor_;
+	bool indexed_;
+	bool reducible_;
+};
+
+class SQLCompiler::SelectJoinDriving::CostResolver {
+public:
+	CostResolver(
+			SQLCompiler &compiler, TableSizeList &tableSizeList,
+			bool withUnionScan, OptProfile::JoinDriving *profile);
+
+	static bool isAcceptableNode(const PlanNode &node, bool checkOnly);
+	Cost resolveCost(
+			const Plan &plan, const PlanNode &node,
+			uint32_t drivingInput);
+
+	OptProfile::JoinDriving* toProfile(int32_t drivingInput) const;
+
+private:
+	typedef SQLIndexStatsCache::Key ScanRangeKey;
+	typedef util::Map<uint32_t, SQLIndexStatsCache::Key> ScanRangeMap;
+	typedef util::Map<PlanNodeId, Cost> CostMap;
+
+	static bool findAggressiveHints(
+			const PlanNode &node, uint32_t drivingInput, bool &forMax);
+
+	Cost resolveInnerScanCost(
+			const Plan &plan, const PlanNode &node, CostMap &costMap,
+			const Cost &drivingCost, bool byUniqueEqJoin,
+			bool &reducible) const;
+
+	Cost resolveOutputCost(
+			const Plan &plan, const PlanNode &node, CostMap &costMap) const;
+	Cost resolveOutputCostByType(
+			const Plan &plan, const PlanNode &node, CostMap &costMap) const;
+
+	Cost resolveSimpleOutputCost(
+			const Plan &plan, const PlanNode &node, CostMap &costMap) const;
+	Cost resolveJoinOutputCost(
+			const Plan &plan, const PlanNode &node, CostMap &costMap) const;
+
+	Cost resolveScanOutputCost(
+			const Plan &plan, const PlanNode &node, CostMap &costMap,
+			bool withPred) const;
+	Cost resolveUnifiedScanOutputCost(
+			const Plan &plan, const PlanNode &node, CostMap &costMap,
+			bool withPred) const;
+
+	void resolveJoinPredCategory(
+			const Plan &plan, const PlanNode &node, bool &byEq,
+			bool &byUnique) const;
+	void resolveJoinPredCategorySub(
+			const Expr &expr, bool &byEq, std::pair<bool, bool> &byFront) const;
+	Cost mergeJoinCost(
+			const Cost &left, const Cost &right, bool byEq, bool byUnique,
+			SQLType::JoinType joinType) const;
+
+	bool checkJoinInputUnique(
+			const Plan &plan, const PlanNode &node, uint32_t inputId) const;
+	bool checkFrontColumnUnique(const Plan &plan, const PlanNode &node) const;
+
+	Cost resolveScanJoinCost(
+			const Plan &plan, const PlanNode &node, uint32_t inputId,
+			const Cost &baseCost, CostMap &costMap) const;
+	Cost resolveScanTableCost(
+			const Plan &plan, const PlanNode &node,
+			const TableInfo &tableInfo) const;
+
+	void saveAffectedTableSize(
+			const Plan &plan, const PlanNode &node,
+			const TableInfo &tableInfo, const Cost &cost) const;
+	static int64_t resolveTableApproxSize(
+			const Plan &plan, const PlanNode &node,
+			const TableInfo &tableInfo, bool withHint, CostFactor &factor);
+	static int64_t adjustTableApproxSize(int64_t rawSize);
+
+	Cost resolveScanPredCost(
+			const Plan &plan, const PlanNode &node, const Expr &expr,
+			const TableInfo &tableInfo, ScanRangeMap *rangeMap) const;
+	Cost resolveScanOrPredCost(
+			const Plan &plan, const PlanNode &node, const Expr &expr,
+			const TableInfo &tableInfo, uint64_t &elemCount) const;
+
+	Cost resolveScanRangeMapCost(
+			const TableInfo &tableInfo, const ScanRangeMap &rangeMap) const;
+	bool makeScanRangeKey(
+			const Plan &plan, const PlanNode &node, const Expr &expr,
+			const TableInfo &tableInfo,
+			util::LocalUniquePtr<ScanRangeKey> &key) const;
+
+	static void mergeRangeKey(ScanRangeKey &target, const ScanRangeKey &src);
+
+	Cost finalizeFixedCost(
+			bool indexed, bool reducible, const Cost &baseCost) const;
+	Cost finalizeBasicCost(
+			bool indexed, bool reducible, const Cost &drivingCost,
+			const Cost &scanCost) const;
+
+	Cost finalizeCost(
+			const Cost &cost, const Cost *drivingCost,
+			const Cost *scanCost) const;
+
+	void profileCost(
+			const Cost &cost, const Cost *tableScanCost,
+			const Cost *indexScanCost) const;
+
+	void prepareProfiler(
+			const Plan &plan, const PlanNode &node, uint32_t drivingInput);
+
+	const char8_t* getInnerTableName(
+			const Plan &plan, const PlanNode &node, uint32_t drivingInput) const;
+	const TableInfo* findTableInfo(const PlanNode &node) const;
+
+	OptProfile::JoinCost* makeCostProfile(const Cost *src) const;
+	QualifiedName* makeQualifiedName(const char8_t *src) const;
+
+	util::StackAllocator &alloc_;
+	SQLCompiler &compiler_;
+	TableSizeList &tableSizeList_;
+
+	bool withUnionScan_;
+
+	OptProfile::JoinDriving *profile_;
+	OptProfile::JoinDrivingInput *inProfile_;
+};
+
+class SQLCompiler::SelectJoinDriving::Rewriter {
+public:
+	Rewriter(
+			SQLCompiler &compiler, TableSizeList &tableSizeList,
+			bool checkOnly);
+
+	void rewrite(
+			Plan &plan, PlanNode &node, uint32_t drivingInput,
+			OptProfile::JoinDriving *profile);
+
+	void rewriteNonDriving(
+			Plan &plan, PlanNode &node, OptProfile::JoinDriving *profile);
+
+	void rewriteTotal(Plan &plan);
+
+private:
+	util::StackAllocator &alloc_;
+	SQLCompiler &compiler_;
+	TableSizeList &tableSizeList_;
+
+	bool checkOnly_;
+};
+
+class SQLCompiler::SelectJoinDriving::SubOptimizer {
+public:
+	SubOptimizer(SQLCompiler &compiler, bool checkOnly);
+	bool optimize(Plan &plan);
+
+private:
+	int32_t resolveDrivingInput(
+			const Plan &plan, const PlanNode &node,
+			OptProfile::JoinDriving *&profile);
+	void applyJoinOptions(PlanNode &node, int32_t drivingInput);
+
+	NodeCursor makeNodeCursor(Plan &plan);
+	CostResolver makeCostResolver();
+	Rewriter makeRewriter();
+
+	static bool isProfiling(SQLCompiler &compiler);
+
+	SQLCompiler &compiler_;
+	TableSizeList tableSizeList_;
+	bool checkOnly_;
+	bool profiling_;
+};
+
 #endif 
