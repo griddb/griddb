@@ -28,20 +28,20 @@ Note:
     $ cd java_client
     $ ./make_source_for_mvn.sh
     $ mvn clean
-    $ mvn install
+    $ mvn package
 
 ### Start a server
     $ export GS_HOME=$PWD
     $ export GS_LOG=$PWD/log
     $ export PATH=${PATH}:$GS_HOME/bin
 
-    $ bin/gs_passwd admin
+    $ gs_passwd admin
       #input your_password
     $ vi conf/gs_cluster.json
       #    "clusterName":"your_clustername" #<-- input your_clustername
 
-    $ bin/gs_startnode
-    $ bin/gs_joincluster -c your_clustername -u admin/your_password
+    $ gs_startnode
+    $ gs_joincluster -c your_clustername -u admin/your_password
 
 ### Execute a sample program
     $ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
@@ -52,8 +52,8 @@ Note:
       --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
 
 ### Stop a server
-    $ bin/gs_stopcluster -u admin/your_password
-    $ bin/gs_stopnode -u admin/your_password
+    $ gs_stopcluster -u admin/your_password
+    $ gs_stopnode -u admin/your_password
 
 ## [Quick start (Using GridDB Service and CLI)](docs/UsingServiceAndCLI.md)
 
@@ -128,6 +128,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V5.5 Release Notes](docs/GridDB-5.5-CE-RELEASE_NOTES.md)
   - [V5.6 Release Notes](docs/GridDB-5.6-CE-RELEASE_NOTES.md)
   - [V5.7 Release Notes](docs/GridDB-5.7-CE-RELEASE_NOTES.md)
+  - [V5.8 Release Notes](docs/GridDB-5.8-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
