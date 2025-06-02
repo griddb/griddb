@@ -116,6 +116,51 @@ PlatformException PlatformExceptionBuilder::operator()(
 			Exception::STACK_TRACE_TOP);
 }
 
+namespace detail {
+
+
+#ifdef _WIN32
+OSLib::OSLib(LPCWSTR libFileName) :
+		handle_(LoadLibraryW(libFileName)) {
+}
+#endif
+
+OSLib::~OSLib() {
+#ifdef _WIN32
+	if (handle_ != NULL) {
+		FreeLibrary(handle_);
+	}
+#endif
+}
+
+#ifdef _WIN32
+void* OSLib::findFunctionAddress(LPCSTR funcName) {
+	if (handle_ != NULL) {
+		return GetProcAddress(handle_, funcName);
+	}
+
+	return NULL;
+}
+#endif
+
+
+#ifdef _WIN32
+OSFunction::OSFunction(LPCWSTR libFileName, LPCSTR funcName) :
+		lib_(libFileName),
+		address_(lib_.findFunctionAddress(funcName)) {
+}
+#endif
+
+OSFunction::~OSFunction() {
+}
+
+} 
+
+
+#ifdef _WIN32
+detail::OSFunction FileLib::preciseSystemTimeFunc_(
+		L"kernel32.dll", "GetSystemTimePreciseAsFileTime");
+#endif
 
 namespace {
 const int64_t UNIXTIME_FILETIME_EPOC_DIFF =

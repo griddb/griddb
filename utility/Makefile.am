@@ -16,6 +16,8 @@ $(srcdir)/util/file.cpp \
 $(srcdir)/util/file.h \
 $(srcdir)/util/net.cpp \
 $(srcdir)/util/net.h \
+$(srcdir)/util/numeric.cpp \
+$(srcdir)/util/numeric.h \
 $(srcdir)/util/os.cpp \
 $(srcdir)/util/os.h \
 $(srcdir)/util/system.cpp \

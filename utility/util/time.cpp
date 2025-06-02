@@ -92,17 +92,17 @@ TimeZone::TimeZone() :
 		offsetMillis_(Constants::emptyOffsetMillis()) {
 }
 
-TimeZone TimeZone::getLocalTimeZone(int64_t unixTimeMillis) {
-	static_cast<void>(unixTimeMillis);
-
-	TimeZone zone;
-	zone.setOffsetMillis(getLocalOffsetMillis());
-	return zone;
+TimeZone TimeZone::getLocalTimeZone() {
+	return TimeZone::ofOffsetMillis(getLocalOffsetMillis());
 }
 
 TimeZone TimeZone::getUTCTimeZone() {
+	return TimeZone::ofOffsetMillis(0);
+}
+
+TimeZone TimeZone::ofOffsetMillis(Offset millis) {
 	TimeZone zone;
-	zone.setOffsetMillis(0);
+	zone.setOffsetMillis(millis);
 	return zone;
 }
 
@@ -606,6 +606,12 @@ void DateTime::addField(
 	case FIELD_MILLISECOND:
 		unit = 1;
 		break;
+	case FIELD_MICROSECOND:
+		addField((amount / 1000), FIELD_MILLISECOND, option);
+		return;
+	case FIELD_NANOSECOND:
+		addField((amount / 1000 / 1000), FIELD_MILLISECOND, option);
+		return;
 	case FIELD_DAY_OF_WEEK:
 		addField(amount, FIELD_DAY_OF_MONTH, option);
 		return;
@@ -752,6 +758,10 @@ int64_t DateTime::getDifference(
 		else {
 			return diffMillis;
 		}
+	case FIELD_MICROSECOND:
+		return PreciseDateTime::makeDifference(diffMillis, 0, 1000);
+	case FIELD_NANOSECOND:
+		return PreciseDateTime::makeDifference(diffMillis, 0, 1000 * 1000);
 	case FIELD_DAY_OF_WEEK:
 		return getDifference(base, FIELD_DAY_OF_MONTH, option);
 	case FIELD_DAY_OF_YEAR:
@@ -875,7 +885,14 @@ bool DateTime::parse(
 DateTime DateTime::now(const Option &option) {
 #ifdef _WIN32
 	FILETIME time;
-	GetSystemTimeAsFileTime(&time);
+	FileLib::GetSystemTimePreciseAsFileTimeFunc preciseFunc =
+			FileLib::findPreciseSystemTimeFunc();
+	if (preciseFunc == NULL) {
+		GetSystemTimeAsFileTime(&time);
+	}
+	else {
+		preciseFunc(&time);
+	}
 	int64_t unixTime = FileLib::getUnixTime(time);
 #else
 	timespec time;
@@ -912,7 +929,7 @@ DateTime DateTime::max(bool fractionTrimming) {
 }
 
 TimeZone::Offset DateTime::getLocalOffsetMillis() {
-	return TimeZone::getLocalTimeZone(0).getOffsetMillis();
+	return TimeZone::getLocalTimeZone().getOffsetMillis();
 }
 
 int64_t DateTime::getUnixTimeDays(
@@ -1211,7 +1228,7 @@ size_t DateTime::Formatter::format(char8_t *buf, size_t size) const {
 	TimeZone zone = option_.zone_;
 	if (zone.isEmpty()) {
 		if (option_.asLocalTimeZone_) {
-			zone = TimeZone::getLocalTimeZone(dateTime_.getUnixTime());
+			zone = TimeZone::getLocalTimeZone();
 		}
 		else {
 			zone = TimeZone::getUTCTimeZone();
@@ -1459,31 +1476,40 @@ void PreciseDateTime::addField(
 		int64_t amount, FieldType fieldType, const ZonedOption &option) {
 	switch (fieldType) {
 	case DateTime::FIELD_MICROSECOND:
+		addPreciseField(amount, 1000, option);
+		break;
 	case DateTime::FIELD_NANOSECOND:
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT,
-				"Unsupported DateTime field type (type=" <<
-				static_cast<int32_t>(fieldType) << ")");
+		addPreciseField(amount, 1000 * 1000, option);
+		break;
 	default:
+		base_.addField(amount, fieldType, option);
 		break;
 	}
-	base_.addField(amount, fieldType, option);
 }
 
 int64_t PreciseDateTime::getDifference(
 		const PreciseDateTime &base, FieldType fieldType,
 		const ZonedOption &option) const {
+	FieldType upperType;
+	uint32_t preciseUnit;
 	switch (fieldType) {
 	case DateTime::FIELD_MICROSECOND:
+		upperType = DateTime::FIELD_MILLISECOND;
+		preciseUnit = 1000;
+		break;
 	case DateTime::FIELD_NANOSECOND:
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT,
-				"Unsupported DateTime field type (type=" <<
-				static_cast<int32_t>(fieldType) << ")");
+		upperType = DateTime::FIELD_MILLISECOND;
+		preciseUnit = 1000 * 1000;
+		break;
 	default:
+		upperType = fieldType;
+		preciseUnit = 0;
 		break;
 	}
 
 	int64_t carry = 0;
-	if (fieldType != DateTime::FIELD_YEAR &&
+	if (preciseUnit == 0 &&
+			fieldType != DateTime::FIELD_YEAR &&
 			fieldType != DateTime::FIELD_MONTH) {
 		const int32_t baseComp = compareBase(*this, base);
 		if (baseComp != 0) {
@@ -1498,7 +1524,78 @@ int64_t PreciseDateTime::getDifference(
 	}
 
 	const DateTime adjustedTime(base_.getUnixTime() + carry);
-	return adjustedTime.getDifference(base.base_, fieldType, option);
+	const int64_t upperDiff =
+			adjustedTime.getDifference(base.base_, upperType, option);
+
+	if (preciseUnit > 0) {
+		return getPreciseDifference(
+				upperDiff, nanoSeconds_, base.nanoSeconds_, preciseUnit);
+	}
+	return upperDiff;
+}
+
+int64_t PreciseDateTime::makeDifference(
+		int64_t millisDiff, int64_t nanosDiff, int32_t unit) {
+	const int32_t nanosPerMilli = 1000 * 1000;
+	assert(1000 <= unit && unit <= nanosPerMilli);
+
+	int64_t millisOffset = 0;
+	int64_t nanosOffset = 0;
+	if (millisDiff > 0 && nanosDiff < 0) {
+		millisOffset = -1;
+		nanosOffset = nanosPerMilli;
+	}
+	else if (millisDiff < 0 && nanosDiff > 0) {
+		millisOffset = 1;
+		nanosOffset = -nanosPerMilli;
+	}
+
+	const int64_t upper = millisDiff + millisOffset;
+	const int64_t lower = (nanosDiff + nanosOffset) / (nanosPerMilli / unit);
+
+	const int64_t min =
+			std::numeric_limits<int64_t>::min() - lower * (lower < 0 ? 1 : 0);
+	const int64_t max =
+			std::numeric_limits<int64_t>::max() - lower * (lower > 0 ? 1 : 0);
+
+	if (upper < min / unit || max / unit < upper) {
+		UTIL_THROW_UTIL_ERROR(
+				CODE_VALUE_OVERFLOW, "Time difference value overflow");
+	}
+
+	return upper * unit + lower;
+}
+
+void PreciseDateTime::addPreciseField(
+		int64_t amount, int32_t unit, const ZonedOption &option) {
+	const int32_t nanosPerMilli = 1000 * 1000;
+	assert(1000 <= unit && unit <= nanosPerMilli);
+
+	const int64_t upper = amount / unit;
+	const int64_t lower = (amount - upper * unit) * (nanosPerMilli / unit);
+
+	const int64_t rawNanos = static_cast<int64_t>(nanoSeconds_) + lower;
+	int64_t carry;
+	if (rawNanos < 0) {
+		carry = -1;
+	}
+	else if (rawNanos >= nanosPerMilli) {
+		carry = 1;
+	}
+	else {
+		carry = 0;
+	}
+
+	base_.addField(upper + carry, DateTime::FIELD_MILLISECOND, option);
+	nanoSeconds_ = static_cast<uint32_t>(rawNanos - nanosPerMilli * carry);
+}
+
+int64_t PreciseDateTime::getPreciseDifference(
+		int64_t millisDiff, uint32_t nanos1, uint32_t nanos2, uint32_t unit) {
+	const int64_t nanosDiff =
+			static_cast<int64_t>(nanos1) - static_cast<int64_t>(nanos2);
+
+	return makeDifference(millisDiff, nanosDiff, unit);
 }
 
 int32_t PreciseDateTime::compareBase(

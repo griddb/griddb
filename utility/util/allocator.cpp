@@ -895,9 +895,12 @@ void FixedSizeCachedAllocator::setLimit(
 
 AllocatorLimitter* FixedSizeCachedAllocator::setLimit(
 		AllocatorStats::Type type, AllocatorLimitter *limitter, bool force) {
-	static_cast<void>(type);
-	static_cast<void>(limitter);
-	static_cast<void>(force);
+	if (localAlloc_.get() != NULL) {
+		localAlloc_->setLimit(type, limitter, force);
+	}
+	if (localLockedAlloc_.get() != NULL) {
+		localLockedAlloc_->setLimit(type, limitter, force);
+	}
 	return NULL;
 }
 
@@ -1419,8 +1422,6 @@ void* StackAllocator::allocateOverBlock(size_t size) {
 			hugeCount_++;
 			hugeSize_ += blockSize;
 
-			stats_.values_[AllocatorStats::STAT_TOTAL_SIZE] =
-					AllocatorStats::asStatValue(getTotalSizeForStats());
 			stats_.values_[AllocatorStats::STAT_PEAK_TOTAL_SIZE] = std::max(
 					stats_.values_[AllocatorStats::STAT_PEAK_TOTAL_SIZE],
 					stats_.values_[AllocatorStats::STAT_TOTAL_SIZE]);
@@ -1441,6 +1442,8 @@ void* StackAllocator::allocateOverBlock(size_t size) {
 	restSize_ = newBlock->bodySize() - size;
 
 	totalSize_ += newBlock->blockSize_;
+	stats_.values_[AllocatorStats::STAT_TOTAL_SIZE] =
+			AllocatorStats::asStatValue(getTotalSizeForStats());
 
 	return newBlock->body();
 #endif
@@ -1805,7 +1808,9 @@ void AllocatorManager::setSharingLimitterGroup(GroupId id, GroupId sharingId) {
 	assert(sharingEntry.totalLimitter_ != NULL);
 
 	entry.sharingLimitterId_ = sharingId;
-	entry.totalLimitter_ = sharingEntry.totalLimitter_;
+	setLimit(id, LIMIT_GROUP_TOTAL_SIZE, std::numeric_limits<size_t>::max());
+
+	assert(entry.totalLimitter_ != NULL);
 }
 
 int64_t AllocatorManager::estimateHeapUsage(
@@ -1869,7 +1874,7 @@ void AllocatorManager::applyAllocatorLimit(
 	switch (limitType) {
 	case LIMIT_GROUP_TOTAL_SIZE:
 		command = COMMAND_SET_TOTAL_LIMITTER;
-		type = AllocatorStats::STAT_TYPE_END;
+		type = AllocatorStats::STAT_GROUP_TOTAL_LIMIT;
 		if (groupEntry.totalLimitter_ == NULL) {
 			return;
 		}
@@ -2119,6 +2124,7 @@ AllocatorLimitter& AllocatorManager::prepareTotalLimitter(
 		else {
 			entry.totalLimitter_ =
 					&prepareTotalLimitter(entry.sharingLimitterId_, found);
+			found = false;
 		}
 	}
 	else {
@@ -2243,12 +2249,25 @@ AllocatorLimitter::AllocatorLimitter(
 		limit_(std::numeric_limits<size_t>::max()),
 		acquired_(0),
 		reserved_(0),
+		peakUsage_(0),
 		failOnExcess_(false),
 		errorHandler_(NULL) {
 }
 
 AllocatorLimitter::~AllocatorLimitter() {
 	assert(acquired_ == 0);
+}
+
+AllocatorLimitter::Stats AllocatorLimitter::getStats() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	Stats stats;
+	stats.usage_ = getLocalUsageSize();
+	stats.peakUsage_ = peakUsage_;
+	stats.limit_ = limit_;
+	stats.failOnExcess_ = failOnExcess_;
+
+	return stats;
 }
 
 void AllocatorLimitter::setFailOnExcess(bool enabled) {
@@ -2278,6 +2297,7 @@ size_t AllocatorLimitter::acquire(
 	const size_t size =
 			acquireLocal(requestingMin, requestingDesired, force, requester);
 	reserved_ -= std::min(reserved_, size);
+	updatePeakUsageSize();
 	return size;
 }
 
@@ -2296,6 +2316,7 @@ void AllocatorLimitter::shrinkReservation(size_t size) {
 	const size_t actualSize = std::min(reserved_, size);
 	releaseLocal(actualSize);
 	reserved_ -= actualSize;
+	updatePeakUsageSize();
 }
 
 size_t AllocatorLimitter::getAvailableSize() {
@@ -2388,6 +2409,17 @@ size_t AllocatorLimitter::getLocalAvailableSize() {
 	return limit_ - acquired_;
 }
 
+size_t AllocatorLimitter::getLocalUsageSize() {
+	return acquired_ - reserved_;
+}
+
+void AllocatorLimitter::updatePeakUsageSize() {
+	const size_t current = getLocalUsageSize();
+	if (current > peakUsage_) {
+		peakUsage_ = current;
+	}
+}
+
 const AllocatorLimitter& AllocatorLimitter::resolveRequester(
 		const AllocatorLimitter *base) {
 	if (base == NULL) {
@@ -2445,6 +2477,13 @@ size_t AllocatorLimitter::errorAcquisition(
 
 AllocatorLimitter::Scope::~Scope() {
 	unbinder_(allocator_, orgLimitter_);
+}
+
+AllocatorLimitter::Stats::Stats() :
+		usage_(0),
+		peakUsage_(0),
+		limit_(0),
+		failOnExcess_(false) {
 }
 
 }	

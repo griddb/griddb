@@ -1566,13 +1566,13 @@ bool Directory::nextEntry(u8string &name) {
 	name.clear();
 
 #ifdef UTIL_HAVE_OPENDIR
-	DirEnt entryBuf;
 	struct dirent *result;
-	if (readdir_r(data_->dir_, &entryBuf.body_, &result) != 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-
+	errno = 0;
+	result = readdir(data_->dir_);
 	if (result == NULL) {
+		if (errno != 0) {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
 		return false;
 	}
 

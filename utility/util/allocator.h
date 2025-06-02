@@ -2228,11 +2228,13 @@ static AllocatorManager::Initializer g_allocatorManagerInitializer;
 class AllocatorLimitter {
 public:
 	class Scope;
+	struct Stats;
 
 	AllocatorLimitter(const AllocatorInfo &info, AllocatorLimitter *parent);
 	~AllocatorLimitter();
 
-	size_t getLimit();
+	Stats getStats();
+
 	void setLimit(size_t size);
 	void setFailOnExcess(bool enabled);
 
@@ -2260,6 +2262,8 @@ private:
 	void releaseLocal(size_t size);
 
 	size_t getLocalAvailableSize();
+	size_t getLocalUsageSize();
+	void updatePeakUsageSize();
 
 	const AllocatorLimitter& resolveRequester(const AllocatorLimitter *base);
 	bool resolveFailOnExcess(
@@ -2273,6 +2277,7 @@ private:
 	size_t limit_;
 	size_t acquired_;
 	size_t reserved_;
+	size_t peakUsage_;
 	bool failOnExcess_;
 	util::Mutex mutex_;
 	util::AllocationErrorHandler *errorHandler_;
@@ -2293,6 +2298,15 @@ private:
 	AllocatorLimitter *orgLimitter_;
 	void *allocator_;
 	UnbindFunc unbinder_;
+};
+
+struct AllocatorLimitter::Stats {
+	Stats();
+
+	size_t usage_;
+	size_t peakUsage_;
+	size_t limit_;
+	bool failOnExcess_;
 };
 
 /*!
@@ -3131,6 +3145,12 @@ inline void FixedSizeAllocator<Mutex>::acquireForRequester(
 	if (requester.acquire(elementSize_, limitter_)) {
 		assert(totalElementCount_ > 0);
 		totalElementCount_--;
+
+		int64_t &statValue = stats_.values_[AllocatorStats::STAT_TOTAL_SIZE];
+		const int64_t statSize = static_cast<int64_t>(elementSize_);
+
+		assert(statValue >= statSize);
+		statValue -= statSize;
 	}
 }
 
@@ -3140,6 +3160,11 @@ inline void FixedSizeAllocator<Mutex>::releaseForRequester(
 		const R &requester) {
 	if (requester.release(elementSize_, limitter_)) {
 		totalElementCount_++;
+
+		int64_t &statValue = stats_.values_[AllocatorStats::STAT_TOTAL_SIZE];
+		const int64_t statSize = static_cast<int64_t>(elementSize_);
+
+		statValue += statSize;
 	}
 }
 
@@ -3549,6 +3574,9 @@ AllocatorLimitter* VariableSizeAllocator<Mutex, Traits>::setLimit(
 	case AllocatorStats::STAT_GROUP_TOTAL_LIMIT:
 		limitter_ = AllocatorLimitter::moveSize(
 				limitter, limitter_, hugeElementSize_, force);
+		for (size_t i = 0; i < FIXED_ALLOCATOR_COUNT; i++) {
+			baseList_[i]->setLimit(type, limitter, force);
+		}
 		break;
 	default:
 		break;
@@ -4190,11 +4218,11 @@ inline void AllocatorManager::Accessor<Alloc>::access(
 		target->getStats(*params.stats_);
 		break;
 	case COMMAND_SET_TOTAL_LIMITTER:
-		target->setLimit(params.type_, params.size_);
-		break;
-	case COMMAND_SET_EACH_LIMIT:
 		assert(params.limitter_ != NULL);
 		target->setLimit(params.type_, params.limitter_);
+		break;
+	case COMMAND_SET_EACH_LIMIT:
+		target->setLimit(params.type_, params.size_);
 		break;
 #if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
 	case COMMAND_SAVE_REPORTER_SNAPSHOT: {
