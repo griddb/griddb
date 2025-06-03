@@ -33,8 +33,10 @@ public:
 
 	TimeZone();
 
-	static TimeZone getLocalTimeZone(int64_t unixTimeMillis);
+	static TimeZone getLocalTimeZone();
 	static TimeZone getUTCTimeZone();
+
+	static TimeZone ofOffsetMillis(Offset millis);
 
 	bool isEmpty() const;
 	bool checkRange(bool throwOnError) const;
@@ -382,6 +384,8 @@ public:
 	int64_t getDifference(
 			const PreciseDateTime &base, FieldType fieldType,
 			const ZonedOption &option) const;
+	static int64_t makeDifference(
+			int64_t millisDiff, int64_t nanosDiff, int32_t unit);
 
 	Formatter getFormatter(const ZonedOption &option) const;
 	Parser getParser(const ZonedOption &option);
@@ -389,6 +393,12 @@ public:
 	static PreciseDateTime max(const Option &option);
 
 private:
+	void addPreciseField(
+			int64_t amount, int32_t unit, const ZonedOption &option);
+	static int64_t getPreciseDifference(
+			int64_t millisDiff, uint32_t nanos1, uint32_t nanos2,
+			uint32_t unit);
+
 	static int32_t compareBase(
 			const PreciseDateTime &t1, const PreciseDateTime &t2);
 	static int32_t compareNanos(

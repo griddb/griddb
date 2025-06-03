@@ -55,6 +55,8 @@ struct SQLHint {
 		LEGACY_PLAN,
 		COST_BASED_JOIN,
 		NO_COST_BASED_JOIN,
+		COST_BASED_JOIN_DRIVING,
+		NO_COST_BASED_JOIN_DRIVING,
 
 		OPTIMIZER_FAILURE_POINT,
 
@@ -220,7 +222,8 @@ public:
 	typedef SQLTableInfo::BasicIndexInfoList BasicIndexInfoList;
 	typedef int32_t NodeId;
 
-	explicit SQLTableInfoList(util::StackAllocator &alloc);
+	SQLTableInfoList(
+			util::StackAllocator &alloc, SQLIndexStatsCache *indexStats);
 
 	uint32_t size() const;
 	typedef util::Vector<SQLTableInfo::SubInfo> SubInfoList;
@@ -249,6 +252,8 @@ public:
 	const BasicIndexInfoList* getIndexInfoList(
 			const SQLTableInfo::IdInfo &idInfo) const;
 
+	SQLIndexStatsCache& getIndexStats() const;
+
 private:
 	typedef util::Vector<SQLTableInfo> List;
 
@@ -256,6 +261,7 @@ private:
 
 	List list_;
 	util::String *defaultDBName_;
+	SQLIndexStatsCache *indexStats_;
 };
 
 
@@ -524,6 +530,12 @@ struct SQLPreparedPlan::Constants {
 		STR_EDGE_DEGREE,
 		STR_EDGE_WEAKNESS,
 
+		STR_NONE,
+		STR_TABLE,
+		STR_INDEX,
+		STR_SCHEMA,
+		STR_SYNTAX,
+
 		STR_HINT,
 
 		END_STR
@@ -558,6 +570,8 @@ struct SQLPreparedPlan::OptProfile {
 	struct JoinCost;
 	struct JoinNode;
 	struct JoinTree;
+	struct JoinDriving;
+	struct JoinDrivingInput;
 
 	typedef int32_t JoinOrdinal;
 	typedef util::Vector<JoinOrdinal> JoinOrdinalList;
@@ -566,11 +580,18 @@ struct SQLPreparedPlan::OptProfile {
 
 	OptProfile();
 
+	template<typename T>
+	util::Vector<T>*& getEntryList();
+
 	static bool clearIfEmpty(OptProfile *&profile);
 
-	UTIL_OBJECT_CODER_MEMBERS(joinReordering_);
+	template<typename T>
+	static bool isListEmpty(const util::Vector<T> *list);
+
+	UTIL_OBJECT_CODER_MEMBERS(joinReordering_, joinDriving_);
 
 	util::Vector<Join> *joinReordering_;
+	util::Vector<JoinDriving> *joinDriving_;
 };
 
 struct SQLPreparedPlan::OptProfile::Join {
@@ -652,6 +673,42 @@ struct SQLPreparedPlan::OptProfile::JoinCost {
 	uint64_t edgeWeakness_; 
 
 	int64_t approxSize_; 
+};
+
+struct SQLPreparedPlan::OptProfile::JoinDriving {
+	JoinDriving();
+
+	UTIL_OBJECT_CODER_MEMBERS(driving_, inner_, left_, right_);
+
+	JoinDrivingInput *driving_;
+	JoinDrivingInput *inner_;
+
+	JoinDrivingInput *left_;
+	JoinDrivingInput *right_;
+
+	ProfileKey profileKey_;
+};
+
+struct SQLPreparedPlan::OptProfile::JoinDrivingInput {
+	JoinDrivingInput();
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			qName_,
+			cost_,
+			tableScanCost_,
+			indexScanCost_,
+			UTIL_OBJECT_CODER_ENUM(
+					criterion_, Constants::END_STR, Constants::CONSTANT_CODER),
+			UTIL_OBJECT_CODER_OPTIONAL(indexed_, true),
+			UTIL_OBJECT_CODER_OPTIONAL(reducible_, true));
+
+	QualifiedName *qName_;
+	JoinCost *cost_;
+	JoinCost *tableScanCost_;
+	JoinCost *indexScanCost_;
+	Constants::StringConstant criterion_;
+	bool indexed_;
+	bool reducible_;
 };
 
 class SQLHintInfo {
@@ -913,6 +970,7 @@ public:
 	class GenOverContext;
 
 	class ReorderJoin;
+	class SelectJoinDriving;
 
 	typedef SQLTableInfo TableInfo;
 	typedef SQLTableInfoList TableInfoList;
@@ -1124,7 +1182,9 @@ private:
 	static const uint64_t JOIN_SCORE_MAX;
 	static const uint64_t DEFAULT_MAX_INPUT_COUNT;
 	static const uint64_t DEFAULT_MAX_EXPANSION_COUNT;
+
 	static const SQLPlanningVersion LEGACY_JOIN_REORDERING_VERSION;
+	static const SQLPlanningVersion LEGACY_JOIN_DRIVING_VERSION;
 
 	void genDistributedPlan(Plan &plan, bool costCheckOnly);
 
@@ -1195,17 +1255,17 @@ private:
 			const Expr &keyExprInCond, const Expr &optionExpr);
 	Expr makeRangeGroupIdExpr(Plan &plan, const Expr &optionExpr);
 	Expr makeRangeGroupPredicate(
-			const Expr &keyExpr, Type fillType, int64_t interval,
-			TupleValue lower, TupleValue upper, int64_t limit);
+			const Expr &keyExpr, Type fillType, const TupleValue &interval,
+			const TupleValue &lower, const TupleValue &upper, int64_t limit);
 
-	int64_t resolveRangeGroupIntervalOrOffset(
-			int64_t baseInterval, int64_t unit, bool forInterval);
-	void adjustRangeGroupInterval(
-			int64_t &interval, int64_t &offset, const TupleValue &timeZone);
+	void getRangeGroupOptions(
+			const Expr &optionExpr, Expr *&inKeyExpr, Type &fillType,
+			int64_t &baseInterval, util::DateTime::FieldType &unit,
+			int64_t &baseOffset, util::TimeZone &timeZone);
 	bool findRangeGroupBoundary(
 			const Expr &expr, const Expr &keyExpr, TupleValue &value,
 			bool forLower);
-	TupleValue resolveRangeGroupTimeZone(const TupleValue &specified);
+	util::TimeZone resolveRangeGroupTimeZone(const TupleValue &specified);
 	Expr* makeRangeGroupConst(const TupleValue &value);
 
 	bool findDistinctAggregation(const ExprList *exprList);
@@ -1292,6 +1352,35 @@ private:
 			GenRAContext &cxt, GenOverContext &overCxt, Plan &plan);
 	void genWindowMainPlan(
 			GenRAContext &cxt, GenOverContext &overCxt, Plan &plan);
+	void genFrameOptionExpr(
+			GenOverContext& overCxt, PlanExprList& tmpFrameOptionList,
+			Plan& plan);
+
+	TupleValue getWindowFrameBoundaryValue(
+			const SyntaxTree::WindowFrameBoundary &boundary, Plan &plan);
+	int64_t genFrameRangeValue(const Expr *inExpr, Plan &plan);
+
+	void checkWindowFrameFunctionType(const Expr &windowExpr);
+
+	static void checkWindowFrameValues(
+			const TupleValue &startValue, const TupleValue &finishValue,
+			int64_t flags, const Expr *inExpr);
+	static void checkWindowFrameBoundaryOptions(
+			int64_t flags, const TupleValue &startValue,
+			const TupleValue &finishValue, const Expr *inExpr);
+
+	static void checkWindowFrameFlags(int64_t flags, const Expr *inExpr);
+
+	static void checkWindowFrameOrdering(
+			const PlanExprList &orderByList, int64_t flags,
+			const TupleValue &startValue, const TupleValue &finishValue,
+			const Expr *inExpr);
+
+	static int64_t windowFrameModeToFlag(
+			SyntaxTree::WindowFrameOption::FrameMode mode);
+
+	static int64_t getWindowFrameOrderingFlag(const PlanExprList &orderByList);
+	static int64_t windowFrameTypeToFlag(SQLType::WindowFrameType type);
 
 	void preparePseudoWindowOption(
 			GenRAContext &cxt, GenOverContext &overCxt, Plan &plan);
@@ -1522,12 +1611,13 @@ private:
 			PlanNode::CommandOptionFlag &optionFlag, const SQLHintInfo &hint);
 
 	void relocateOptimizationProfile(Plan &plan);
+	template<typename T>
 	bool relocateOptimizationProfile(
 			Plan &plan, const KeyToNodeIdList &keyToNodeIdList,
-			util::Vector<SQLPreparedPlan::OptProfile::Join> *&joinList);
+			util::Vector<T> *&entryList);
+	template<typename T>
 	void addOptimizationProfile(
-			Plan *plan, PlanNode *node,
-			SQLPreparedPlan::OptProfile::Join *profile);
+			Plan *plan, PlanNode *node, T *profile);
 	SQLPreparedPlan::OptProfile& prepareOptimizationProfile(
 			Plan *plan, PlanNode *node);
 	SQLPreparedPlan::ProfileKey prepareProfileKey(PlanNode &node);
@@ -1556,7 +1646,8 @@ private:
 	bool assignJoinPrimaryCond(Plan &plan, bool &complexFound);
 	bool makeScanCostHints(Plan &plan);
 	bool makeJoinPushDownHints(Plan &plan);
-	bool makeIndexJoin(Plan &plan, bool checkOnly);
+	bool selectJoinDriving(Plan &plan, bool checkOnly);
+	bool selectJoinDrivingLegacy(Plan &plan, bool checkOnly);
 	bool factorizePredicate(Plan &plan);
 	bool reorderJoin(Plan &plan, bool &tableCostAffected);
 
@@ -1702,6 +1793,7 @@ private:
 	int64_t getMaxGeneratedRows(const Plan &plan);
 
 	bool isLegacyJoinReordering(const Plan &plan);
+	bool isLegacyJoinDriving(const Plan &plan);
 	static bool isLegacyPlanning(
 			const Plan &plan, const SQLPlanningVersion &legacyVersion);
 	SQLPlanningVersion getPlanningVersionHint(const SQLHintInfo *hintInfo);
@@ -2071,15 +2163,15 @@ private:
 
 	bool findIndexedPredicate(
 			const Plan &plan, const PlanNode &node, uint32_t inputId,
-			bool withUnionScan);
+			bool withUnionScan, bool *unique);
 	bool findIndexedPredicateSub(
 			const Plan &plan, const PlanNode &node, uint32_t inputId,
-			const uint32_t *unionInputId);
+			const uint32_t *unionInputId, bool *unique);
 	bool findIndexedPredicateSub(
 			const Plan &plan, const PlanNode &node,
 			const SQLTableInfo::BasicIndexInfoList &indexInfoList,
 			uint32_t inputId, const uint32_t *unionInputId, const Expr &expr,
-			bool &firstUnmatched);
+			bool &firstUnmatched, bool *unique);
 
 	void dereferenceAndAppendExpr(
 			Plan &plan, PlanNodeRef &node, uint32_t inputId, const Expr &inExpr,
@@ -3165,6 +3257,12 @@ public:
 	void setCostBasedJoin(bool value);
 	bool isCostBasedJoin() const;
 
+	void setCostBasedJoinDriving(bool value);
+	bool isCostBasedJoinDriving() const;
+
+	void setIndexStatsRequester(SQLIndexStatsCache::RequesterHolder *value);
+	SQLIndexStatsCache::RequesterHolder* getIndexStatsRequester() const;
+
 	static const CompileOption& getEmptyOption();
 
 	static const SQLCompiler* findBaseCompiler(
@@ -3177,6 +3275,9 @@ private:
 
 	SQLPlanningVersion planningVersion_;
 	bool costBasedJoin_;
+	bool costBasedJoinDriving_;
+
+	SQLIndexStatsCache::RequesterHolder *indexStatsRequester_;
 
 	const SQLCompiler *baseCompiler_;
 };
@@ -3208,9 +3309,10 @@ public:
 			const Expr &expr, bool &uncovered,
 			util::Vector<int64_t> *affinityList,
 			util::Vector<uint32_t> *subList,
-			const Plan::ValueList *parameterList, bool &placeholderAffected);
+			const Plan::ValueList *parameterList, bool &placeholderAffected,
+			util::Set<int64_t> &unmatchAffinitySet);
 
-	static bool isReduceableTablePartitionCondition(
+	static bool isReducibleTablePartitionCondition(
 			const Expr &expr, const TableInfo &tableInfo,
 			const util::Vector<uint32_t> &affinityRevList,
 			int32_t subContainerId);
@@ -3225,12 +3327,30 @@ public:
 			util::Vector<uint32_t> &affinityRevList);
 
 	static bool isRangeGroupSupportedType(ColumnType type);
-	static TupleValue getRangeGroupBoundary(
-			util::StackAllocator &alloc, ColumnType keyType, TupleValue base,
-			bool forLower, bool inclusive);
+	static void resolveRangeGroupInterval(
+			util::StackAllocator &alloc, ColumnType type, int64_t baseInterval,
+			int64_t baseOffset, util::DateTime::FieldType unit,
+			const util::TimeZone &timeZone, TupleValue &inerval,
+			TupleValue &offset);
+	static bool findRangeGroupBoundary(
+			util::StackAllocator &alloc, ColumnType keyType,
+			const TupleValue &base, bool forLower, bool inclusive,
+			TupleValue &boundary);
 	static bool adjustRangeGroupBoundary(
-			TupleValue &lower, TupleValue &upper, int64_t interval,
-			int64_t offset);
+			util::StackAllocator &alloc, TupleValue &lower, TupleValue &upper,
+			const TupleValue &interval, const TupleValue &offset);
+	static TupleValue mergeRangeGroupBoundary(
+			const TupleValue &base1, const TupleValue &base2, bool forLower);
+
+	static bool findAdjustedRangeValues(
+			util::StackAllocator &alloc, const TableInfo &tableInfo,
+			const util::Vector<TupleValue> *parameterList,
+			const Expr &expr, uint32_t &columnId,
+			std::pair<TupleValue, TupleValue> &valuePair,
+			std::pair<bool, bool> &inclusivePair);
+
+	static TupleValue makeTimestampValue(
+			util::StackAllocator &alloc, const util::PreciseDateTime &src);
 
 	static TupleValue evalConstExpr(
 			TupleValue::VarContext &varCxt, const Expr &expr,

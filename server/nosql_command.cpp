@@ -401,6 +401,8 @@ void NoSQLContainer::getContainerInfo(NoSQLStoreOption& option) {
 		EventByteOutStream out = request.getOutStream();
 		encodeFixedPart(out, eventType);
 		encodeOptionPart(out, eventType, option);
+		SQLGetContainerHandler::encodeSubCommand(
+				out, SQLGetContainerHandler::SUB_CMD_GET_CONTAINER);
 		StatementHandler::encodeContainerKey(out, *containerKey_);
 		bool isContainerLock = false;
 		StatementHandler::encodeBooleanData<EventByteOutStream>(out, isContainerLock);
@@ -411,33 +413,25 @@ void NoSQLContainer::getContainerInfo(NoSQLStoreOption& option) {
 		util::XArray<uint8_t> response(eventStackAlloc_);
 		executeCommand(request, true, response);
 
-		SQLVariableSizeGlobalAllocator& globalVarAlloc
-			= context_->getGlobalAllocator();
-		TableSchemaInfo schemaInfo(globalVarAlloc);
-		uint8_t* syncBinaryData = response.data();
-		size_t syncBinarySize = response.size();
-		if (syncBinarySize == 0) {
-			return;
-		}
-		util::ArrayByteInStream in =
-			util::ArrayByteInStream(
+		SQLVariableSizeGlobalAllocator &globalVarAlloc =
+				context_->getGlobalAllocator();
+		const uint8_t *syncBinaryData = response.data();
+		const size_t syncBinarySize = response.size();
+
+		util::ArrayByteInStream in = util::ArrayByteInStream(
 				util::ArrayInStream(syncBinaryData, syncBinarySize));
-		util::XArray<uint8_t> schemaData(eventStackAlloc_);
-		int32_t schemaSize = static_cast<uint32_t>(in.base().remaining());
-		schemaData.resize(schemaSize);
-		in >> std::make_pair(schemaData.data(), schemaSize);
-		try {
-			util::ArrayByteInStream inStream(util::ArrayInStream(
-				schemaData.data(), schemaData.size()));
-			util::ObjectCoder::withAllocator(globalVarAlloc).decode(inStream, schemaInfo);
-		}
-		catch (std::exception& e) {
-			GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(
-				e, "Failed to decode schema message"));
-		}
-		founded_ = schemaInfo.founded_;
+
+		util::AllocUniquePtr<TableSchemaInfo> schemaInfoPtr;
+		SQLGetContainerHandler::EstimationList estimationList(eventStackAlloc_);
+
+		SQLGetContainerHandler::decodeResult(
+				in, eventStackAlloc_, globalVarAlloc, schemaInfoPtr,
+				estimationList);
+
+		founded_ = (schemaInfoPtr.get() != NULL && schemaInfoPtr->founded_);
 		if (founded_) {
 			if (!setted_) {
+				TableSchemaInfo &schemaInfo = *schemaInfoPtr;
 				TableContainerInfo& containerInfo = schemaInfo.containerInfoList_[0];
 				attribute_
 					= static_cast<ContainerAttribute>(schemaInfo.containerAttr_);
@@ -482,6 +476,48 @@ void NoSQLContainer::getContainerInfo(NoSQLStoreOption& option) {
 				sqlString_ = schemaInfo.sqlString_.c_str();
 				setted_ = true;
 			}
+		}
+	}
+	catch (std::exception& e) {
+		checkException(statementType_, e);
+	}
+}
+
+void NoSQLContainer::estimateIndexSearchSize(
+		const SQLIndexStatsCache::KeyList &keyList, NoSQLStoreOption &option,
+		util::Vector<int64_t> &estimationList) {
+	try {
+		EventType eventType = SQL_GET_CONTAINER;
+		ClientSession::Builder sessionBuilder(this, eventType);
+		start(sessionBuilder);
+		Event request(*ec_, eventType, getPartitionId());
+		EventByteOutStream out = request.getOutStream();
+		encodeFixedPart(out, eventType);
+		encodeOptionPart(out, eventType, option);
+		SQLGetContainerHandler::encodeSubCommand(
+				out,
+				SQLGetContainerHandler::SUB_CMD_ESTIMATE_INDEX_SEARCH_SIZE);
+		encodeIndexEstimationKeyList(out, keyList);
+
+		util::XArray<uint8_t> response(eventStackAlloc_);
+		executeCommand(request, true, response);
+
+		SQLVariableSizeGlobalAllocator &globalVarAlloc =
+				context_->getGlobalAllocator();
+		const uint8_t *syncBinaryData = response.data();
+		const size_t syncBinarySize = response.size();
+
+		util::ArrayByteInStream in = util::ArrayByteInStream(
+				util::ArrayInStream(syncBinaryData, syncBinarySize));
+
+		util::AllocUniquePtr<TableSchemaInfo> schemaInfoPtr;
+
+		SQLGetContainerHandler::decodeResult(
+				in, eventStackAlloc_, globalVarAlloc, schemaInfoPtr,
+				estimationList);
+
+		if (keyList.size() != estimationList.size()) {
+			estimationList.resize(keyList.size(), -1);
 		}
 	}
 	catch (std::exception& e) {
@@ -1580,7 +1616,10 @@ void NoSQLContainer::encodeOptionPart(EventByteOutStream& out, EventType type,
 		case SQL_GET_CONTAINER:
 			optionalRequest.set<
 				StatementMessage::Options::FEATURE_VERSION>
-				(MessageSchema::V4_1_VERSION);
+				(SQLGetContainerHandler::LATEST_FEATURE_VERSION);
+			optionalRequest.set<
+				StatementMessage::Options::ACCEPTABLE_FEATURE_VERSION>
+				(SQLGetContainerHandler::LATEST_FEATURE_VERSION);
 		case GET_CONTAINER:
 		case GET_CONTAINER_PROPERTIES:
 			if (option.featureVersion_ != -1) {
@@ -3360,6 +3399,64 @@ MapType getAvailableIndex(const DataStoreConfig& dsConfig, const char* indexName
 void NoSQLContainer::createNoSQLClientId() {
 	UUIDUtils::generate(nosqlClientId_.uuid_);
 	nosqlClientId_.sessionId_ = 1;
+}
+
+void NoSQLContainer::encodeIndexEstimationKeyList(
+		EventByteOutStream &out,
+		const SQLIndexStatsCache::KeyList &keyList) {
+	const uint32_t count = static_cast<uint32_t>(keyList.size());
+	out << count;
+
+	for (uint32_t i = 0; i < count; i++) {
+		encodeIndexEstimationKey(out, keyList[i]);
+	}
+}
+
+void NoSQLContainer::encodeIndexEstimationKey(
+		EventByteOutStream &out, const SQLIndexStatsCache::Key &key) {
+	out << key.containerId_;
+
+	encodeIndexEstimationKeyColumns(out, key);
+
+	uint32_t count = 0;
+	count += (key.lower_.getType() == TupleList::TYPE_NULL ? 0 : 1);
+	count += (key.upper_.getType() == TupleList::TYPE_NULL ? 0 : 1);
+	out << count;
+
+	for (uint32_t i = 0; i < 2; i++) {
+		const bool upper = (i != 0);
+		const TupleValue &value = (upper ? key.upper_ : key.lower_);
+		if (value.getType() == TupleList::TYPE_NULL) {
+			continue;
+		}
+		encodeIndexEstimationKeyCondition(out, key, upper);
+	}
+}
+
+void NoSQLContainer::encodeIndexEstimationKeyColumns(
+		EventByteOutStream &out, const SQLIndexStatsCache::Key &key) {
+	uint32_t count = 1;
+	out << count;
+	out << key.column_;
+}
+
+void NoSQLContainer::encodeIndexEstimationKeyCondition(
+		EventByteOutStream &out, const SQLIndexStatsCache::Key &key,
+		bool upper) {
+	const int32_t opType = (upper ?
+			(key.upperInclusive_ ? DSExpression::LE : DSExpression::LT) :
+			(key.lowerInclusive_ ? DSExpression::GE : DSExpression::GT));
+	const TupleValue &value = (upper ? key.upper_ : key.lower_);
+	const ColumnType columnType = convertTupleTypeToNoSQLType(value.getType());
+
+	size_t valueSize;
+	const uint8_t *valueBody = static_cast<const uint8_t*>(
+			SQLProcessor::ValueUtils::getValueBody(value, valueSize));
+
+	out << opType;
+	out << columnType;
+	out << static_cast<uint32_t>(valueSize);
+	out << std::make_pair(valueBody, valueSize);
 }
 
 NoSQLRequest::NoSQLRequest(SQLVariableSizeGlobalAllocator& varAlloc,

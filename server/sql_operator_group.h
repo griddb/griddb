@@ -52,6 +52,8 @@ struct SQLGroupOps {
 
 	typedef SQLOpUtils::ProjectionPair ProjectionPair;
 
+	typedef SQLExprs::RangeKey RangeKey;
+
 	typedef SQLValues::TupleDigester::WithAccessor<
 			SQLValues::ValueAccessor::ByReader, 1, true> UniqTupleDigester;
 	typedef SQLValues::ReadableTupleRef::WithDigester<
@@ -258,7 +260,7 @@ private:
 			false, false, false, false,
 			SQLValues::ValueAccessor::ByReader> TupleEq;
 
-	typedef int64_t (*ValueReaderFunc)(const ValueReader &reader);
+	typedef RangeKey (*ValueReaderFunc)(const ValueReader &reader);
 	typedef SQLValues::SummaryTupleSet::ColumnList AggrColumnList;
 
 	struct MergeContext;
@@ -300,11 +302,12 @@ private:
 			OpContext &cxt, MergeContext &mergeCxt,
 			SQLValues::SummaryTupleSet *&tupleSet, SummaryTuple *&aggrTuple);
 
-	static int64_t getNextRangeKeyByValue(
-			MergeContext &mergeCxt, int64_t groupEnd, int64_t value);
-	static int64_t getRangeKey(
+	static RangeKey getNextRangeKeyByValue(
+			MergeContext &mergeCxt, const RangeKey &groupEnd,
+			const RangeKey &value);
+	static RangeKey getRangeKey(
 			MergeContext &mergeCxt, TupleListReader &reader);
-	static int64_t getRangeKey(const TupleValue &value);
+	static RangeKey getRangeKey(const TupleValue &value);
 };
 
 struct SQLGroupOps::GroupRangeMerge::Constants {
@@ -312,7 +315,7 @@ struct SQLGroupOps::GroupRangeMerge::Constants {
 };
 
 struct SQLGroupOps::GroupRangeMerge::ValueReader {
-	typedef int64_t RetType;
+	typedef RangeKey RetType;
 
 	template<typename T>
 	struct TypeAt {
@@ -353,10 +356,10 @@ struct SQLGroupOps::GroupRangeMerge::MergeContext {
 	bool isForNormalGroup() const;
 	bool isBeforePartitionTail() const;
 
-	int64_t getGroupBegin() const;
-	int64_t getGroupEnd() const;
+	RangeKey getGroupBegin() const;
+	RangeKey getGroupEnd() const;
 
-	int64_t getTailGroupKey() const;
+	RangeKey getTailGroupKey() const;
 
 	static SQLValues::CompColumnList resolvePartitionKeyList(
 			util::StackAllocator &alloc, const OpCode &code);
@@ -368,8 +371,8 @@ struct SQLGroupOps::GroupRangeMerge::MergeContext {
 	static const Projection* findProjection(
 			const OpCode &code, bool filling, bool noPrev, bool noNext);
 	static SQLExprs::WindowState resolveRangeOptions(
-			const OpCode &code, int64_t &partBegin, int64_t &partEnd,
-			int64_t &interval, int64_t &limit, bool &fillingWithPrev);
+			const OpCode &code, RangeKey &partBegin, RangeKey &partEnd,
+			RangeKey &interval, int64_t &limit, bool &fillingWithPrev);
 
 	static const Projection* getSubProjection(
 			const Projection *base, SQLOpTypes::ProjectionType baseTypeFilter,
@@ -391,14 +394,14 @@ struct SQLGroupOps::GroupRangeMerge::MergeContext {
 	const Projection *prevFillProj_;
 	const Projection *bothFillProj_;
 
-	int64_t partBegin_;
-	int64_t partEnd_;
-	int64_t interval_;
+	RangeKey partBegin_;
+	RangeKey partEnd_;
+	RangeKey interval_;
 	int64_t limit_;
 	bool fillingWithPrev_;
 
 	SQLExprs::WindowState windowState_;
-	int64_t pendingKey_;
+	RangeKey pendingKey_;
 	int64_t restGenerationLimit_;
 	bool firstRowReady_;
 	bool groupFoundLast_;
@@ -416,10 +419,10 @@ struct SQLGroupOps::GroupRangeMerge::Directions {
 	Directions();
 
 	static Directions of(
-			int64_t nextRangeKey, int32_t partition, int32_t group,
+			const RangeKey &nextRangeKey, int32_t partition, int32_t group,
 			bool onNormalGroup, bool nextRowForNextGroup);
 
-	int64_t getNextRangeKey() const;
+	RangeKey getNextRangeKey() const;
 
 	bool isBeforeTotalTailRow() const;
 	bool isBeforePartitionTailRow() const;
@@ -430,7 +433,7 @@ struct SQLGroupOps::GroupRangeMerge::Directions {
 	bool isOnNormalGroup() const;
 	bool isNextRowForNextGroup() const;
 
-	int64_t nextRangeKey_;
+	RangeKey nextRangeKey_;
 	int32_t partition_;
 	int32_t group_;
 	bool onNormalGroup_;

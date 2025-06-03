@@ -873,12 +873,12 @@ void StatementHandler::setReplyOptionForContinue(
 	}
 }
 
-void StatementHandler::setSQLResonseInfo(
+void StatementHandler::setSQLResponseInfo(
 	ReplicationContext& replContext, const Request& request) {
 	ClientId ackClientId;
 	request.optional_.get<Options::UUID>().get(ackClientId.uuid_);
 
-	replContext.setSQLResonseInfo(
+	replContext.setSQLResponseInfo(
 		request.optional_.get<Options::REPLY_PID>(),
 		request.optional_.get<Options::REPLY_EVENT_TYPE>(),
 		request.optional_.get<Options::QUERY_ID>(),
@@ -2581,10 +2581,6 @@ bool StatementHandler::checkPrivilege(
 		ContainerAttribute expectedResourceSubType) {
 
 	UNUSED_VARIABLE(command);
-
-
-
-
 
 	bool granted = false;
 
@@ -6358,7 +6354,8 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 
 		util::XArray<uint8_t> suspendedData(alloc);
 		size_t extraDataSize;
-		decodeSuspendedData(ev, in, suspendedData, extraDataSize);
+		decodeSuspendedData(
+				ev, request.optional_, in, suspendedData, extraDataSize);
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -6549,17 +6546,20 @@ void QueryTqlHandler::suspendRequest(
 		TXN_RETHROW_ENCODE_ERROR(e, "");
 	}
 
+	updateRequestOption<Options::HANDLING_SUSPENDED>(
+			ec.getAllocator(), ev, true);
 	ev.incrementQueueingCount();
 	ec.getEngine().add(ev);
 }
 
 void QueryTqlHandler::decodeSuspendedData(
-		const Event &ev, EventByteInStream &in,
+		const Event &ev, const OptionSet &optionSet, EventByteInStream &in,
 		util::XArray<uint8_t> &suspendedData, size_t &extraDataSize) {
 	suspendedData.clear();
 	extraDataSize = in.base().remaining();
 
-	if (ev.getQueueingCount() <= 1) {
+	const bool suspended = optionSet.get<Options::HANDLING_SUSPENDED>();
+	if (ev.getQueueingCount() <= 1 || !suspended) {
 		return;
 	}
 
@@ -6568,7 +6568,7 @@ void QueryTqlHandler::decodeSuspendedData(
 		in >> size;
 
 		if (size > in.base().remaining()) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR, "");
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
 		}
 
 		suspendedData.resize(size);
@@ -9408,7 +9408,6 @@ void MultiQueryHandler::execute(
 			fetchByteSize = 1;
 		}
 
-		progress.containerResult_.push_back(CONTAINER_RESULT_SUCCESS);
 		progress.totalRowCount_ += rs->getFetchNum();
 	}
 	catch (std::exception& e) {
@@ -9842,6 +9841,7 @@ void CheckTimeoutHandler::checkReplicationTimeout(EventContext& ec) {
 			try {
 				ReplicationContext& replContext =
 					transactionManager_->get(pIds[i], timeoutResourceIds[i]);
+
 
 				if (replContext.getTaskStatus() == ReplicationContext::TASK_CONTINUE) {
 					continueEvent(ec, alloc, TXN_STATEMENT_SUCCESS_BUT_REPL_TIMEOUT, replContext);
@@ -10422,6 +10422,7 @@ void DataStorePeriodicallyHandler::sendCheckDropContainerList(
 	util::StackAllocator& alloc = ec.getAllocator();
 	EventEngine& ee = ec.getEngine();
 	for (size_t pos = 0; pos < containerNameList.size(); pos++) {
+		util::StackAllocator::Scope scope(alloc);
 		util::String keyStr(alloc);
 		containerNameList[pos].toString(alloc, keyStr);
 		Event requestEv(ec, UPDATE_CONTAINER_STATUS, pId);
@@ -10624,6 +10625,7 @@ void KeepLogHandler::operator()(EventContext& ec, Event& ev) {
 		PartitionId startPId = pgConfig.getGroupBeginPartitionId(pgId);
 		PartitionId endPId = pgConfig.getGroupEndPartitionId(pgId);
 		KeepLogManager& keepLogMgr = *resourceSet_->syncMgr_->getKeepLogManager();
+		EventType eventType = ev.getType();
 	}
 	catch (UserException& e) {
 		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
@@ -11206,7 +11208,6 @@ TransactionService::TransactionService(
 	totalExternalConnectionCount_(0),
 	onBackgroundTask_(pgConfig_.getPartitionGroupCount(), false),
 	txnLogAlloc_(pgConfig_.getPartitionGroupCount(), NULL),
-
 	connectHandler_(
 		StatementHandler::TXN_CLIENT_VERSION,
 		ACCEPTABLE_NOSQL_CLIENT_VERSIONS)
@@ -11259,6 +11260,7 @@ TransactionService::TransactionService(
 		ee_ = UTIL_NEW EventEngine(eeConfig_, eeSource_, name);
 
 
+
 	}
 	catch (std::exception& e) {
 		delete ee_;
@@ -11300,6 +11302,7 @@ TransactionService::~TransactionService() {
 
 void TransactionService::initialize(const ManagerSet& mgrSet) {
 	try {
+
 		ee_->setUserDataType<StatementHandler::ConnectionOption>();
 
 		ee_->setThreadErrorHandler(serviceThreadErrorHandler_);
@@ -11621,12 +11624,12 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		ee_->setHandlingMode(ADJUST_STORE_MEMORY_PERIODICALLY,
 			EventEngine::HANDLING_PARTITION_SERIALIZED);
 
-//		keepLogHandler_.initialize(mgrSet);
-//		ee_->setHandler(TXN_KEEP_LOG_CHECK_PERIODICALLY, keepLogHandler_);
-//		ee_->setHandler(TXN_KEEP_LOG_UPDATE, keepLogHandler_);
-//		ee_->setHandler(TXN_KEEP_LOG_RESET, keepLogHandler_);
-//		ee_->setHandlingMode(TXN_KEEP_LOG_CHECK_PERIODICALLY,
-//			EventEngine::HANDLING_PARTITION_SERIALIZED);
+		keepLogHandler_.initialize(mgrSet);
+		ee_->setHandler(TXN_KEEP_LOG_CHECK_PERIODICALLY, keepLogHandler_);
+		ee_->setHandler(TXN_KEEP_LOG_UPDATE, keepLogHandler_);
+		ee_->setHandler(TXN_KEEP_LOG_RESET, keepLogHandler_);
+		ee_->setHandlingMode(TXN_KEEP_LOG_CHECK_PERIODICALLY,
+			EventEngine::HANDLING_PARTITION_SERIALIZED);
 
 		backgroundHandler_.initialize(mgrSet);
 		ee_->setHandler(BACK_GROUND, backgroundHandler_);
@@ -11721,7 +11724,6 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		ee_->setHandler(TXN_SYNC_REDO_ERROR, redoLogHandler_);
 		redoLogHandler_.initialize(mgrSet);
 
-
 		syncCheckEndHandler_.initialize(mgrSet);
 		ee_->setHandler(TXN_SYNC_TIMEOUT, syncCheckEndHandler_);
 		ee_->setHandler(TXN_SYNC_CHECK_END, syncCheckEndHandler_);
@@ -11758,10 +11760,10 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 			ee_->addPeriodicTimer(adjustStoreMemoryPeriodicEvent,
 				ADJUST_STORE_MEMORY_CHECK_INTERVAL * 1000);
 
-//			int32_t interval = CommonUtility::changeTimeSecondToMilliSecond(
-//				mgrSet.config_->get<int32_t>(CONFIG_TABLE_SYNC_KEEP_LOG_CHECK_INTERVAL));
-//			Event keepLogCheckEvent(eeSource_, TXN_KEEP_LOG_CHECK_PERIODICALLY, beginPId);
-//			ee_->addPeriodicTimer(keepLogCheckEvent, interval);
+			int32_t interval = CommonUtility::changeTimeSecondToMilliSecond(
+				mgrSet.config_->get<int32_t>(CONFIG_TABLE_SYNC_KEEP_LOG_CHECK_INTERVAL));
+			Event keepLogCheckEvent(eeSource_, TXN_KEEP_LOG_CHECK_PERIODICALLY, beginPId);
+			ee_->addPeriodicTimer(keepLogCheckEvent, interval);
 		}
 
 		ee_->setHandler(EXECUTE_JOB, executeHandler_);

@@ -454,6 +454,12 @@ public:
 
 	static char *dequote(util::StackAllocator &alloc, const char *str, bool &isQuote);
 
+	static util::DateTime::ZonedOption newZonedTimeOption(
+			const util::DateTime::FieldType *precision,
+			const util::TimeZone &zone);
+	static bool isTimeRangeValidationStrict(
+			util::DateTime::FieldType precision);
+
 	virtual ~Expr();
 
 	/*!

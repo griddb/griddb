@@ -179,12 +179,63 @@ struct SharedInstanceInfo {
 	}
 };
 
+namespace detail {
+class OSLib {
+public:
+#ifdef _WIN32
+	explicit OSLib(LPCWSTR libFileName);
+#endif
+
+	~OSLib();
+
+#ifdef _WIN32
+	void* findFunctionAddress(LPCSTR funcName);
+#endif
+
+private:
+	OSLib(const OSLib&);
+	OSLib& operator=(const OSLib&);
+
+#ifdef _WIN32
+	HMODULE handle_;
+#endif
+};
+
+class OSFunction {
+public:
+#ifdef _WIN32
+	OSFunction(LPCWSTR libFileName, LPCSTR funcName);
+#endif
+
+	~OSFunction();
+
+	void* findAddress();
+
+private:
+	OSFunction(const OSFunction&);
+	OSFunction& operator=(const OSFunction&);
+
+	OSLib lib_;
+	void* address_;
+};
+
+inline void* OSFunction::findAddress() {
+	return address_;
+}
+
+} 
+
 /*!
     @brief Common portable utility for platform-specific functions.
 */
 struct FileLib {
+public:
+#ifdef _WIN32
+	typedef void (*GetSystemTimePreciseAsFileTimeFunc)(LPFILETIME);
+#endif
 
 #ifdef _WIN32
+	static GetSystemTimePreciseAsFileTimeFunc findPreciseSystemTimeFunc();
 	static int64_t getUnixTime(const FILETIME &fileTime);
 	static FILETIME getFileTime(
 			SYSTEMTIME &systemTime, bool asLocalTimeZone, bool dstIgnored);
@@ -291,7 +342,20 @@ struct FileLib {
 		}
 	}
 #endif 
+
+private:
+#ifdef _WIN32
+	static detail::OSFunction preciseSystemTimeFunc_;
+#endif
 };
+
+#ifdef _WIN32
+inline FileLib::GetSystemTimePreciseAsFileTimeFunc
+FileLib::findPreciseSystemTimeFunc() {
+	return reinterpret_cast<GetSystemTimePreciseAsFileTimeFunc>(
+			preciseSystemTimeFunc_.findAddress());
+}
+#endif
 
 class Mutex;
 namespace detail {

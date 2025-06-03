@@ -23,6 +23,7 @@
 
 #include "util/type.h"
 #include <limits>
+#include <climits>
 
 #if UTIL_CXX11_SUPPORTED
 #include <cmath>
@@ -34,11 +35,15 @@
 
 namespace util {
 
+
 template<typename T> bool isInf(const T &value);
 template<typename T> bool isFinite(const T &value);
 template<typename T> bool isNaN(const T &value);
 template<typename T> T copySign(const T &value1, const T &value2);
 
+/**
+ * 数値の算術演算ユーティリティ
+ */
 struct NumberArithmetic {
 public:
 	template<typename T, typename H> static T add(
@@ -191,6 +196,106 @@ public:
 
 private:
 	UtilityException::Code &errorCode_;
+};
+
+/**
+ * 固定長データ管理型の、double値(IEEE754の64ビット浮動小数点数)の合計値表現
+ *
+ * ほぼ任意回数(最大2^64回)のdouble値の加減算を繰り返しても、一切桁落ちしない。
+ * 無限大、NaNの追加回数を記憶できる。その回数分除外操作をすると、それらの
+ * 追加前のdouble値を参照できる。
+ */
+class FixedDoubleSum {
+public:
+
+	FixedDoubleSum();
+
+	void add(double value);
+
+	void remove(double value);
+
+	double get() const;
+
+private:
+	enum MergeMode {
+		MODE_ADD,
+		MODE_SUBTRACT_NORMAL,
+		MODE_SUBTRACT_REVERSED
+	};
+
+	enum {
+		UNIT_BIT = (sizeof(uint64_t) * CHAR_BIT),
+
+		MAX_EXPONENT = (std::numeric_limits<double>::max_exponent - 1),
+		MIN_EXPONENT = (std::numeric_limits<double>::min_exponent - 1),
+		EXPONENT_RANGE = (MAX_EXPONENT - MIN_EXPONENT + 1),
+
+		MANTISSA_IMPLICIT_BIT = 1,
+		MANTISSA_BIT = (
+				std::numeric_limits<double>::digits -
+				MANTISSA_IMPLICIT_BIT),
+		EXPONENT_BIT = (sizeof(double) * CHAR_BIT - MANTISSA_BIT - 1),
+
+		FINITE_VALUE_BIT = (
+				UNIT_BIT +
+				EXPONENT_RANGE +
+				MANTISSA_BIT),
+
+		FINITE_VALUE_SIZE = ((FINITE_VALUE_BIT + UNIT_BIT - 1) / UNIT_BIT)
+	};
+
+	typedef uint64_t FiniteValue[FINITE_VALUE_SIZE];
+	typedef std::pair<uint64_t, uint64_t> FiniteValuePart;
+
+	uint64_t& getSpecialValueCounter(double value);
+	bool findSpecialValue(double &value) const;
+
+	void addFiniteValue(double value);
+
+	MergeMode getMergeMode(
+			uint64_t mantissa, uint32_t exponent, bool sign,
+			bool &nextSign) const;
+	int32_t compareFiniteValue(uint64_t mantissa, uint32_t exponent) const;
+
+	static uint32_t getAmountPosition(
+			MergeMode mode, uint32_t exponent, bool lower);
+	static uint64_t getAmountPart(
+			uint64_t mantissa, uint32_t exponent, uint32_t unitPos);
+
+	static FiniteValuePart getFiniteValuePart(
+			const FiniteValue &finiteValue, uint32_t exponent);
+	static uint64_t mergeFiniteValuePart(
+			MergeMode mode, uint64_t target, uint64_t amount, bool lastCarry,
+			bool &nextCarry);
+	static uint64_t mergeFiniteValuePartWithLastCarry(
+			MergeMode mode, uint64_t target, uint64_t amount, bool &nextCarry);
+	static uint32_t resolveExponent(
+			const FiniteValue &finiteValue, uint32_t curPos, uint32_t lastExponent);
+
+	static void decomposeValue(
+			double value, uint64_t &mantissa, uint32_t &exponent);
+	static double makeFiniteValue(
+			const FiniteValuePart &valuePart, uint32_t exponent, bool sign);
+
+	static uint64_t valueToBits(double value);
+	static double bitsToValue(uint64_t bits);
+
+	static bool isSpecialValue(double value);
+	static bool isNegativeZero(double value);
+
+	static void initializeFiniteValue(FiniteValue &value);
+
+	static void errorNegativeCount();
+
+	FiniteValue finiteValue_;
+
+	uint64_t negativeZeroCount_;
+	uint64_t positiveInfCount_;
+	uint64_t negativeInfCount_;
+	uint64_t nanCount_;
+
+	uint32_t exponent_;
+	bool sign_;
 };
 
 } 

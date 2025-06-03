@@ -46,10 +46,13 @@ class MessageSchema {
 public:
 	static const int32_t DEFAULT_VERSION;
 	static const int32_t V4_1_VERSION;
-	enum OptionType {
+	static const int32_t V5_8_VERSION;
 
+	enum OptionType {
 		PARTITION_EXPIRATION = 100,
 		RENAME_COLUMN = 101,
+		FIX_COLUMN = 102,
+
 
 		OPTION_END = 0xFFFFFFFF
 	};
@@ -204,6 +207,7 @@ protected:
 	void validateContainerOption(util::ArrayByteInStream &in);
 	void validateContainerExpiration(util::ArrayByteInStream &in);
 	void validateRenameColumnSchema(util::ArrayByteInStream &in); 
+	void validateFixColumnSchema(util::ArrayByteInStream &in);
 	util::StackAllocator &getAllocator() {
 		return alloc_;
 	}

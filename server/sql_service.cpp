@@ -59,7 +59,8 @@ const int32_t SQLService::SQL_V4_1_MSG_VERSION = 2;
 const int32_t SQLService::SQL_V4_1_0_MSG_VERSION = 3;
 const int32_t SQLService::SQL_V5_5_MSG_VERSION = 4;
 const int32_t SQLService::SQL_V5_6_MSG_VERSION = 5;
-const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_6_MSG_VERSION;
+const int32_t SQLService::SQL_V5_8_MSG_VERSION = 6;
+const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_8_MSG_VERSION;
 const bool SQLService::SQL_MSG_BACKWARD_COMPATIBLE = false;
 
 static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
@@ -71,18 +72,34 @@ static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
 const int32_t SQLService::DEFAULT_RESOURCE_CONTROL_LEVEL = 2;
 
 template<typename S>
-void SQLGetContainerHandler::OutMessage::encode(S& out) {
-	SimpleOutputMessage::encode(out);
-	if (info_ != NULL) {
-		try {
-			util::ObjectCoder::withAllocator(globalVarAlloc_).encode(out, *info_);
-		}
-		catch (std::exception& e) {
-			GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(
-				e, "Failed to encode message"));
-		}
+void SQLGetContainerHandler::InMessage::decode(S &in) {
+	SimpleInputMessage::decode(in);
+	checkAcceptableVersion(request_);
+	subCmd_ = decodeSubCommand(in);
+
+	TransactionContext txn;
+	txn.replaceDefaultAllocator(alloc_);
+
+	switch (subCmd_) {
+	case SUB_CMD_GET_CONTAINER:
+		decodeContainerCondition(in, *this, connOption_);
+		break;
+	case SUB_CMD_ESTIMATE_INDEX_SEARCH_SIZE:
+		decodeSearchList(txn, in, searchList_);
+		break;
+	default:
+		assert(false);
 	}
 }
+
+template<typename S>
+void SQLGetContainerHandler::OutMessage::encode(S &out) {
+	SimpleOutputMessage::encode(out);
+	encodeResult(out, *globalVarAlloc_, info_, estimationList_);
+}
+
+const int32_t SQLGetContainerHandler::LATEST_FEATURE_VERSION =
+		MessageSchema::V5_8_VERSION;
 
 void SQLGetContainerHandler::operator()(
 	EventContext& ec, Event& ev) {
@@ -101,21 +118,16 @@ void SQLGetContainerHandler::operator()(
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
-
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, false);
 
-		int32_t acceptableVersion
-			= request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>();
-
-		if (acceptableVersion > MessageSchema::V4_1_VERSION) {
-
-			GS_THROW_USER_ERROR(
-				GS_ERROR_SQL_MSG_VERSION_NOT_ACCEPTABLE,
-				"SQL container access version unmatch, expected="
-				<< MessageSchema::V4_1_VERSION
-				<< ", actual=" << acceptableVersion);
+		if (inMes.subCmd_ == SUB_CMD_ESTIMATE_INDEX_SEARCH_SIZE) {
+			estimateIndexSearchSize(ec, ev, inMes);
+			return;
+		}
+		else {
+			assert(inMes.subCmd_ == SUB_CMD_GET_CONTAINER);
 		}
 
 		util::XArray<uint8_t>& containerNameBinary = inMes.containerNameBinary_;
@@ -343,11 +355,14 @@ void SQLGetContainerHandler::operator()(
 			}
 		}
 
-		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
-			getReplyOption(alloc, request, compIndex, false),
-			&info, sqlService_->getAllocator());
-		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			request, outMes, false);
+		EstimationList estimationList(alloc);
+		OutMessage outMes(
+				request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+				getReplyOption(alloc, request, compIndex, false),
+				&info, sqlService_->getAllocator(), estimationList);
+		replySuccess(
+				ec, alloc, ev.getSenderND(), ev.getType(), request, outMes,
+				false);
 	}
 	catch (std::exception& e) {
 		try {
@@ -356,6 +371,317 @@ void SQLGetContainerHandler::operator()(
 		catch (std::exception& e2) {
 			UTIL_TRACE_EXCEPTION(SQL_SERVICE, e2, "");
 		}
+	}
+}
+
+template<typename S>
+void SQLGetContainerHandler::encodeResult(
+		S &out, SQLVariableSizeGlobalAllocator &varAlloc,
+		TableSchemaInfo *info, const EstimationList &estimationList) {
+	encodeTableSchemaInfo(out, varAlloc, info);
+	encodeEstimationList(out, estimationList);
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeResult(
+		S &in, util::StackAllocator &alloc,
+		SQLVariableSizeGlobalAllocator &varAlloc,
+		util::AllocUniquePtr<TableSchemaInfo> &info,
+		EstimationList &estimationList) {
+	info = decodeTableSchemaInfo(in, alloc, varAlloc);
+	decodeEstimationList(in, estimationList);
+}
+
+template
+void SQLGetContainerHandler::decodeResult<EventByteInStream>(
+		EventByteInStream &in, util::StackAllocator &alloc,
+		SQLVariableSizeGlobalAllocator &varAlloc,
+		util::AllocUniquePtr<TableSchemaInfo> &info,
+		EstimationList &estimationList);
+
+template<typename S>
+void SQLGetContainerHandler::encodeTableSchemaInfo(
+		S &out, SQLVariableSizeGlobalAllocator &varAlloc,
+		TableSchemaInfo *info) {
+	uint32_t bodySize = 0;
+
+	const size_t headPos = out.base().position();
+	encodeIntData(out, bodySize);
+
+	const size_t bodyPos = out.base().position();
+	try {
+		util::ObjectCoder::withAllocator(varAlloc).encode(out, info);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_ERROR(
+				e, GS_EXCEPTION_MERGE_MESSAGE(e, "Failed to encode message"));
+	}
+	const size_t endPos = out.base().position();
+
+	out.base().position(headPos);
+	bodySize = static_cast<uint32_t>(endPos - bodyPos);
+	encodeIntData(out, bodySize);
+	out.base().position(endPos);
+}
+
+template<typename S>
+util::AllocUniquePtr<TableSchemaInfo>::ReturnType
+SQLGetContainerHandler::decodeTableSchemaInfo(
+		S &in, util::StackAllocator &alloc,
+		SQLVariableSizeGlobalAllocator &varAlloc) {
+	uint32_t bodySize;
+	decodeIntData(in, bodySize);
+
+	util::XArray<uint8_t> body(alloc);
+	body.resize(bodySize);
+	in >> std::make_pair(body.data(), bodySize);
+
+	TableSchemaInfo *schemaInfoRef = NULL;
+	try {
+		util::ArrayByteInStream bodyStream(util::ArrayInStream(
+				body.data(), body.size()));
+		util::ObjectCoder::withAllocator(varAlloc).decode(
+				bodyStream, schemaInfoRef);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(
+			e, "Failed to decode schema message"));
+	}
+
+	util::AllocUniquePtr<TableSchemaInfo> schemaInfoPtr(
+			schemaInfoRef, varAlloc);
+	return schemaInfoPtr;
+}
+
+template<typename S>
+void SQLGetContainerHandler::encodeEstimationList(
+		S &out, const EstimationList &estimationList) {
+	const uint32_t count = static_cast<uint32_t>(estimationList.size());
+	encodeIntData(out, count);
+
+	for (uint32_t i = 0; i < count; i++) {
+		encodeLongData(out, estimationList[i]);
+	}
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeEstimationList(
+		S &in, EstimationList &estimationList) {
+	uint32_t count;
+	decodeIntData(in, count);
+
+	for (uint32_t i = 0; i < count; i++) {
+		int64_t estimation;
+		decodeLongData(in, estimation);
+
+		estimationList.push_back(estimation);
+	}
+}
+
+void SQLGetContainerHandler::estimateIndexSearchSize(
+		EventContext &ec, Event &ev, InMessage &inMes) {
+	util::StackAllocator& alloc = ec.getAllocator();
+	const util::DateTime now = ec.getHandlerStartTime();
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+	const PartitionId pId = ev.getPartitionId();
+
+	Request &request = inMes.request_;
+
+	try {
+		checkTransactionTimeout(
+				emNow,
+				ev.getQueuedMonotonicTime(),
+				request.fixed_.cxtSrc_.txnTimeoutInterval_,
+				ev.getQueueingCount());
+
+		checkExecutable(
+				pId,
+				(CROLE_MASTER | CROLE_FOLLOWER),
+				(PROLE_OWNER | PROLE_BACKUP),
+				PSTATE_ON,
+				partitionTable_);
+
+		util::LockGuard<util::Mutex> guard(
+				partitionList_->partition(request.fixed_.pId_).mutex());
+
+		TransactionContext &txn = transactionManager_->put(
+				alloc,
+				request.fixed_.pId_,
+				TXN_EMPTY_CLIENTID,
+				request.fixed_.cxtSrc_,
+				now,
+				emNow);
+		txn.setAuditInfo(&ev, &ec, NULL);
+
+		const SearchList &searchList = inMes.searchList_;
+
+		EstimationList estimationList(alloc);
+
+		for (SearchList::const_iterator it = searchList.begin();
+				it != searchList.end(); ++it) {
+			const ContainerId containerId = it->first;
+			BtreeMap::SearchContext *sc = it->second;
+
+			KeyDataStoreValue keyStoreValue = getKeyDataStore(
+					txn.getPartitionId())->get(alloc, containerId);
+
+			DataStoreBase *ds = getDataStore(
+					txn.getPartitionId(), keyStoreValue.storeType_);
+			const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
+
+			DSInputMes input(
+					alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER, true);
+			StackAllocAutoPtr<DSContainerOutputMes> ret(
+					alloc, static_cast<DSContainerOutputMes*>(
+							ds->exec(&txn, &keyStoreValue, &input)));
+
+			BaseContainer *container = ret.get()->container_;
+			const int64_t estimation = (container == NULL ?
+					-1 : container->estimateIndexSearchSize(txn, *sc));
+
+			estimationList.push_back(estimation);
+		}
+
+		CompositeIndexInfos *compIndex = NULL;
+		OutMessage outMes(
+				request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+				getReplyOption(alloc, request, compIndex, false),
+				NULL, sqlService_->getAllocator(), estimationList);
+
+		replySuccess(
+				ec, alloc, ev.getSenderND(), ev.getType(), request, outMes,
+				false);
+	}
+	catch (std::exception &e) {
+		try {
+			handleError(ec, alloc, ev, request, e);
+		}
+		catch (std::exception &e2) {
+			UTIL_TRACE_EXCEPTION(SQL_SERVICE, e2, "");
+		}
+	}
+}
+
+void SQLGetContainerHandler::checkAcceptableVersion(
+		const StatementMessage::Request &request) {
+	const int32_t acceptableVersion =
+			request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>();
+	if (acceptableVersion < LATEST_FEATURE_VERSION) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_MSG_VERSION_NOT_ACCEPTABLE,
+				"SQL container access version unmatch ("
+				"expected=" << LATEST_FEATURE_VERSION <<
+				", actual=" << acceptableVersion << ")");
+	}
+}
+
+SQLGetContainerHandler::SubCommand SQLGetContainerHandler::checkSubCommand(
+		int32_t cmdNum) {
+	switch (cmdNum) {
+	case SUB_CMD_GET_CONTAINER:
+	case SUB_CMD_ESTIMATE_INDEX_SEARCH_SIZE:
+		break;
+	default:
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_MSG_VERSION_NOT_ACCEPTABLE,
+				"Unknown sub command (value=" << cmdNum << ")");
+	}
+	return static_cast<SubCommand>(cmdNum);
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeContainerCondition(
+		S &in, InMessage &msg, const ConnectionOption &connOption) {
+	decodeVarSizeBinaryData<S>(in, msg.containerNameBinary_);
+
+	decodeBooleanData<S>(in, msg.isContainerLock_);
+
+	decodeUUID<S>(
+		in, msg.clientId_.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
+
+	in >> msg.queryId_;
+
+	if (connOption.clientVersion_ == TXN_V2_5_X_CLIENT_VERSION) {
+		msg.request_.optional_.set<Options::DB_NAME>(GS_PUBLIC);
+	}
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeSearchList(
+		TransactionContext &txn, S &in, SearchList &searchList) {
+	uint32_t count;
+	decodeIntData(in, count);
+
+	for (uint32_t i = 0; i < count; i++) {
+		SearchEntry entry;
+		decodeSearchEntry(txn, in, entry);
+		searchList.push_back(entry);
+	}
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeSearchEntry(
+		TransactionContext &txn, S &in, SearchEntry &entry) {
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	util::Vector<ColumnId> columnIdList(alloc);
+	BtreeMap::SearchContext *sc =
+			ALLOC_NEW(alloc) BtreeMap::SearchContext(alloc, columnIdList);
+
+	ContainerId containerId;
+	decodeLongData(in, containerId);
+
+	decodeColumnIdList(in, columnIdList);
+	sc->setColumnIds(columnIdList);
+
+	uint32_t count;
+	decodeIntData(in, count);
+	for (uint32_t i = 0; i < count; i++) {
+		decodeTermCondition(txn, in, *sc, columnIdList);
+	}
+
+	entry = SearchEntry(containerId, sc);
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeTermCondition(
+		TransactionContext &txn, S &in, BtreeMap::SearchContext &sc,
+		const util::Vector<ColumnId> &columnIdList) {
+	assert(!columnIdList.empty());
+
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	int32_t opType;
+	ColumnType columnType;
+	util::XArray<uint8_t> *valueData =
+			ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+
+	decodeIntData(in, opType);
+	decodeIntData(in, columnType);
+	decodeBinaryData(in, *valueData, false);
+
+	const uint32_t valueSize = static_cast<uint32_t>(valueData->size());
+	const bool opExtra = true;
+
+	TermCondition *cond = ALLOC_NEW(alloc) TermCondition(
+			columnType, columnType,
+			static_cast<DSExpression::Operation>(opType),
+			columnIdList.front(), valueData->data(), valueSize, opExtra);
+
+	const bool forKey = true;
+	sc.addCondition(txn, *cond, forKey);
+}
+
+template<typename S>
+void SQLGetContainerHandler::decodeColumnIdList(
+		S &in, util::Vector<ColumnId> &columnIdList) {
+	uint32_t count;
+	decodeIntData(in, count);
+
+	for (uint32_t i = 0; i < count; i++) {
+		ColumnId columnId;
+		decodeIntData(in, columnId);
+		columnIdList.push_back(columnId);
 	}
 }
 
@@ -1703,6 +2029,14 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		setDefault(true);
 
 	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING, BOOL).
+		inherit(CONFIG_TABLE_SQL_COST_BASED_JOIN);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT, BOOL).
+		setDefault(true);
+
+	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_TABLE_CACHE_LOAD_DUMP_LIMIT_TIME, INT32).
 		setMin(0).
 		setDefault(5000);
@@ -1861,6 +2195,9 @@ void SQLService::StatSetUpHandler::operator()(StatTable& stat) {
 
 	parentId = STAT_TABLE_PERF;
 	STAT_ADD(STAT_TABLE_PERF_SQL_NUM_CONNECTION);
+	STAT_ADD(STAT_TABLE_PERF_SQL_TOTAL_MEMORY);
+	STAT_ADD(STAT_TABLE_PERF_SQL_PEAK_TOTAL_MEMORY);
+	STAT_ADD(STAT_TABLE_PERF_SQL_TOTAL_MEMORY_LIMIT);
 }
 
 bool SQLService::StatUpdator::operator()(StatTable& stat) {
@@ -1886,6 +2223,14 @@ bool SQLService::StatUpdator::operator()(StatTable& stat) {
 		numReplicationTCPConnection +
 		numClientUDPConnection;
 	stat.set(STAT_TABLE_PERF_SQL_NUM_CONNECTION, numConnection);
+
+	util::AllocatorLimitter::Stats stats = svc.totalMemoryLimitter_->getStats();
+	if (!stats.failOnExcess_) {
+		stats.limit_ = 0;
+	}
+	stat.set(STAT_TABLE_PERF_SQL_TOTAL_MEMORY, stats.usage_);
+	stat.set(STAT_TABLE_PERF_SQL_PEAK_TOTAL_MEMORY, stats.peakUsage_);
+	stat.set(STAT_TABLE_PERF_SQL_TOTAL_MEMORY_LIMIT, stats.limit_);
 
 	return true;
 }
@@ -3769,6 +4114,10 @@ void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& con
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT, *this);
 	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING, *this);
+	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT, *this);
+	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_ENABLE_PROFILER, *this);
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_ENABLE_JOB_MEMORY_CHECK_INTERVAL_COUNT, *this);
@@ -3840,6 +4189,14 @@ void SQLService::Config::operator()(
 	case CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT:
 		sqlSvc_->getExecutionManager()->getSQLConfig().
 			setPartitioningRowKeyConstraint(value.get<bool>());
+		break;
+	case CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING:
+		sqlSvc_->getExecutionManager()->getSQLConfig().setCostBasedJoinDriving(
+				value.get<bool>());
+		break;
+	case CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT:
+		sqlSvc_->getExecutionManager()->getSQLConfig().setCostBasedJoin(
+				value.get<bool>());
 		break;
 	case CONFIG_TABLE_SQL_TABLE_CACHE_EXPIRED_TIME:
 		sqlSvc_->setTableSchemaExpiredTime(value.get<int32_t>());

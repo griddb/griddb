@@ -20,6 +20,7 @@
 
 #include "sql_tuple.h"
 #include "util/container.h"
+#include "util/numeric.h"
 
 
 typedef TupleList::TupleColumnType TupleColumnType;
@@ -92,6 +93,8 @@ struct SQLValues {
 	class ValueHolder;
 	class ValueSetHolder;
 
+	struct Decremental;
+
 	class SummaryColumn;
 	class CompColumn;
 	typedef util::Vector<CompColumn> CompColumnList;
@@ -124,6 +127,7 @@ struct SQLValues {
 	class TupleRangeComparator;
 	class TupleDigester;
 
+	class LongInt;
 	class DateTimeElements;
 
 	typedef util::SequenceReader<
@@ -891,7 +895,9 @@ private:
 			NULLABLE_SPECIFIC = OptionsType::NULLABLE_SPECIFIC,
 			TYPE_SPECIFIC = OptionsType::TYPE_SPECIFIC,
 			VARIANTS_SPECIFIED = TraitsType::VARIANTS_SPECIFIED,
-			FIRST_TYPE_ONLY = (!NULLABLE_SPECIFIC && !VARIANTS_SPECIFIED)
+			FIRST_TYPE_ONLY = (
+					(NULLABLE_SPECIFIC == 0) &&
+					(VARIANTS_SPECIFIED == 0))
 		};
 		static const TypeTarget TYPE_TARGET = OptionsType::TYPE_TARGET;
 
@@ -1285,6 +1291,89 @@ private:
 	util::AllocVector<TupleValue> values_;
 };
 
+struct SQLValues::Decremental {
+	struct ValueCounter;
+
+	struct AsLong;
+	struct AsDouble;
+
+	struct Utils;
+
+	template<typename T> struct As;
+};
+
+struct SQLValues::Decremental::ValueCounter {
+public:
+	ValueCounter();
+
+	uint64_t get() const;
+
+	void increment();
+	void decrement();
+
+private:
+	uint64_t count_;
+};
+
+struct SQLValues::Decremental::AsLong {
+public:
+	AsLong();
+
+	int64_t get() const;
+
+	void add(int64_t value, const util::TrueType&);
+	void add(int64_t value, const util::FalseType&);
+
+	void increment(const util::TrueType&);
+	void increment(const util::FalseType&);
+
+	const ValueCounter& getCounter() const;
+
+private:
+	int64_t base_;
+	ValueCounter counter_;
+};
+
+struct SQLValues::Decremental::AsDouble {
+public:
+	AsDouble();
+
+	double get() const;
+
+	void add(double value, const util::TrueType&);
+	void add(double value, const util::FalseType&);
+
+	const ValueCounter& getCounter() const;
+
+private:
+	double base_;
+	ValueCounter counter_;
+	util::FixedDoubleSum sum_;
+};
+
+struct SQLValues::Decremental::Utils {
+	static bool isSupported(TupleColumnType type);
+	static uint32_t getFixedSize(TupleColumnType type);
+	static void assignInitialValue(TupleColumnType type, void *addr);
+};
+
+template<typename T>
+struct SQLValues::Decremental::As {
+	typedef
+			typename util::Conditional<
+					T::COLUMN_TYPE == static_cast<TupleColumnType>(
+							TupleTypes::TYPE_LONG), AsLong,
+			typename util::Conditional<
+					T::COLUMN_TYPE == static_cast<TupleColumnType>(
+							TupleTypes::TYPE_DOUBLE), AsDouble,
+			void>::Type>::Type Type;
+
+	enum {
+		TYPE_SUPPORTED = (!util::IsSame<Type, void>::VALUE),
+		TYPE_INCREMENTAL = (util::IsSame<Type, AsLong>::VALUE)
+	};
+};
+
 class SQLValues::SummaryColumn {
 public:
 	typedef uint32_t NullsUnitType;
@@ -1660,6 +1749,20 @@ public:
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
 			typename TypeTraits<T>::ReadableRefType value);
 
+	template<typename T, typename F>
+	bool checkDecrementalCounterAs(const SummaryColumn &column);
+
+	template<typename T, typename F>
+	void setDecrementalValueBy(
+			const SummaryColumn &column, const typename T::ValueType &value);
+
+	template<typename T, typename F>
+	void incrementDecrementalValueBy(const SummaryColumn &column);
+
+	template<typename T, typename F>
+	void addDecrementalValueBy(
+			const SummaryColumn &column, const typename T::ValueType &value);
+
 	static void swapValue(
 			SummaryTupleSet &tupleSet, SummaryTuple &tuple1, uint32_t pos1,
 			SummaryTuple &tuple2, uint32_t pos2, uint32_t count);
@@ -1880,6 +1983,7 @@ public:
 	void setOrderedDigestRestricted(bool restricted);
 	void setReaderColumnsDeep(bool deep);
 	void setHeadNullAccessible(bool accessible);
+	void setValueDecremental(bool decremental);
 	static bool isDeepReaderColumnSupported(TupleColumnType type);
 
 	void addReaderColumnList(const ColumnTypeList &typeList);
@@ -2051,6 +2155,7 @@ private:
 	bool orderedDigestRestricted_;
 	bool readerColumnsDeep_;
 	bool headNullAccessible_;
+	bool valueDecremental_;
 
 	bool columnsCompleted_;
 
@@ -4032,6 +4137,83 @@ private:
 	const BaseType &base_;
 };
 
+class SQLValues::LongInt {
+public:
+	typedef int64_t High;
+	typedef uint32_t Low;
+	typedef uint32_t UnitBase;
+
+	class Unit;
+
+	static LongInt ofElements(
+			const High &high, const Low &low, const Unit &unit);
+
+	static LongInt zero(const Unit &unit);
+	static LongInt min(const Unit &unit);
+	static LongInt max(const Unit &unit);
+
+	static LongInt invalid();
+
+	High getHigh() const;
+	Low getLow() const;
+	Unit getUnit() const;
+
+	int64_t toLong() const;
+	double toDouble() const;
+
+	bool isValid() const;
+	bool isZero() const;
+	bool isNegative() const;
+
+	bool isLessThan(const LongInt &another) const;
+	bool isLessThanEq(const LongInt &another) const;
+
+	LongInt add(const LongInt &base) const;
+	LongInt subtract(const LongInt &base) const;
+	LongInt multiply(const LongInt &base) const;
+	LongInt divide(const LongInt &base) const;
+
+	LongInt remainder(const LongInt &base) const;
+	LongInt truncate(const LongInt &base) const;
+	LongInt negate(bool negative) const;
+
+	const LongInt& getMax(const LongInt &base) const;
+	const LongInt& getMin(const LongInt &base) const;
+
+	bool checkAdditionOverflow(const LongInt &base, bool &upper) const;
+
+	static Unit mega();
+
+private:
+	typedef std::pair<High, Low> Pair;
+
+	LongInt(const High &high, const Low &low, const UnitBase &unit);
+
+	LongInt multiplyUnsigned(const LongInt &base) const;
+	LongInt divideUnsigned(const LongInt &base) const;
+
+	Pair toPair() const;
+
+	bool isValidWith(const LongInt &another) const;
+	bool isUnsignedWith(const LongInt &another) const;
+
+	static LongInt errorZeroDivision();
+
+	High high_;
+	Low low_;
+	UnitBase unit_;
+};
+
+class SQLValues::LongInt::Unit {
+public:
+	explicit Unit(UnitBase base);
+
+	UnitBase get() const;
+
+private:
+	UnitBase base_;
+};
+
 class SQLValues::DateTimeElements {
 public:
 	explicit DateTimeElements(const int64_t &value);
@@ -4041,6 +4223,8 @@ public:
 	explicit DateTimeElements(const util::DateTime &value);
 	explicit DateTimeElements(const util::PreciseDateTime &value);
 
+	static DateTimeElements ofLongInt(const LongInt &src);
+
 	int64_t toTimestamp(const Types::TimestampTag&) const;
 	MicroTimestamp toTimestamp(const Types::MicroTimestampTag&) const;
 	NanoTimestamp toTimestamp(const Types::NanoTimestampTag&) const;
@@ -4049,6 +4233,7 @@ public:
 	util::PreciseDateTime toDateTime(const Types::MicroTimestampTag&) const;
 	util::PreciseDateTime toDateTime(const Types::NanoTimestampTag&) const;
 
+	LongInt toLongInt() const;
 	int64_t getUnixTimeMillis() const;
 	uint32_t getNanoSeconds() const;
 
@@ -4315,6 +4500,7 @@ struct SQLValues::ValueUtils {
 	template<typename T> static T toIntegral(const TupleValue &src);
 	template<typename T> static T toFloating(const TupleValue &src);
 
+	static LongInt toLongInt(const TupleValue &src);
 	static DateTimeElements toTimestamp(
 			ValueContext &cxt, const TupleValue &src,
 			util::DateTime::FieldType precision);
@@ -4374,6 +4560,7 @@ struct SQLValues::ValueUtils {
 			typename TypeUtils::Traits<T>::WritableRefType src);
 
 	template<typename T> static TupleValue toAnyByNumeric(T src);
+	static TupleValue toAnyByLongInt(ValueContext &cxt, const LongInt &src);
 	static TupleValue toAnyByTimestamp(int64_t src);
 	static TupleValue toAnyByBool(bool src);
 
@@ -4445,6 +4632,11 @@ struct SQLValues::ValueUtils {
 
 	static DateTimeElements checkTimestamp(
 			const DateTimeElements& tsValue);
+
+	static DateTimeElements getMinTimestamp();
+	static DateTimeElements getMaxTimestamp();
+
+	static util::DateTime::Option getDefaultDateTimeOption();
 
 	static void applyDateTimeOption(util::DateTime::ZonedOption &option);
 	static void applyDateTimeOption(util::DateTime::Option &option);
@@ -4574,8 +4766,14 @@ struct SQLValues::ValueUtils {
 
 
 	static TupleValue duplicateValue(ValueContext &cxt, const TupleValue &src);
-
 	static void destroyValue(ValueContext &cxt, TupleValue &value);
+
+	static TupleValue duplicateAllocValue(
+			const util::StdAllocator<void, void> &alloc, const TupleValue &src);
+	static void destroyAllocValue(
+			const util::StdAllocator<void, void> &alloc, TupleValue &value);
+
+	static const void* getValueBody(const TupleValue &value, size_t &size);
 
 	static void moveValueToRoot(
 			ValueContext &cxt, TupleValue &value,
@@ -5230,6 +5428,86 @@ inline size_t SQLValues::ValueContext::getMaxStringLength() {
 }
 
 
+inline SQLValues::Decremental::ValueCounter::ValueCounter() :
+		count_(0) {
+}
+
+inline uint64_t SQLValues::Decremental::ValueCounter::get() const {
+	return count_;
+}
+
+inline void SQLValues::Decremental::ValueCounter::increment() {
+	count_++;
+}
+
+inline void SQLValues::Decremental::ValueCounter::decrement() {
+	assert(count_ > 0);
+	count_--;
+}
+
+
+inline SQLValues::Decremental::AsLong::AsLong() :
+		base_(0) {
+}
+
+inline int64_t SQLValues::Decremental::AsLong::get() const {
+	return base_;
+}
+
+inline void SQLValues::Decremental::AsLong::add(
+		int64_t value, const util::TrueType&) {
+	base_ += value;
+	counter_.increment();
+}
+
+inline void SQLValues::Decremental::AsLong::add(
+		int64_t value, const util::FalseType&) {
+	base_ -= value;
+	counter_.decrement();
+}
+
+inline void SQLValues::Decremental::AsLong::increment(const util::TrueType&) {
+	base_++;
+}
+
+inline void SQLValues::Decremental::AsLong::increment(const util::FalseType&) {
+	base_--;
+}
+
+inline const SQLValues::Decremental::ValueCounter&
+SQLValues::Decremental::AsLong::getCounter() const {
+	return counter_;
+}
+
+
+inline SQLValues::Decremental::AsDouble::AsDouble() :
+		base_(0) {
+}
+
+inline double SQLValues::Decremental::AsDouble::get() const {
+	return base_;
+}
+
+inline void SQLValues::Decremental::AsDouble::add(
+		double value, const util::TrueType&) {
+	sum_.add(value);
+	base_ = sum_.get();
+	counter_.increment();
+}
+
+inline void SQLValues::Decremental::AsDouble::add(
+		double value, const util::FalseType&) {
+	sum_.remove(value);
+	base_ = sum_.get();
+	counter_.decrement();
+}
+
+inline const SQLValues::Decremental::ValueCounter&
+SQLValues::Decremental::AsDouble::getCounter() const {
+	return counter_;
+}
+
+
 inline const SQLValues::TupleColumn&
 SQLValues::SummaryColumn::getTupleColumn() const {
 	return tupleColumn_;
@@ -5744,6 +6022,54 @@ inline void SQLValues::SummaryTuple::appendValueBy(
 		typename TypeTraits<T>::ReadableRefType value) {
 	assert(tupleSet.getFieldSetterFunc(column.getSummaryPosition()) != NULL);
 	appendValueDetailBy(tupleSet, column, value, T());
+}
+
+template<typename T, typename F>
+inline bool SQLValues::SummaryTuple::checkDecrementalCounterAs(
+		const SummaryColumn &column) {
+	UTIL_STATIC_ASSERT(Decremental::As<T>::TYPE_SUPPORTED);
+	typedef typename Decremental::As<T>::Type Storable;
+	Storable &field = *static_cast<Storable*>(getField(column.getOffset()));
+
+	const uint64_t count = field.getCounter().get();
+	const uint64_t threshold = (F::VALUE ? 0 : 1);
+	return (count <= threshold);
+}
+
+template<typename T, typename F>
+inline void SQLValues::SummaryTuple::setDecrementalValueBy(
+		const SummaryColumn &column, const typename T::ValueType &value) {
+	UTIL_STATIC_ASSERT(Decremental::As<T>::TYPE_SUPPORTED);
+	typedef typename Decremental::As<T>::Type Storable;
+	Storable &field = *static_cast<Storable*>(getField(column.getOffset()));
+
+	const uint64_t count = field.getCounter().get();
+	const uint64_t threshold = 1;
+	const bool byNull = (!(F::VALUE) && count <= threshold);
+
+	field = Storable();
+	if (!byNull) {
+		field.add(value, util::TrueType());
+	}
+	setNullDetail(column, byNull);
+}
+
+template<typename T, typename F>
+inline void SQLValues::SummaryTuple::incrementDecrementalValueBy(
+		const SummaryColumn &column) {
+	UTIL_STATIC_ASSERT(Decremental::As<T>::TYPE_INCREMENTAL);
+	assert(!isNull(column));
+	typedef typename Decremental::As<T>::Type Storable;
+	static_cast<Storable*>(getField(column.getOffset()))->increment(F());
+}
+
+template<typename T, typename F>
+inline void SQLValues::SummaryTuple::addDecrementalValueBy(
+		const SummaryColumn &column, const typename T::ValueType &value) {
+	UTIL_STATIC_ASSERT(Decremental::As<T>::TYPE_SUPPORTED);
+	assert(!isNull(column));
+	typedef typename Decremental::As<T>::Type Storable;
+	static_cast<Storable*>(getField(column.getOffset()))->add(value, F());
 }
 
 inline SQLValues::SummaryTuple::SummaryTuple(const Head &head, void *body) :
@@ -7160,6 +7486,182 @@ inline int64_t SQLValues::TupleDigester::BaseTypeAt<T>::operator()(
 }
 
 
+inline SQLValues::LongInt SQLValues::LongInt::ofElements(
+		const High &high, const Low &low, const Unit &unit) {
+	return LongInt(high, low, unit.get());
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::zero(const Unit &unit) {
+	return ofElements(0, 0, unit);
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::min(const Unit &unit) {
+	const Low low = 0;
+	return ofElements(std::numeric_limits<High>::min(), low, unit);
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::max(const Unit &unit) {
+	const Low low = unit.get() - 1;
+	return ofElements(std::numeric_limits<High>::max(), low, unit);
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::invalid() {
+	const Unit invalidUnit(0);
+	return ofElements(0, 0, invalidUnit);
+}
+
+inline SQLValues::LongInt::High SQLValues::LongInt::getHigh() const {
+	return high_;
+}
+
+inline SQLValues::LongInt::Low SQLValues::LongInt::getLow() const {
+	return low_;
+}
+
+inline SQLValues::LongInt::Unit SQLValues::LongInt::getUnit() const {
+	return Unit(unit_);
+}
+
+inline int64_t SQLValues::LongInt::toLong() const {
+	assert(isValid());
+	return high_;
+}
+
+inline double SQLValues::LongInt::toDouble() const {
+	assert(isValid());
+	return (
+			static_cast<double>(high_) +
+			static_cast<double>(low_) / static_cast<double>(unit_));
+}
+
+inline bool SQLValues::LongInt::isValid() const {
+	return (unit_ > 0);
+}
+
+inline bool SQLValues::LongInt::isZero() const {
+	assert(isValid());
+	return (high_ == 0 && low_ == 0);
+}
+
+inline bool SQLValues::LongInt::isNegative() const {
+	assert(isValid());
+	return (high_ < 0);
+}
+
+inline bool SQLValues::LongInt::isLessThan(const LongInt &another) const {
+	assert(isValidWith(another));
+	return (toPair() < another.toPair());
+}
+
+inline bool SQLValues::LongInt::isLessThanEq(const LongInt &another) const {
+	assert(isValidWith(another));
+	return (toPair() <= another.toPair());
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::add(const LongInt &base) const {
+	assert(isValidWith(base));
+	const Low plainLow = low_ + base.low_;
+
+	const High high = high_ + base.high_ + static_cast<High>(plainLow / unit_);
+	const Low low = plainLow % unit_;
+
+	return LongInt(high, low, unit_);
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::subtract(
+		const LongInt &base) const {
+	assert(isValidWith(base));
+	const bool lowLess = (low_ < base.low_);
+
+	const High high = high_ - base.high_ - (lowLess ? 1 : 0);
+	const Low low = ((lowLess ? unit_ : 0) + low_) - base.low_;
+
+	return LongInt(high, low, unit_);
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::remainder(
+		const LongInt &base) const {
+	return subtract(truncate(base));
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::truncate(
+		const LongInt &base) const {
+	return divide(base).multiply(base);
+}
+
+inline SQLValues::LongInt SQLValues::LongInt::negate(bool negative) const {
+	assert(isValid());
+	if (!negative) {
+		return *this;
+	}
+
+	const High high = -high_ + (low_ == 0 ? 0 : -1);
+	const Low low = (low_ == 0 ? 0 : unit_ - low_);
+
+	return LongInt(high, low, unit_);
+}
+
+inline const SQLValues::LongInt& SQLValues::LongInt::getMax(
+		const LongInt &base) const {
+	return (base.isLessThan(*this) ? *this : base);
+}
+
+inline const SQLValues::LongInt& SQLValues::LongInt::getMin(
+		const LongInt &base) const {
+	return (base.isLessThan(*this) ? base : *this);
+}
+
+inline bool SQLValues::LongInt::checkAdditionOverflow(
+		const LongInt &base, bool &upper) const {
+	upper = false;
+
+	const bool negative = isNegative();
+	const bool baseNegative = base.isNegative();
+	if (!negative != !baseNegative) {
+		return false;
+	}
+	else if (negative) {
+		return isLessThan(min(getUnit()).subtract(base));
+	}
+	else {
+		upper = true;
+		return max(getUnit()).subtract(base).isLessThan(*this);
+	}
+}
+
+inline SQLValues::LongInt::Unit SQLValues::LongInt::mega() {
+	return Unit(1000 * 1000);
+}
+
+inline SQLValues::LongInt::LongInt(
+		const High &high, const Low &low, const UnitBase &unit) :
+		high_(high),
+		low_(low),
+		unit_(unit) {
+}
+
+inline SQLValues::LongInt::Pair SQLValues::LongInt::toPair() const {
+	return Pair(high_, low_);
+}
+
+inline bool SQLValues::LongInt::isValidWith(const LongInt &another) const {
+	return (isValid() && another.isValid() && unit_ == another.unit_);
+}
+
+inline bool SQLValues::LongInt::isUnsignedWith(const LongInt &another) const {
+	return (isValidWith(another) && !isNegative() && !another.isNegative());
+}
+
+
+inline SQLValues::LongInt::Unit::Unit(UnitBase base) :
+		base_(base) {
+}
+
+inline SQLValues::LongInt::UnitBase SQLValues::LongInt::Unit::get() const {
+	return base_;
+}
+
+
 inline SQLValues::DateTimeElements::DateTimeElements(const int64_t &value) :
 		unixTimeMillis_(value),
 		nanoSeconds_(0) {
@@ -7192,6 +7694,15 @@ inline SQLValues::DateTimeElements::DateTimeElements(
 		const util::PreciseDateTime &value) :
 		unixTimeMillis_(value.getBase().getUnixTime()),
 		nanoSeconds_(value.getNanoSeconds()) {
+}
+
+inline SQLValues::DateTimeElements SQLValues::DateTimeElements::ofLongInt(
+		const LongInt &src) {
+	const int64_t high = src.getHigh();
+	const int64_t low = src.getLow();
+	assert(0 <= low && low < 1000 * 1000);
+	return DateTimeElements(util::PreciseDateTime::ofNanoSeconds(
+			util::DateTime(high), static_cast<uint32_t>(low)));
 }
 
 inline int64_t SQLValues::DateTimeElements::toTimestamp(
@@ -7235,6 +7746,11 @@ inline util::PreciseDateTime SQLValues::DateTimeElements::toDateTime(
 		const Types::NanoTimestampTag&) const {
 	return util::PreciseDateTime::ofNanoSeconds(
 			util::DateTime(unixTimeMillis_), nanoSeconds_);
+}
+
+inline SQLValues::LongInt SQLValues::DateTimeElements::toLongInt() const {
+	return LongInt::ofElements(
+			getUnixTimeMillis(), getNanoSeconds(), LongInt::mega());
 }
 
 inline int64_t SQLValues::DateTimeElements::getUnixTimeMillis() const {
@@ -8031,6 +8547,19 @@ template<typename T>
 TupleValue SQLValues::ValueUtils::toAnyByNumeric(T src) {
 	UTIL_STATIC_ASSERT(std::numeric_limits<T>::is_specialized);
 	return TupleValue(src);
+}
+
+inline TupleValue SQLValues::ValueUtils::toAnyByLongInt(
+		ValueContext &cxt, const LongInt &src) {
+	if (!src.isValid()) {
+		return TupleValue();
+	}
+	else if (src.getLow() != 0) {
+		return createNanoTimestampValue(
+				cxt, DateTimeElements::ofLongInt(src).toTimestamp(
+						Types::NanoTimestampTag()));
+	}
+	return toAnyByTimestamp(src.getHigh());
 }
 
 inline TupleValue SQLValues::ValueUtils::toAnyByTimestamp(int64_t src) {

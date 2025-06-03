@@ -349,7 +349,7 @@ void SyncManager::removeSyncContext(EventContext& ec, PartitionId pId, SyncConte
 }
 
 /*!
-	@brief setShortermSyncRequest
+	@brief setShorttermSyncRequest
 */
 /*!
 	@brief 同期用コンテキスト取得(内部)
@@ -360,7 +360,7 @@ void SyncManager::removeSyncContext(EventContext& ec, PartitionId pId, SyncConte
 	@return なし
 	@note
 */
-void SyncManager::setShortermSyncRequest(SyncContext* context, SyncRequestInfo& syncRequestInfo,
+void SyncManager::setShorttermSyncRequest(SyncContext* context, SyncRequestInfo& syncRequestInfo,
 	util::Set<NodeId>& syncTargetNodeSet) {
 
 	PartitionRole& nextRole = syncRequestInfo.getPartitionRole();
@@ -379,7 +379,7 @@ void SyncManager::setShortermSyncRequest(SyncContext* context, SyncRequestInfo& 
 	nextRole.getShortTermSyncTargetNodeId(syncTargetNodeSet);
 }
 
-void SyncManager::setShortermSyncStart(
+void SyncManager::setShorttermSyncStart(
 	SyncContext* context,
 	SyncRequestInfo& syncRequestInfo,
 	NodeId senderNodeId) {
@@ -828,9 +828,9 @@ bool SyncManager::setLongtermSyncChunk(SyncContext* context, NodeId senderNodeId
 	int32_t logBufferSize = 0;
 	context->getLogBuffer(logBuffer, logBufferSize);
 	if (logBuffer != NULL && logBufferSize > 0) {
-		GS_OUTPUT_SYNC(context, "[TXN_LONGTERM_SYNC_CHUNK:restore:START]", "logBuffeSizeB=" << logBufferSize);
+		GS_OUTPUT_SYNC(context, "[TXN_LONGTERM_SYNC_CHUNK:restore:START]", "logBufferSizeB=" << logBufferSize);
 		{
-			GS_TRACE_SYNC(context, "[CATCHUP] Long term restore partition", "");;
+			GS_TRACE_SYNC(context, "[CATCHUP] Long term restore partition", "");
 			try {
 				partition.restore(logBuffer, logBufferSize);
 			}
@@ -842,7 +842,7 @@ bool SyncManager::setLongtermSyncChunk(SyncContext* context, NodeId senderNodeId
 			}
 		}
 		ret = true;
-		GS_TRACE_SYNC(context, "[CATCHUP] Long term apply chunks completed", "");;
+		GS_TRACE_SYNC(context, "[CATCHUP] Long term apply chunks completed", "");
 		context->freeBuffer(varSizeAlloc, LOG_SYNC, getSyncOptStat());
 		GS_OUTPUT_SYNC(context, "[TXN_LONGTERM_SYNC_CHUNK:restore:END]", "");
 	}
@@ -1834,8 +1834,7 @@ void SyncManager::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		config, CONFIG_TABLE_SYNC_KEEP_LOG_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(0)
-		.setDefault(60 * 20)
-		.setMax(60 * 60 * 24);
+		.setDefault(60 * 20);
 
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SYNC_KEEP_LOG_LSN_DIFFERENCE, INT32)
@@ -1863,8 +1862,7 @@ void SyncManager::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		config, CONFIG_TABLE_SYNC_LONGTERM_CHECK_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(60)
-		.setDefault(60 * 60)
-		.setMax(60 * 60 * 24);
+		.setDefault(60 * 60 * 24);
 
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SYNC_SYNC_POLICY, INT32)
@@ -2147,6 +2145,9 @@ bool SyncContext::checkLongTermSync(CheckpointService* cpSvc, int32_t checkInter
 }
 
 bool SyncContext::checkLongTermSyncCore(CheckpointService* cpSvc, int32_t checkInterval) {
+	if (checkInterval == 0) {
+		return true;
+	}
 	if (prevEventType_ != eventType_) {
 		stateStartTime_ = watch_.elapsedMillis();
 		prevEventType_ = eventType_;

@@ -988,7 +988,7 @@ void Partition::endCheckpoint0(CheckpointPhase phase) {
 			const int64_t logVersion = defaultLogManager_->getLogVersion();
 			defaultLogManager_->flushCpLog(LOG_WRITE_WAL_BUFFER, byCP);
 			defaultLogManager_->flushCpLog(LOG_FLUSH_FILE, byCP);
-			defaultLogManager_->removeLogFiles(logVersion, checkpointRange_);
+			defaultLogManager_->removeLogFiles(logVersion, checkpointRange_, 0);
 		}
 	} catch(std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, ""));
@@ -1055,7 +1055,7 @@ void Partition::endCheckpointReleaseBlock(const Log* log) {
 void Partition::removeLogFiles(int32_t range) {
 	try {
 		int64_t logVersion = defaultLogManager_->getLogVersion();
-		defaultLogManager_->removeLogFiles(logVersion, range);
+		defaultLogManager_->removeLogFiles(logVersion, range, 0);
 	} catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, ""));
 	}
@@ -1477,7 +1477,6 @@ uint64_t Partition::copyChunks(
 			cxt.datafile_ = NULL;
 			localXWALBuffer.reset(UTIL_NEW WALBuffer(pId_, statsSet_.logMgrStats_));
 			localCPWALBuffer.reset(UTIL_NEW WALBuffer(pId_, statsSet_.logMgrStats_));
-
 			int64_t logVersion = defaultLogManager_->getLogVersion();
 			std::unique_ptr<MutexLocker> mutexLocker(UTIL_NEW MutexLocker());
 			cxt.logManager_ = UTIL_NEW LogManager<MutexLocker>(
@@ -1668,7 +1667,7 @@ PartitionList::PartitionList(
 		partitionCount_(configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
 		stats_(ALLOC_UNIQUE(
 				varAlloc_, PartitionListStats,
-				varAlloc_, configTable_, config_))
+				varAlloc_, configTable_, config_)), managerSet_(NULL)
 {
 	try {
 		const char* const DATA_FOLDER = configTable.get<const char8_t*>(CONFIG_TABLE_DS_DB_PATH);
@@ -1764,7 +1763,9 @@ PartitionList::~PartitionList() {
 	delete ism_;
 }
 
+
 void PartitionList::initialize(ManagerSet &resourceSet) {
+	managerSet_ = &resourceSet;
 	for (auto& itr : ptList_) {
 		itr->initialize(resourceSet);
 	}

@@ -28,6 +28,7 @@ void SQLSortOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_WINDOW, Window>();
 	add<SQLOpTypes::OP_WINDOW_PARTITION, WindowPartition>();
 	add<SQLOpTypes::OP_WINDOW_RANK_PARTITION, WindowRankPartition>();
+	add<SQLOpTypes::OP_WINDOW_FRAME_PARTITION, WindowFramePartition>();
 	add<SQLOpTypes::OP_WINDOW_MERGE, WindowMerge>();
 
 	addProjection<SQLOpTypes::PROJ_PIPE_FINISH, NonExecutableProjection>();
@@ -1841,6 +1842,8 @@ void SQLSortOps::Window::compile(OpContext &cxt) const {
 	SQLOpUtils::ProjectionPair projections =
 			builder.arrangeProjections(srcCode, false, true, NULL);
 
+	const SQLExprs::Expression *windowOption = srcCode.getFilterPredicate();
+
 	SQLExprs::Expression *valueExpr;
 	SQLExprs::Expression *posExpr;
 	bool valueCounting;
@@ -1907,12 +1910,14 @@ void SQLSortOps::Window::compile(OpContext &cxt) const {
 		plan.linkToAllParentOutput(mergeNode);
 	}
 	else {
-		OpNode &node = plan.createNode(isRanking(builder, *projections.first) ?
-				SQLOpTypes::OP_WINDOW_RANK_PARTITION :
-				SQLOpTypes::OP_WINDOW_PARTITION);
+		const SQLOpTypes::Type type = getSingleNodeType(
+				builder, *projections.first, windowOption);
+
+		OpNode &node = plan.createNode(type);
 		{
 			node.setCode(createSingleCode(
-					builder, keyList, projections, windowExprList));
+					builder, keyList, projections, windowExprList,
+					windowOption));
 			node.addInput(plan.getParentInput(0));
 		}
 
@@ -1954,10 +1959,11 @@ SQLOps::OpCode SQLSortOps::Window::createPartitionCode(
 			valueExpr = NULL;
 		}
 
+		const bool withFrame = false;
 		ExprRefList dupWindowExprList(alloc);
 		duplicateExprList(builder, windowExprList, dupWindowExprList);
 		countProj = &createProjectionWithWindow(
-				builder, pipeProj, baseProj, dupWindowExprList);
+				builder, pipeProj, baseProj, dupWindowExprList, withFrame);
 	}
 
 	Projection *posProj = NULL;
@@ -2084,9 +2090,11 @@ SQLOps::OpCode SQLSortOps::Window::createMergeCode(
 		pipeProj = projections.first;
 	}
 
+	const bool withFrame = false;
 	assert(projections.second != NULL);
 	Projection &finishProj = createProjectionWithWindow(
-			builder, *projections.first, *projections.second, windowExprList);
+			builder, *projections.first, *projections.second, windowExprList,
+			withFrame);
 
 	OpCode code;
 	code.setPipeProjection(
@@ -2097,7 +2105,7 @@ SQLOps::OpCode SQLSortOps::Window::createMergeCode(
 SQLOps::OpCode SQLSortOps::Window::createSingleCode(
 		OpCodeBuilder &builder, const SQLValues::CompColumnList *keyList,
 		SQLOpUtils::ProjectionPair &projections,
-		ExprRefList &windowExprList) {
+		ExprRefList &windowExprList, const SQLExprs::Expression *windowOption) {
 	OpCode code;
 	code.setKeyColumnList(keyList);
 
@@ -2107,8 +2115,11 @@ SQLOps::OpCode SQLSortOps::Window::createSingleCode(
 			*projections.first, *projections.second);
 	projections = SQLOpUtils::ProjectionPair();
 
+	const bool withFrame = WindowFramePartition::isFrameEnabled(windowOption);
+
 	code.setPipeProjection(&createProjectionWithWindow(
-			builder, pipeProj, pipeFinProj, windowExprList));
+			builder, pipeProj, pipeFinProj, windowExprList, withFrame));
+	code.setFilterPredicate(windowOption);
 
 	return code;
 }
@@ -2296,7 +2307,38 @@ SQLExprs::Expression& SQLSortOps::Window::createPositioningValueExpr(
 
 SQLOps::Projection& SQLSortOps::Window::createProjectionWithWindow(
 		OpCodeBuilder &builder, const Projection &pipeProj, Projection &src,
-		ExprRefList &windowExprList) {
+		ExprRefList &windowExprList, bool withFrame) {
+	SQLOps::Projection *windowProj;
+	if (withFrame) {
+		SQLOps::Projection &lowerProj =
+				createProjectionWithWindowSub(builder, pipeProj, NULL);
+		SQLOps::Projection &upperProj =
+				createProjectionWithWindowSub(builder, pipeProj, NULL);
+
+		applyFrameAttributes(lowerProj, true, false);
+		applyFrameAttributes(upperProj, true, true);
+
+		applyFrameAttributes(src.chainAt(0), false, false);
+		applyFrameAttributes(src.chainAt(1), false, false);
+
+		windowProj = &builder.createMultiStageProjection(lowerProj, upperProj);
+	}
+	else {
+		windowProj = &createProjectionWithWindowSub(
+				builder, pipeProj, &windowExprList);
+	}
+
+	windowExprList.clear();
+
+	SQLOps::Projection &dest =
+			builder.createMultiStageProjection(*windowProj, src);
+
+	return dest;
+}
+
+SQLOps::Projection& SQLSortOps::Window::createProjectionWithWindowSub(
+		OpCodeBuilder &builder, const Projection &pipeProj,
+		ExprRefList *windowExprList) {
 	Projection &windowProj = builder.createProjection(
 			SQLOpTypes::PROJ_AGGR_PIPE, pipeProj.getProjectionCode());
 
@@ -2304,19 +2346,24 @@ SQLOps::Projection& SQLSortOps::Window::createProjectionWithWindow(
 			SQLExprs::ExprCode::ATTR_ASSIGNED |
 			SQLExprs::ExprCode::ATTR_AGGR_ARRANGED);
 
-	{
-		SQLExprs::Expression::ModIterator it(windowProj);
-		for (ExprRefList::iterator exprIt = windowExprList.begin();
-				exprIt != windowExprList.end(); ++exprIt) {
-			it.append(**exprIt);
+	SQLExprs::Expression::ModIterator destIt(windowProj);
+	if (windowExprList == NULL) {
+		SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+		SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+
+		SQLExprs::Expression::Iterator it(pipeProj);
+		for (; it.exists(); it.next()) {
+			destIt.append(rewriter.rewrite(factoryCxt, it.get(), NULL));
 		}
-		windowExprList.clear();
+	}
+	else {
+		for (ExprRefList::iterator exprIt = windowExprList->begin();
+				exprIt != windowExprList->end(); ++exprIt) {
+			destIt.append(**exprIt);
+		}
 	}
 
-	SQLOps::Projection &dest =
-			builder.createMultiStageProjection(windowProj, src);
-
-	return dest;
+	return windowProj;
 }
 
 SQLOps::Projection& SQLSortOps::Window::createUnmatchWindowPipeProjection(
@@ -2333,6 +2380,22 @@ SQLOps::Projection& SQLSortOps::Window::createUnmatchWindowPipeProjection(
 	}
 
 	return dest;
+}
+
+void SQLSortOps::Window::applyFrameAttributes(
+		Projection &proj, bool forWindowPipe, bool forward) {
+	SQLExprs::ExprCode &code = proj.getProjectionCode().getExprCode();
+
+	uint32_t attributes = code.getAttributes();
+	attributes |= SQLExprs::ExprCode::ATTR_AGGR_DECREMENTAL;
+
+	if (forWindowPipe) {
+		attributes |= (forward ?
+				SQLExprs::ExprCode::ATTR_DECREMENTAL_FORWARD :
+				SQLExprs::ExprCode::ATTR_DECREMENTAL_BACKWARD);
+	}
+
+	code.setAttributes(attributes);
 }
 
 void SQLSortOps::Window::setUpUnmatchWindowExpr(
@@ -2432,6 +2495,18 @@ void SQLSortOps::Window::duplicateExprList(
 		dest.push_back(
 				&builder.getExprRewriter().rewrite(factoryCxt, **it, NULL));
 	}
+}
+
+SQLOpTypes::Type SQLSortOps::Window::getSingleNodeType(
+		OpCodeBuilder &builder, const Projection &pipeProj,
+		const SQLExprs::Expression *windowOption) {
+	if (WindowFramePartition::isFrameEnabled(windowOption)) {
+		return SQLOpTypes::OP_WINDOW_FRAME_PARTITION;
+	}
+
+	return (isRanking(builder, pipeProj) ?
+			SQLOpTypes::OP_WINDOW_RANK_PARTITION :
+			SQLOpTypes::OP_WINDOW_PARTITION);
 }
 
 bool SQLSortOps::Window::isRanking(
@@ -2869,6 +2944,25 @@ void SQLSortOps::WindowRankPartition::execute(OpContext &cxt) const {
 	}
 }
 
+void SQLSortOps::WindowRankPartition::resolveKeyListAt(
+		const OpCode &code, SQLValues::CompColumnList &partKeyList,
+		SQLValues::CompColumnList &rankKeyList) {
+	const SQLValues::CompColumnList *baseKeyList = code.findKeyColumnList();
+	if (baseKeyList == NULL) {
+		return;
+	}
+
+	SQLValues::CompColumnList::const_iterator midIt = baseKeyList->begin();
+	for (; midIt != baseKeyList->end(); ++midIt) {
+		if (!midIt->isAscending()) {
+			break;
+		}
+	}
+
+	partKeyList.assign(baseKeyList->begin(), midIt);
+	rankKeyList.assign(midIt, baseKeyList->end());
+}
+
 void SQLSortOps::WindowRankPartition::getProjections(
 		const Projection *&pipeProj, const Projection *&subFinishProj) const {
 	const Projection *totalProj = getCode().getPipeProjection();
@@ -2909,20 +3003,7 @@ SQLSortOps::WindowRankPartition::preparePartitionContext(
 void SQLSortOps::WindowRankPartition::resolveKeyList(
 		SQLValues::CompColumnList &partKeyList,
 		SQLValues::CompColumnList &rankKeyList) const {
-	const SQLValues::CompColumnList *baseKeyList = getCode().findKeyColumnList();
-	if (baseKeyList == NULL) {
-		return;
-	}
-
-	SQLValues::CompColumnList::const_iterator midIt = baseKeyList->begin();
-	for (; midIt != baseKeyList->end(); ++midIt) {
-		if (!midIt->isAscending()) {
-			break;
-		}
-	}
-
-	partKeyList.assign(baseKeyList->begin(), midIt);
-	rankKeyList.assign(midIt, baseKeyList->end());
+	resolveKeyListAt(getCode(), partKeyList, rankKeyList);
 }
 
 SQLOps::TupleListReader* SQLSortOps::WindowRankPartition::prepareKeyReader(
@@ -2963,6 +3044,961 @@ SQLSortOps::WindowRankPartition::PartitionContext::PartitionContext(
 		keyReaderStarted_(false),
 		pipeDone_(false),
 		rankGap_(0) {
+}
+
+
+void SQLSortOps::WindowFramePartition::compile(OpContext &cxt) const {
+	cxt.setAllInputSourceType(SQLExprs::ExprCode::INPUT_READER_MULTI);
+	cxt.setReaderRandomAccess(0);
+
+	Operator::compile(cxt);
+}
+
+void SQLSortOps::WindowFramePartition::execute(OpContext &cxt) const {
+	const Projection *pipeProj;
+	const Projection *lowerProj;
+	const Projection *subFinishProj;
+	getProjections(pipeProj, lowerProj, subFinishProj);
+
+	PartitionContext &partCxt = preparePartitionContext(cxt, *pipeProj);
+
+	int64_t &lowerPos = partCxt.lowerPos_;
+	int64_t &upperPos = partCxt.upperPos_;
+
+	int64_t &currentPos = partCxt.currentPos_;
+	int64_t &tailPos = partCxt.initialPipePos_;
+
+	TupleListReader *keyReader = prepareKeyReader(cxt, partCxt);
+	if (keyReader == NULL) {
+		return;
+	}
+
+	TupleListReader *&activeReaderRef = *cxt.getActiveReaderRef();
+	TupleListReader &pipeReader = preparePipeReader(cxt);
+	TupleListReader &lowerReader = prepareLowerReader(cxt);
+	TupleListReader &subFinishReader = prepareSubFinishReader(cxt);
+
+	util::LocalUniquePtr<OrderedAggregator> aggregator;
+	if (!prepareAggregator(cxt, partCxt, pipeReader, aggregator)) {
+		return;
+	}
+
+	for (;;) {
+		const bool totalTail = !keyReader->exists();
+		if (totalTail && !cxt.isAllInputCompleted()) {
+			return;
+		}
+
+		int64_t maxPos = -1;
+		for (;;) {
+			const int64_t subMaxPos = std::max(currentPos, upperPos);
+			if (tailPos < 0 && maxPos >= 0 && subMaxPos != maxPos) {
+				break;
+			}
+			maxPos = subMaxPos;
+
+			if (tailPos < 0) {
+				TupleListReader &tailReader = (upperPos < currentPos ?
+						subFinishReader : pipeReader);
+				if (isPartTail(partCxt, totalTail, tailReader, *keyReader)) {
+					tailPos = maxPos;
+				}
+			}
+
+			if (tailPos >= 0 && currentPos > tailPos) {
+				if (totalTail) {
+					return;
+				}
+
+				lowerReader.assign(*keyReader);
+				pipeReader.assign(*keyReader);
+				subFinishReader.assign(*keyReader);
+
+				clearAggregation(cxt, aggregator.get(), pipeReader);
+
+				lowerPos = 0;
+				upperPos = 0;
+				currentPos = 0;
+				tailPos = -1;
+				break;
+			}
+
+			if (cxt.checkSuspended()) {
+				return;
+			}
+
+			const bool upperInside = (
+					(tailPos < 0 || upperPos <= tailPos) &&
+					isUpperInside(partCxt, subFinishReader, pipeReader));
+
+			if (upperInside) {
+				if (!resoveActivePipeReader(
+						cxt, aggregator.get(), true, pipeReader,
+						activeReaderRef)) {
+					return;
+				}
+				if (activeReaderRef != NULL) {
+					pipeProj->project(cxt);
+				}
+				pipeReader.next();
+				upperPos++;
+				continue;
+			}
+
+			const bool lowerOutside = (
+					lowerPos < upperPos &&
+					!isLowerInside(partCxt, subFinishReader, lowerReader));
+
+			if (lowerOutside) {
+				if (!resoveActivePipeReader(
+						cxt, aggregator.get(), false, lowerReader,
+						activeReaderRef)) {
+					return;
+				}
+				if (activeReaderRef != NULL) {
+					lowerProj->project(cxt);
+				}
+				lowerReader.next();
+				lowerPos++;
+				continue;
+			}
+
+			activeReaderRef = &subFinishReader;
+			subFinishProj->project(cxt);
+			subFinishReader.next();
+			currentPos++;
+		}
+
+		keyReader->next();
+	}
+}
+
+bool SQLSortOps::WindowFramePartition::isFrameEnabled(
+		const SQLExprs::Expression *windowOption) {
+	return (windowOption != NULL && windowOption->getChildCount() >= 3);
+}
+
+bool SQLSortOps::WindowFramePartition::isPartTail(
+		PartitionContext &partCxt, bool totalTail,
+		TupleListReader &tailReader, TupleListReader &keyReader) {
+	return totalTail || (partCxt.partEq_ != NULL &&
+			!(*partCxt.partEq_)(
+					SQLValues::TupleListReaderSource(tailReader),
+					SQLValues::TupleListReaderSource(keyReader)));
+}
+
+bool SQLSortOps::WindowFramePartition::isLowerInside(
+		PartitionContext &partCxt, TupleListReader &subFinishReader,
+		TupleListReader &lowerReader) {
+	const Boundary &boundary = partCxt.boundary_.first;
+	if (boundary.unbounded_) {
+		return true;
+	}
+	else if (boundary.rows_) {
+		const int64_t &lowerPos = partCxt.lowerPos_;
+		const int64_t &currentPos = partCxt.currentPos_;
+		return (lowerPos - currentPos) >= boundary.distance_.toLong();
+	}
+	else if (boundary.current_) {
+		return isInsideByCurrent(partCxt, subFinishReader, lowerReader);
+	}
+	else {
+		return isInsideByRange(partCxt, false, subFinishReader, lowerReader);
+	}
+}
+
+bool SQLSortOps::WindowFramePartition::isUpperInside(
+		PartitionContext &partCxt, TupleListReader &subFinishReader,
+		TupleListReader &pipeReader) {
+	const Boundary &boundary = partCxt.boundary_.second;
+	if (boundary.unbounded_) {
+		return true;
+	}
+	else if (boundary.rows_) {
+		const int64_t &upperPos = partCxt.upperPos_;
+		const int64_t &currentPos = partCxt.currentPos_;
+		return (upperPos - currentPos) <= boundary.distance_.toLong();
+	}
+	else if (boundary.current_) {
+		return isInsideByCurrent(partCxt, subFinishReader, pipeReader);
+	}
+	else {
+		return isInsideByRange(partCxt, true, subFinishReader, pipeReader);
+	}
+}
+
+bool SQLSortOps::WindowFramePartition::isInsideByCurrent(
+		PartitionContext &partCxt, TupleListReader &lastReader,
+		TupleListReader &nextReader) {
+	return (partCxt.rankEq_ == NULL ||
+			(*partCxt.rankEq_)(
+					SQLValues::TupleListReaderSource(lastReader),
+					SQLValues::TupleListReaderSource(nextReader)));
+}
+
+bool SQLSortOps::WindowFramePartition::isInsideByRange(
+		PartitionContext &partCxt, bool upper, TupleListReader &lastReader,
+		TupleListReader &nextReader) {
+	const Boundary &boundary =
+			(upper ? partCxt.boundary_.second : partCxt.boundary_.first);
+
+	const SQLValues::CompColumnList &rankKeyList = partCxt.rankKeyList_;
+	assert(!rankKeyList.empty());
+
+	const TupleColumn &column = rankKeyList.front().getTupleColumn1();
+
+	const SQLValues::LongInt &last = SQLValues::ValueUtils::toLongInt(
+			SQLValues::ValueUtils::readCurrentAny(lastReader, column));
+	const SQLValues::LongInt &next = SQLValues::ValueUtils::toLongInt(
+			SQLValues::ValueUtils::readCurrentAny(nextReader, column));
+	if (!last.isValid() || !next.isValid()) {
+		return (!last.isValid() && !next.isValid());
+	}
+
+	const SQLValues::LongInt &delta =
+			boundary.distance_.negate(!partCxt.rankAscending_);
+
+	bool overflowUpper;
+	if (last.checkAdditionOverflow(delta, overflowUpper)) {
+		return overflowUpper;
+	}
+	else {
+		const SQLValues::LongInt &lastWithDelta = last.add(delta);
+		if (upper) {
+			return next.isLessThanEq(lastWithDelta);
+		}
+		else {
+			return lastWithDelta.isLessThanEq(next);
+		}
+	}
+}
+
+bool SQLSortOps::WindowFramePartition::resoveActivePipeReader(
+		OpContext &cxt, OrderedAggregator *aggregator, bool upper,
+		TupleListReader &base, TupleListReader *&activeReaderRef) {
+	bool done;
+	TupleListReader *ref;
+
+	do {
+		if (aggregator == NULL) {
+			ref = &base;
+			done = true;
+			break;
+		}
+
+		if (!aggregator->update(cxt, upper, base)) {
+			ref = NULL;
+			done = false;
+			break;
+		}
+
+		cxt.getExprContext().initializeAggregationValues();
+		ref = aggregator->getTop();
+		done = true;
+	}
+	while (false);
+
+	activeReaderRef = ref;
+	return done;
+}
+
+void SQLSortOps::WindowFramePartition::clearAggregation(
+		OpContext &cxt, OrderedAggregator *aggregator,
+		TupleListReader &tailReader) {
+	cxt.getExprContext().initializeAggregationValues();
+
+	if (aggregator != NULL) {
+		aggregator->reset(cxt, tailReader);
+	}
+}
+
+void SQLSortOps::WindowFramePartition::getProjections(
+		const Projection *&pipeProj, const Projection *&lowerProj,
+		const Projection *&subFinishProj) const {
+	const Projection *totalProj = getCode().getPipeProjection();
+
+	assert(totalProj->getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_MULTI_STAGE);
+	const Projection &basePipeProj = totalProj->chainAt(0);
+	const Projection &pipeFinishProj = totalProj->chainAt(1);
+
+	assert(pipeFinishProj.getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_PIPE_FINISH);
+	subFinishProj = &pipeFinishProj.chainAt(1);
+
+	assert(SQLOps::OpCodeBuilder::findOutputProjection(
+			*subFinishProj, NULL) != NULL);
+
+	assert(basePipeProj.getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_MULTI_STAGE);
+	lowerProj = &basePipeProj.chainAt(0);
+	pipeProj = &basePipeProj.chainAt(1);
+}
+
+SQLSortOps::WindowFramePartition::PartitionContext&
+SQLSortOps::WindowFramePartition::preparePartitionContext(
+		OpContext &cxt, const Projection &pipeProj) const {
+	if (!cxt.getResource(0).isEmpty()) {
+		return cxt.getResource(0).resolveAs<PartitionContext>();
+	}
+
+	cxt.getResource(0) = ALLOC_UNIQUE(
+			cxt.getAllocator(), PartitionContext, cxt.getAllocator());
+	PartitionContext &partCxt = cxt.getResource(0).resolveAs<PartitionContext>();
+
+	WindowRankPartition::resolveKeyListAt(
+			getCode(), partCxt.partKeyList_, partCxt.rankKeyList_);
+
+	partCxt.partEq_ = WindowPartition::createKeyComparator(
+			cxt, &partCxt.partKeyList_, partCxt.partEqBase_);
+	partCxt.rankEq_ = WindowPartition::createKeyComparator(
+			cxt, &partCxt.rankKeyList_, partCxt.rankEqBase_);
+
+	const SQLExprs::Expression *windowOption = getCode().getFilterPredicate();
+	applyWindowOption(partCxt, windowOption);
+
+	tryPrepareAggregatorInfo(cxt, partCxt, pipeProj);
+
+	return partCxt;
+}
+
+void SQLSortOps::WindowFramePartition::tryPrepareAggregatorInfo(
+		OpContext &cxt, PartitionContext &partCxt,
+		const Projection &pipeProj) const {
+	SQLValues::CompColumnList aggrKeyList(cxt.getAllocator());
+
+	SQLExprs::Expression::Iterator exprIt(pipeProj);
+	for (; exprIt.exists(); exprIt.next()) {
+		const SQLExprs::ExprType type = exprIt.get().getCode().getType();
+		if (SQLExprs::ExprTypeUtils::isNormalWindow(type) &&
+				!SQLExprs::ExprTypeUtils::isDecremental(type)) {
+			SQLExprs::Expression::Iterator argIt(exprIt.get());
+			const SQLExprs::ExprCode *code =
+					(argIt.exists() ? &argIt.get().getCode() : NULL);
+
+			if (code == NULL || code->getType() != SQLType::EXPR_COLUMN) {
+				assert(false);
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+			}
+
+			SQLValues::SummaryColumn::Source src;
+			src.tupleColumn_ = cxt.getReaderColumn(0, code->getColumnPos());
+			const SQLValues::SummaryColumn summaryColumn(src);
+
+			const bool ascending = (type == SQLType::AGG_MIN);
+			SQLValues::CompColumn column;
+			column.setSummaryColumn(summaryColumn, true);
+			column.setSummaryColumn(summaryColumn, false);
+
+			column.setType(code->getColumnType());
+			column.setColumnPos(code->getColumnPos(), true);
+			column.setAscending(ascending);
+			aggrKeyList.push_back(column);
+			break;
+		}
+	}
+
+	if (!aggrKeyList.empty()) {
+		partCxt.aggrInfo_ = UTIL_MAKE_LOCAL_UNIQUE(
+				partCxt.aggrInfo_, OrderedAggregatorInfo,
+				cxt.getValueContext(), aggrKeyList);
+	}
+}
+
+void SQLSortOps::WindowFramePartition::applyWindowOption(
+		PartitionContext &partCxt, const SQLExprs::Expression *windowOption) {
+	assert(isFrameEnabled(windowOption));
+
+	SQLExprs::Expression::Iterator it(*windowOption);
+	const int64_t flags = it.get().getCode().getValue().get<int64_t>();
+	it.next();
+	const TupleValue &startValue = it.get().getCode().getValue();
+	it.next();
+	const TupleValue &finishValue = it.get().getCode().getValue();
+
+	partCxt.rankAscending_ = ((flags & (1 << SQLType::FRAME_ASCENDING)) != 0);
+
+	applyBoundaryOption(partCxt, flags, startValue, true);
+	applyBoundaryOption(partCxt, flags, finishValue, false);
+}
+
+void SQLSortOps::WindowFramePartition::applyBoundaryOption(
+		PartitionContext &partCxt, int64_t flags, const TupleValue &value,
+		bool start) {
+	const bool preceding = ((flags & (1 << (start ?
+			SQLType::FRAME_START_PRECEDING :
+			SQLType::FRAME_FINISH_PRECEDING))) != 0);
+	const bool following = ((flags & (1 << (start ?
+			SQLType::FRAME_START_FOLLOWING :
+			SQLType::FRAME_FINISH_FOLLOWING))) != 0);
+
+	const bool withDirection = (preceding || following);
+	const bool withValue = !SQLValues::ValueUtils::isNull(value);
+
+	const SQLValues::LongInt &distance = (withValue ?
+			SQLValues::ValueUtils::toLongInt(value).negate(preceding) :
+			SQLValues::ValueUtils::toLongInt(
+					TupleValue(static_cast<int64_t>(0))));
+
+	Boundary &boundary =
+			(start ? partCxt.boundary_.first : partCxt.boundary_.second);
+
+	boundary.distance_ = distance;
+	boundary.unbounded_ = (withDirection && !withValue);
+	boundary.rows_ = ((flags & (1 << SQLType::FRAME_ROWS)) != 0);
+	boundary.current_ = !withDirection;
+}
+
+bool SQLSortOps::WindowFramePartition::prepareAggregator(
+		OpContext &cxt, PartitionContext &partCxt,
+		TupleListReader &pipeReader,
+		util::LocalUniquePtr<OrderedAggregator> &aggregator) {
+	OrderedAggregatorInfo *info = partCxt.aggrInfo_.get();
+	if (info != NULL) {
+		aggregator = UTIL_MAKE_LOCAL_UNIQUE(
+				aggregator, OrderedAggregator, cxt, *info, pipeReader);
+		if (!aggregator->resumeUpdates(cxt)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+SQLOps::TupleListReader* SQLSortOps::WindowFramePartition::prepareKeyReader(
+		OpContext &cxt, PartitionContext &partCxt) {
+	SQLOps::TupleListReader &reader = cxt.getReader(0, IN_KEY);
+	if (!partCxt.keyReaderStarted_) {
+		if (!reader.exists()) {
+			return NULL;
+		}
+		reader.next();
+		partCxt.keyReaderStarted_ = true;
+	}
+
+	return &reader;
+}
+
+SQLOps::TupleListReader& SQLSortOps::WindowFramePartition::preparePipeReader(
+		OpContext &cxt) {
+	SQLOps::TupleListReader &reader = cxt.getReader(0, IN_PIPE);
+	reader.exists();
+	return reader;
+}
+
+SQLOps::TupleListReader& SQLSortOps::WindowFramePartition::prepareLowerReader(
+		OpContext &cxt) {
+	SQLOps::TupleListReader &reader = cxt.getReader(0, IN_LOWER);
+	reader.exists();
+	return reader;
+}
+
+SQLOps::TupleListReader&
+SQLSortOps::WindowFramePartition::prepareSubFinishReader(
+		OpContext &cxt) {
+	SQLOps::TupleListReader &reader = cxt.getReader(0, IN_SUB_FINISH);
+	reader.exists();
+	return reader;
+}
+
+
+SQLSortOps::WindowFramePartition::OrderedAggregatorKey::OrderedAggregatorKey(
+		TupleListReader &reader, uint32_t level, bool upper) :
+		reader_(reader),
+		level_(level),
+		upper_(upper) {
+}
+
+
+SQLSortOps::WindowFramePartition::
+OrderedAggregatorKeyLess::OrderedAggregatorKeyLess(
+		const ReaderTupleComp &aggrComp) :
+		aggrComp_(aggrComp) {
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregatorKeyLess::operator()(
+		const Key &key1, const Key &key2) const {
+	int32_t ret;
+
+	if ((ret = aggrComp_(
+			SQLValues::TupleListReaderSource(key1.reader_),
+			SQLValues::TupleListReaderSource(key2.reader_))) != 0) {
+		return (ret < 0);
+	}
+
+	if ((ret = SQLValues::ValueUtils::compareRawValue(
+			key1.level_, key2.level_)) != 0) {
+		return (ret < 0);
+	}
+
+	return (SQLValues::ValueUtils::compareIntegral(
+			(key1.upper_ ? 1 : 0),
+			(key2.upper_ ? 1 : 0)) < 0);
+}
+
+
+SQLSortOps::WindowFramePartition::
+OrderedAggregatorPosition::OrderedAggregatorPosition(
+		uint32_t keyReaderId, uint32_t tailReaderId) :
+		keyReaderId_(keyReaderId),
+		tailReaderId_(tailReaderId),
+		tailPos_(0),
+		active_(false) {
+}
+
+
+SQLSortOps::WindowFramePartition::OrderedAggregatorInfo::OrderedAggregatorInfo(
+		SQLValues::ValueContext &valueCxt,
+		const SQLValues::CompColumnList &aggrKeyList) :
+		lowerTargetPos_(0),
+		upperTargetPos_(0),
+		lowerPosList_(valueCxt.getVarAllocator()),
+		upperPosList_(valueCxt.getVarAllocator()),
+		aggrKeyList_(
+				aggrKeyList.begin(), aggrKeyList.end(),
+				valueCxt.getAllocator()),
+		baseAggrComp_(aggrKeyList_, &valueCxt.getVarContext(), true),
+		aggrComp_(valueCxt.getAllocator(), baseAggrComp_),
+		aggrLess_(valueCxt.getAllocator(), baseAggrComp_),
+		keyLess_(aggrComp_),
+		updating_(false),
+		updatingReady_(false),
+		upperUpdating_(false) {
+}
+
+
+SQLSortOps::WindowFramePartition::OrderedAggregator::OrderedAggregator(
+		OpContext &cxt, Info &info, TupleListReader &curReader) :
+		info_(info),
+		keySet_(info_.keyLess_, cxt.getValueContext().getVarAllocator()),
+		keyItList_(cxt.getValueContext().getVarAllocator()) {
+	initializeKeys(cxt);
+
+	const bool resumeOnly =
+			(info_.updating_ || info_.lowerTargetPos_ > 0 || info_.upperTargetPos_ > 0);
+	resetReaders(cxt, curReader, resumeOnly);
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::update(
+		OpContext &cxt, bool upper, TupleListReader &baseReader) {
+	do {
+		if (info_.updating_) {
+			if (!info_.updatingReady_) {
+				assert(false);
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+			}
+			break;
+		}
+
+		if (upper && info_.lowerTargetPos_ >= info_.upperTargetPos_) {
+			reset(cxt, baseReader);
+		}
+
+		info_.updating_ = true;
+		info_.updatingReady_ = false;
+		info_.upperUpdating_ = upper;
+
+		if (!resumeUpdates(cxt)) {
+			return false;
+		}
+	}
+	while (false);
+
+	uint64_t &targetPos = getTargetPositionRef(info_.upperUpdating_);
+	targetPos++;
+
+	info_.updating_ = false;
+	info_.updatingReady_ = false;
+	info_.upperUpdating_ = false;
+	return true;
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::resumeUpdates(
+		OpContext &cxt) {
+	if (!info_.updating_) {
+		return true;
+	}
+
+	if (!updateKeysAt(cxt, false)) {
+		return false;
+	}
+
+	if (!updateKeysAt(cxt, true)) {
+		return false;
+	}
+
+	info_.updatingReady_ = true;
+	return true;
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::reset(
+		OpContext &cxt, TupleListReader &tailReader) {
+	clearAllKeys();
+
+	info_.lowerTargetPos_ = 0;
+	info_.upperTargetPos_ = 0;
+
+	const bool resumeOnly = false;
+	resetReaders(cxt, tailReader, resumeOnly);
+}
+
+SQLOps::TupleListReader*
+SQLSortOps::WindowFramePartition::OrderedAggregator::getTop() {
+	if (keySet_.empty()) {
+		return NULL;
+	}
+
+	return &keySet_.begin()->reader_;
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::initializeKeys(
+		OpContext &cxt) {
+	initializeKeysAt(cxt, true);
+	initializeKeysAt(cxt, false);
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::initializeKeysAt(
+		OpContext &cxt, bool upper) {
+	if (info_.updating_) {
+		return;
+	}
+
+	const uint32_t endLevel = resolveEffectiveEndLevel(upper, true);
+	for (uint32_t i = 0; i < endLevel; i++) {
+		insertKey(cxt, upper, i);
+	}
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::resetReaders(
+		OpContext &cxt, TupleListReader &reader, bool resumeOnly) {
+	resetReadersAt(cxt, reader, resumeOnly, false);
+	resetReadersAt(cxt, reader, resumeOnly, true);
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::resetReadersAt(
+		OpContext &cxt, TupleListReader &reader, bool resumeOnly, bool upper) {
+	PositionList &posList = (upper ? info_.upperPosList_ : info_.lowerPosList_);
+
+	for (PositionList::iterator it = posList.begin(); it != posList.end(); ++it) {
+		if (resumeOnly) {
+			if (!isPositionActive(*it)) {
+				assignInitialReader(cxt, *it, reader);
+			}
+		}
+		else {
+			if (!isPositionActive(*it)) {
+				break;
+			}
+			if (it != posList.begin()) {
+				deactivatePosition(*it);
+			}
+		}
+	}
+
+	if (!resumeOnly) {
+		Position &pos = resolvePosition(upper, 0);
+		assignInitialReader(cxt, pos, reader);
+		activatePosition(pos, 0);
+	}
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::updateKeysAt(
+		OpContext &cxt, bool upper) {
+	PositionList &posList = (upper ? info_.upperPosList_ : info_.lowerPosList_);
+
+	const size_t posCount = posList.size();
+	const uint32_t nextLevel = resolveEffectiveEndLevel(upper, false);
+
+	for (uint32_t i = nextLevel; i < posCount; i++) {
+		eraseKey(upper, i);
+		if (i > 0) {
+			deactivatePosition(posList[i]);
+		}
+	}
+
+	for (uint32_t i = 0; i < nextLevel; i++) {
+		if (!updateKey(cxt, upper, i)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::updateKey(
+		OpContext &cxt, bool upper, uint32_t level) {
+	const uint64_t lastPos = getTargetPosition(upper, true);
+
+	Position &pos = resolvePosition(upper, level);
+
+	if (!isPositionActive(pos)) {
+		inheritActivePosition(cxt, upper, level);
+	}
+
+	if (isKeyUpdatable(lastPos, upper, level) &&
+			!updateKeyDetail(cxt, upper, level, pos)) {
+		return false;
+	}
+
+	return true;
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::updateKeyDetail(
+		OpContext &cxt, bool upper, uint32_t level, Position &pos) {
+	assert(isPositionActive(pos));
+
+	eraseKey(upper, level);
+
+	TupleListReader &keyReader = getReader(cxt, pos.keyReaderId_);
+	TupleListReader &tailReader = getReader(cxt, pos.tailReaderId_);
+
+	const uint64_t nextPos = getTargetPosition(upper, false);
+	const std::pair<uint64_t, uint64_t> range =
+			getEffectivePositionRange(nextPos, upper, level);
+
+	const uint64_t endPos = getTargetPosition(true, false);
+
+	while (pos.tailPos_ < range.second && pos.tailPos_ < endPos) {
+		if (!tailReader.exists()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		if (cxt.checkSuspended()) {
+			return false;
+		}
+
+		if (pos.tailPos_ == range.first || info_.aggrLess_(
+				SQLValues::TupleListReaderSource(tailReader),
+				SQLValues::TupleListReaderSource(keyReader))) {
+			keyReader.assign(tailReader);
+		}
+
+		pos.tailPos_++;
+		tailReader.next();
+	}
+
+	insertKey(cxt, upper, level);
+	return true;
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::clearAllKeys() {
+	keyItList_.clear();
+	keySet_.clear();
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::eraseKey(
+		bool upper, uint32_t level) {
+	if (level >= keyItList_.size()) {
+		return;
+	}
+
+	KeyIteratorPair &pair = keyItList_[level];
+	KeyIterator &it = (upper ? pair.second : pair.first);
+
+	KeyIterator endIt = keySet_.end();
+	if (it != endIt) {
+		keySet_.erase(it);
+		it = endIt;
+	}
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::insertKey(
+		OpContext &cxt, bool upper, uint32_t level) {
+	while (level >= keyItList_.size()) {
+		KeyIterator endIt = keySet_.end();
+		keyItList_.push_back(KeyIteratorPair(endIt, endIt));
+	}
+
+	KeyIteratorPair &pair = keyItList_[level];
+	KeyIterator &it = (upper ? pair.second : pair.first);
+
+	PositionList &posList = (upper ? info_.upperPosList_ : info_.lowerPosList_);
+	assert(level < posList.size());
+
+	Position &pos = posList[level];
+
+	OrderedAggregatorKey key(
+			getReader(cxt, pos.keyReaderId_), level, upper);
+	it = keySet_.insert(key).first;
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::isKeyUpdatable(
+		uint64_t lastPos, bool upper, uint32_t level) {
+	const uint64_t nextPos = getTargetPosition(upper, level);
+	const std::pair<uint64_t, uint64_t> range =
+			getEffectivePositionRange(nextPos, upper, level);
+	return lastPos < range.second;
+}
+
+uint32_t
+SQLSortOps::WindowFramePartition::OrderedAggregator::resolveEffectiveEndLevel(
+		bool upper, bool last) {
+	const uint64_t lowerPos = getTargetPosition(false, last);
+	const uint64_t upperPos = getTargetPosition(true, last);
+	return resolveEffectiveEndLevelAt(lowerPos, upperPos, upper);
+}
+
+uint32_t
+SQLSortOps::WindowFramePartition::OrderedAggregator::resolveEffectiveEndLevelAt(
+		uint64_t lowerPos, uint64_t upperPos, bool upper) {
+	for (uint32_t i = 0;; i++) {
+		const std::pair<uint64_t, uint64_t> lowerRange =
+				getEffectivePositionRange(lowerPos, false, i);
+		const std::pair<uint64_t, uint64_t> upperRange =
+				getEffectivePositionRange(upperPos, true, i);
+
+		if (lowerRange.second < upperRange.first) {
+			continue;
+		}
+		if (!upper && lowerRange.second <= upperRange.first) {
+			continue;
+		}
+		return i;
+	}
+}
+
+uint64_t SQLSortOps::WindowFramePartition::OrderedAggregator::getTargetPosition(
+		bool upper, bool last) {
+	const uint64_t targetPos = getTargetPositionRef(upper);
+	const uint64_t delta = (!last && (!upper == !info_.upperUpdating_) ? 1 : 0);
+	return targetPos + delta;
+}
+
+uint64_t&
+SQLSortOps::WindowFramePartition::OrderedAggregator::getTargetPositionRef(
+		bool upper) {
+	return (upper ? info_.upperTargetPos_ : info_.lowerTargetPos_);
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::inheritActivePosition(
+		OpContext &cxt, bool upper, uint32_t level) {
+	if (level <= 0) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const Position &srcPos = (upper ?
+			resolvePosition(false, level) :
+			resolvePosition(false, level - 1));
+
+	if (!isPositionActive(srcPos)) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	Position &pos = resolvePosition(upper, level);
+	assignReader(
+			cxt, pos,
+			getReader(cxt, srcPos.keyReaderId_),
+			getReader(cxt, srcPos.tailReaderId_));
+
+	activatePosition(pos, srcPos.tailPos_);
+}
+
+SQLSortOps::WindowFramePartition::OrderedAggregatorPosition&
+SQLSortOps::WindowFramePartition::OrderedAggregator::resolvePosition(
+		bool upper, uint32_t level) {
+	PositionList &posList = (upper ? info_.upperPosList_ : info_.lowerPosList_);
+
+	while (level >= posList.size()) {
+		const uint32_t curLevel = static_cast<uint32_t>(posList.size());
+		posList.push_back(Position(
+				toReaderId(upper, false, curLevel),
+				toReaderId(upper, true, curLevel)));
+	}
+
+	return posList[level];
+}
+
+uint32_t SQLSortOps::WindowFramePartition::OrderedAggregator::toReaderId(
+		bool upper, bool forTail, uint32_t level) {
+	return (
+			IN_AGGR +
+			4 * level +
+			2 * (upper ? 1 : 0) +
+			1 * (forTail ? 1 : 0));
+}
+
+SQLOps::TupleListReader&
+SQLSortOps::WindowFramePartition::OrderedAggregator::getReader(
+		OpContext &cxt, uint32_t id) {
+	const uint32_t index = 0;
+	const uint32_t sub = id;
+	return cxt.getReader(index, sub);
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::assignInitialReader(
+		OpContext &cxt, Position &pos, TupleListReader &reader) {
+	assignReader(cxt, pos, reader, reader);
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::assignReader(
+		OpContext &cxt, Position &pos, TupleListReader &keyReader,
+		TupleListReader &tailReader) {
+	getReader(cxt, pos.keyReaderId_).assign(keyReader);
+	getReader(cxt, pos.tailReaderId_).assign(tailReader);
+}
+
+bool SQLSortOps::WindowFramePartition::OrderedAggregator::isPositionActive(
+		const Position &pos) {
+	return pos.active_;
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::activatePosition(
+		Position &pos, uint64_t tailPos) {
+	pos.tailPos_ = tailPos;
+	pos.active_ = true;
+}
+
+void SQLSortOps::WindowFramePartition::OrderedAggregator::deactivatePosition(
+		Position &pos) {
+	pos.tailPos_ = 0;
+	pos.active_ = false;
+}
+
+std::pair<uint64_t, uint64_t>
+SQLSortOps::WindowFramePartition::OrderedAggregator::getEffectivePositionRange(
+		uint64_t pos, bool upper, uint32_t level) {
+	const uint64_t beginPos = roundPosition(pos, upper, level);
+	const uint64_t endPos = beginPos + getPositionRangeSize(level);
+	return std::make_pair(beginPos, endPos);
+}
+
+uint64_t SQLSortOps::WindowFramePartition::OrderedAggregator::roundPosition(
+		uint64_t pos, bool upper, uint32_t level) {
+	const uint64_t size = getPositionRangeSize(level);
+	const uint64_t offset = (upper ? 0 : (size - 1));
+	return (pos + offset) / size * size;
+}
+
+uint64_t
+SQLSortOps::WindowFramePartition::OrderedAggregator::getPositionRangeSize(
+		uint32_t level) {
+	assert(level < sizeof(uint64_t) * CHAR_BIT);
+	return (UINT64_C(1) << level);
+}
+
+
+SQLSortOps::WindowFramePartition::Boundary::Boundary() :
+		distance_(SQLValues::LongInt::invalid()),
+		unbounded_(false),
+		rows_(false),
+		current_(false) {
+}
+
+
+SQLSortOps::WindowFramePartition::PartitionContext::PartitionContext(
+		util::StackAllocator &alloc) :
+		partEq_(NULL),
+		rankEq_(NULL),
+		partKeyList_(alloc),
+		rankKeyList_(alloc),
+		keyReaderStarted_(false),
+		rankAscending_(false),
+		lowerPos_(0),
+		upperPos_(0),
+		currentPos_(0),
+		initialPipePos_(-1) {
 }
 
 

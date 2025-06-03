@@ -171,8 +171,11 @@ public:
 		return statUpdator_;
 	}
 
-
 	void checkNodeStatus();
+
+	bool isStandbyMode() {
+		return (standbyInfo_.isEnable() && standbyInfo_.isStandby());
+	}
 
 	bool isError() {
 		return !statusInfo_.checkNodeStatus();
@@ -212,7 +215,6 @@ public:
 
 	void checkClusterStatus(EventType operation);
 	void updateNodeStatus(EventType eventType);
-
 
 	bool isShutdownPending() {
 		return statusInfo_.isShutdownPending_;
@@ -257,7 +259,6 @@ public:
 	void setAutoGoal(bool flag) {
 		clusterInfo_.isAutoGoal_ = flag;
 	}
-
 
 	bool isUpdatePartition() {
 		bool retVal = clusterInfo_.isUpdatePartition_;
@@ -461,11 +462,9 @@ public:
 	class ClusterManagerInfo {
 	public:
 		ClusterManagerInfo(util::StackAllocator& alloc, NodeId nodeId) :
-			alloc_(&alloc),
-			senderNodeId_(nodeId),
-			validCheckValue_(0),
-			errorType_(WEBAPI_NORMAL) {}
-		ClusterManagerInfo() {}
+			alloc_(&alloc), senderNodeId_(nodeId), validCheckValue_(0), errorType_(WEBAPI_NORMAL) {}
+		ClusterManagerInfo() :
+			alloc_(NULL), senderNodeId_(UNDEF_NODEID), validCheckValue_(0), errorType_(WEBAPI_NORMAL) {}
 
 		bool isValid() {
 			return (validCheckValue_ == VALID_VALUE);
@@ -547,6 +546,10 @@ public:
 			util::StackAllocator& alloc, NodeId nodeId,
 			PartitionTable* pt, bool isAddNewNode = false) :
 			ClusterManagerInfo(alloc, nodeId),
+			isMaster_(false),
+			reserveNum_(0),
+			partitionSequentialNumber_(0),
+			isInitialCluster_(false),
 			isAddNewNode_(isAddNewNode),
 			isStatusChange_(false),
 			pt_(pt)
@@ -667,7 +670,8 @@ public:
 		*/
 		struct HeartbeatResValue {
 			HeartbeatResValue() :
-				pId_(UNDEF_PARTITIONID) {}
+				pId_(UNDEF_PARTITIONID), status_(0), lsn_(0), startLsn_(0), roleStatus_(0),
+				partitionRevision_(0), chunkCount_(0), sslPort_(0), errorStatus_(0) {}
 
 			HeartbeatResValue(PartitionId pId,
 				PartitionStatus status,
@@ -810,10 +814,9 @@ public:
 
 	class NotifyClusterInfo : public ClusterManagerInfo {
 	public:
-		NotifyClusterInfo(
-			util::StackAllocator& alloc,
-			NodeId nodeId, PartitionTable* pt)
-			: ClusterManagerInfo(alloc, nodeId), pt_(pt)
+		NotifyClusterInfo(util::StackAllocator& alloc, NodeId nodeId, PartitionTable* pt) :
+			ClusterManagerInfo(alloc, nodeId),
+			isMaster_(false), isStable_(false), reserveNum_(0), startupTime_(0), isFollow_(false), pt_(pt)
 		{}
 
 		bool check() {
@@ -1388,10 +1391,9 @@ public:
 			isToSubMaster_(isToSubMaster),
 			changePartitionType_(changePartitionType) {}
 
-		ChangePartitionStatusInfo(
-			util::StackAllocator& alloc)
-			: ClusterManagerInfo(alloc, 0),
-			pId_(UNDEF_PARTITIONID) {}
+		ChangePartitionStatusInfo(util::StackAllocator& alloc) :
+			ClusterManagerInfo(alloc, 0),
+			pId_(UNDEF_PARTITIONID), status_(0), isToSubMaster_(false), changePartitionType_(0) {}
 
 		bool check() {
 			return true;
@@ -1504,8 +1506,8 @@ public:
 		ChangePartitionTableInfo& changePartitionStatusInfo);
 
 	int64_t nextHeartbeatTime(int64_t baseTime) {
-		return (baseTime + clusterConfig_.getHeartbeatInterval() * 2 +
-			extraConfig_.getNextHeartbeatMargin());
+		return baseTime + static_cast<int64_t>(clusterConfig_.getHeartbeatInterval()) * 2 +
+			static_cast<int64_t>(extraConfig_.getNextHeartbeatMargin());
 	}
 
 	bool isSecondMaster() {

@@ -76,6 +76,8 @@ public:
 		RegisterFunction("MINUTE");
 		RegisterFunction("SECOND");
 		RegisterFunction("MILLISECOND");
+		RegisterFunction("MICROSECOND");
+		RegisterFunction("NANOSECOND");
 		RegisterFunction("MAX");
 		RegisterFunction("MIN");
 		RegisterFunction("AVG");

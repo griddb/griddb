@@ -21,14 +21,18 @@ GridDB Monitoring Template for Zabbix is a template that helps you monitor GridD
 This Template consists of the following file:
 
 -   `griddb_templates.xml`
-    -   monitoring template
+    -   monitoring template for Zabbix version 4.0/5.0
+-   `griddb_templates_v6.xml`
+    -   monitoring template for Zabbix version 6.0
+-   `griddb_templates_v7.xml`
+    -   monitoring template for Zabbix version 7.0
 
 ## Working environment
 
 We have confirmed GridDB Monitoring Template with the following software:
 
--   Zabbix version 4.0(CentOS7.9), version 6.0(Ubuntu22.04/CentOS7.9)
--   GridDB V5.5CE
+-   Zabbix version 6.0/7.0
+-   GridDB V5.8CE
     -   Server
     -   Operating commands (gs_stat)
     -   WebAPI

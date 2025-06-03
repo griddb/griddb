@@ -98,6 +98,8 @@ public:
 	struct ColumnInfo;
 	struct TypeInfo;
 	struct WindowOption;
+	struct WindowFrameOption;
+	struct WindowFrameBoundary;
 
 	typedef TupleList::TupleColumnType ColumnType;
 	typedef int32_t SourceId;
@@ -538,10 +540,60 @@ public:
 		SQLAllocator& alloc_;
 		ExprList* partitionByList_;
 		ExprList* orderByList_;
+		WindowFrameOption* frameOption_;
 
 		UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 		UTIL_OBJECT_CODER_MEMBERS(
-				partitionByList_, orderByList_);
+				partitionByList_, orderByList_, frameOption_);
+	};
+
+	struct WindowFrameOption {		
+		enum FrameMode {
+			FRAME_MODE_NONE = 0,
+			FRAME_MODE_ROW,
+			FRAME_MODE_RANGE
+		};
+
+		WindowFrameOption();
+
+		void dump(std::ostream &os);
+
+		FrameMode frameMode_;
+		WindowFrameBoundary* frameStartBoundary_;
+		WindowFrameBoundary* frameFinishBoundary_;
+
+		UTIL_OBJECT_CODER_MEMBERS(
+				UTIL_OBJECT_CODER_ENUM(frameMode_),
+				frameStartBoundary_, frameFinishBoundary_);
+	};
+
+	struct WindowFrameBoundary {	
+		enum FrameBoundaryType {
+			BOUNDARY_NONE = 0,
+			BOUNDARY_UNBOUNDED_PRECEDING,
+			BOUNDARY_UNBOUNDED_FOLLOWING,
+			BOUNDARY_CURRENT_ROW,
+			BOUNDARY_N_PRECEDING,
+			BOUNDARY_N_FOLLOWING
+		};
+
+		explicit WindowFrameBoundary(SQLAllocator &alloc);
+
+		WindowFrameBoundary(const WindowFrameBoundary &another);
+		WindowFrameBoundary& operator=(const WindowFrameBoundary &another);
+
+		void dump(std::ostream &os);
+
+		SQLAllocator& alloc_;
+		FrameBoundaryType boundaryType_;
+		Expr* boundaryValueExpr_;
+		int64_t boundaryLongValue_;
+		int64_t boundaryTimeUnit_;
+
+		UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+		UTIL_OBJECT_CODER_MEMBERS(
+				UTIL_OBJECT_CODER_ENUM(boundaryType_),
+				boundaryValueExpr_, boundaryLongValue_, boundaryTimeUnit_);
 	};
 
 	struct PartitioningOption {
@@ -880,5 +932,93 @@ private:
 	int64_t tokenCountLimit_;
 };
 
+class SQLIndexStatsCache {
+public:
+	struct Key;
+	struct Value;
+	struct Option;
+
+	class RequesterHolder;
+
+	typedef util::Vector<Key> KeyList;
+
+	SQLIndexStatsCache(
+			SQLVariableSizeGlobalAllocator &globalVarAlloc,
+			const Option &option);
+	~SQLIndexStatsCache();
+
+	bool find(const Key &key, Value &value) const;
+
+	void put(const Key &key, uint64_t requester, const Value &value);
+	void putMissed(const Key &key, uint64_t requester);
+
+	bool checkKeyResolved(uint64_t requester);
+	PartitionId getMissedKeys(
+			util::StackAllocator &alloc, uint64_t requester,
+			PartitionId startPartitionId, KeyList &keyList);
+
+	uint64_t addRequester();
+	void removeRequester(uint64_t requester);
+
+private:
+	struct Body;
+
+	SQLIndexStatsCache(const SQLIndexStatsCache &another);
+	SQLIndexStatsCache& operator=(const SQLIndexStatsCache &another);
+
+	Body *body_;
+};
+
+struct SQLIndexStatsCache::Key {
+public:
+	Key(
+			PartitionId partitionId, ContainerId containerId, uint32_t column,
+			const TupleValue &lower, const TupleValue &upper,
+			bool lowerInclusive, bool upperInclusive);
+
+	bool operator<(const Key &another) const;
+	int32_t compare(const Key &another) const;
+
+	PartitionId partitionId_;
+	ContainerId containerId_;
+	uint32_t column_;
+	TupleValue lower_;
+	TupleValue upper_;
+	bool lowerInclusive_;
+	bool upperInclusive_;
+};
+
+struct SQLIndexStatsCache::Value {
+	Value();
+
+	bool isEmpty() const;
+
+	int64_t approxSize_;
+};
+
+struct SQLIndexStatsCache::Option {
+	Option();
+
+	int64_t expirationMillis_;
+	size_t freeElementLimit_;
+};
+
+class SQLIndexStatsCache::RequesterHolder {
+public:
+	RequesterHolder();
+	~RequesterHolder();
+
+	void assign(SQLIndexStatsCache &cache);
+	void reset();
+
+	const uint64_t* get();
+
+private:
+	RequesterHolder(const RequesterHolder &another);
+	RequesterHolder& operator=(const RequesterHolder &another);
+
+	SQLIndexStatsCache *cache_;
+	uint64_t requester_;
+};
 
 #endif

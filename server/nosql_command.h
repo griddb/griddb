@@ -53,7 +53,7 @@ const char8_t* getPartitionStatusName(LargeContainerStatusType type);
 struct TableProperty {
 
 	struct TablePropertyElem {
-		TablePropertyElem(util::StackAllocator& alloc) : value_(alloc) {}
+		TablePropertyElem(util::StackAllocator& alloc) : key_(0), value_(alloc) {}
 		int32_t key_;
 		util::String value_;
 		UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
@@ -1217,16 +1217,21 @@ struct NoSQLStoreOption {
 struct NoSQLSyncContext {
 	typedef StatementHandler::StatementExecStatus StatementExecStatus;
 
-	NoSQLSyncContext(ClientId& clientId,
-		PartitionTable* pt,
-		TransactionService* txnSvc,
-		SQLService* sqlSvc,
-		SQLVariableSizeGlobalAllocator& globalVarAlloc) :
+	NoSQLSyncContext(
+		ClientId& clientId, PartitionTable* pt, TransactionService* txnSvc,
+		SQLService* sqlSvc, SQLVariableSizeGlobalAllocator& globalVarAlloc) :
 		globalVarAlloc_(globalVarAlloc),
 		clientId_(clientId),
 		nosqlRequest_(globalVarAlloc, sqlSvc, txnSvc, &clientId_),
 		replyPId_(UNDEF_PARTITIONID),
-		txnSvc_(txnSvc), sqlSvc_(sqlSvc), pt_(pt), txnTimeoutInterval_(-1) {}
+		dbName_(NULL),
+		dbId_(0),
+		timeoutInterval_(-1),
+		userType_(StatementHandler::UserType::USER_ADMIN),
+		txnSvc_(txnSvc),
+		sqlSvc_(sqlSvc),
+		pt_(pt),
+		txnTimeoutInterval_(-1) {}
 
 	~NoSQLSyncContext() {}
 	SQLVariableSizeGlobalAllocator& getGlobalAllocator() {
@@ -1304,6 +1309,10 @@ public:
 	}
 
 	void getContainerInfo(NoSQLStoreOption& option);
+
+	void estimateIndexSearchSize(
+			const SQLIndexStatsCache::KeyList &keyList,
+			NoSQLStoreOption &option, util::Vector<int64_t> &estimationList);
 
 	void getContainerBinary(NoSQLStoreOption& option,
 		util::XArray<uint8_t>& response);
@@ -1656,6 +1665,19 @@ private:
 		}
 	}
 
+	static void encodeIndexEstimationKeyList(
+			EventByteOutStream &out,
+			const SQLIndexStatsCache::KeyList &keyList);
+	static void encodeIndexEstimationKey(
+			EventByteOutStream &out, const SQLIndexStatsCache::Key &key);
+	static void encodeIndexEstimationKeyColumns(
+			EventByteOutStream &out, const SQLIndexStatsCache::Key &key);
+	static void encodeIndexEstimationKeyConditions(
+			EventByteOutStream &out, const SQLIndexStatsCache::Key &key);
+	static void encodeIndexEstimationKeyCondition(
+			EventByteOutStream &out, const SQLIndexStatsCache::Key &key,
+			bool upper);
+
 	util::StackAllocator& eventStackAlloc_;
 
 	NodeId nodeId_;
@@ -1738,6 +1760,7 @@ struct NoSQLContainer::OptionalRequest {
 		isSync_(false),
 		subContainerId_(-1),
 		execId_(0),
+		jobVersionId_(0),
 		ackEventType_(UNDEF_EVENT_TYPE),
 		indexName_(NULL),
 		createDropIndexMode_(INDEX_MODE_SQL_DEFAULT),

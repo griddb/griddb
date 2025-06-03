@@ -17,6 +17,8 @@
 
 
 #include "sql_compiler_join.h"
+#include "sql_processor.h" 
+#include "util/numeric.h"
 
 
 
@@ -38,6 +40,15 @@ bool SQLCompiler::reorderJoinSub(
 	return optimizer.optimize(
 			joinNodeList, joinEdgeList, srcJoinOpList, joinHintList, profiling,
 			destJoinOpList);
+}
+
+bool SQLCompiler::selectJoinDriving(Plan &plan, bool checkOnly) {
+	if (isLegacyJoinDriving(plan)) {
+		return selectJoinDrivingLegacy(plan, checkOnly);
+	}
+
+	SelectJoinDriving::SubOptimizer optimizer(*this, checkOnly);
+	return optimizer.optimize(plan);
 }
 
 
@@ -2257,4 +2268,1425 @@ SQLCompiler::ReorderJoin::SubOptimizer::makeTree(const Cost &cost) {
 void SQLCompiler::ReorderJoin::SubOptimizer::setUpReporter(bool profiling) {
 	ExplainReporter::tryCreate(explainReporter_, alloc_, profiling, reporter_);
 	TraceReporter::tryCreate(traceReporter_, reporter_);
+}
+
+
+SQLCompiler::SelectJoinDriving::NodeCursor::NodeCursor(
+		Plan &plan, bool modifiable) :
+		plan_(plan),
+		modifiable_(modifiable),
+		nextPos_(0),
+		someMarked_(false),
+		markedAfterRestart_(false) {
+}
+
+SQLCompiler::PlanNode* SQLCompiler::SelectJoinDriving::NodeCursor::next() {
+	if (nextPos_ >= plan_.nodeList_.size() && !tryRestart()) {
+		return NULL;
+	}
+
+	PlanNode *node = &plan_.nodeList_[nextPos_];
+	nextPos_++;
+	return node;
+}
+
+void SQLCompiler::SelectJoinDriving::NodeCursor::markCurrent() {
+	someMarked_ = true;
+	markedAfterRestart_ = true;
+}
+
+bool SQLCompiler::SelectJoinDriving::NodeCursor::isSomeMarked() {
+	return someMarked_;
+}
+
+bool SQLCompiler::SelectJoinDriving::NodeCursor::tryRestart() {
+	if (plan_.nodeList_.empty() || !modifiable_ || !markedAfterRestart_) {
+		return false;
+	}
+
+	assert(nextPos_ > 0);
+	nextPos_ = 0;
+	markedAfterRestart_ = false;
+	return true;
+}
+
+
+SQLCompiler::SelectJoinDriving::Cost::Cost() :
+		intValue_(-1),
+		floatVaue_(-1),
+		exatct_(true),
+		factor_(FACTOR_NONE),
+		indexed_(false),
+		reducible_(false) {
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofMin() {
+	return of(0, 0, true, FACTOR_HINT);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofMax() {
+	return of(
+			std::numeric_limits<int64_t>::max(),
+			std::numeric_limits<double>::max(),
+			false,
+			FACTOR_HINT);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofExact(
+		int64_t count, CostFactor factor) {
+	return ofInt(count, true, factor);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofApprox(
+		int64_t count, CostFactor factor) {
+	return ofInt(count, false, factor);
+}
+
+bool SQLCompiler::SelectJoinDriving::Cost::isAssigned() const {
+	return (intValue_ >= 0);
+}
+
+bool SQLCompiler::SelectJoinDriving::Cost::isIndexed() const {
+	return indexed_;
+}
+
+bool SQLCompiler::SelectJoinDriving::Cost::isReducible() const {
+	return reducible_;
+}
+
+SQLCompiler::SelectJoinDriving::CostFactor
+SQLCompiler::SelectJoinDriving::Cost::getFactor() const {
+	return factor_;
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::compareTo(
+		const Cost &another) const {
+	return approxCompareTo(another, 0);
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::approxCompareTo(
+		const Cost &another, uint32_t rate) const {
+	int32_t comp;
+	if ((comp = compareBool(isAssigned(), another.isAssigned())) != 0) {
+		const int32_t reversed = -1;
+		return (comp * reversed);
+	}
+	else if ((comp = approxCompareFloat(
+			floatVaue_, another.floatVaue_, rate)) != 0) {
+		return comp;
+	}
+	else if ((comp = approxCompareInt(
+			intValue_, another.intValue_, rate)) != 0) {
+		return comp;
+	}
+	else if ((comp = compareBool(!exatct_, !another.exatct_)) != 0) {
+		return comp;
+	}
+	return 0;
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::mergeSum(const Cost &another) {
+	if (tryMergeNonAssigned(another, true)) {
+		return;
+	}
+
+	const bool exatctNext = resolveExactStatus(another, true);
+
+	addInt(another);
+	addFloat(another, intValue_);
+	exatct_ = exatctNext;
+	factor_ = mergeFactor(another, false);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofSumMerged(
+		const Cost &cost1, const Cost &cost2) {
+	Cost dest = cost1;
+	dest.mergeSum(cost2);
+	return dest;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofMinMerged(
+		const Cost &cost1, const Cost &cost2) {
+	Cost dest = cost1;
+	dest.mergeMin(cost2);
+	return dest;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofEqJoinMerged(
+		const Cost &cost1, const Cost &cost2) {
+	Cost dest = cost1;
+	dest.mergeEqJoin(cost2);
+	return dest;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofCrossMerged(
+		const Cost &cost1, const Cost &cost2) {
+	Cost dest = cost1;
+	dest.mergeCross(cost2);
+	return dest;
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::mergeMin(const Cost &another) {
+	if (tryMergeNonAssigned(another, false)) {
+		return;
+	}
+
+	const bool exatctNext = resolveExactStatus(another, false);
+
+	intValue_ = std::min(intValue_, another.intValue_);
+	floatVaue_ = std::min(floatVaue_, another.floatVaue_);
+	exatct_ = exatctNext;
+	factor_ = mergeFactor(another, true);
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::mergeEqJoin(const Cost &another) {
+	if (tryMergeNonAssigned(another, true)) {
+		return;
+	}
+
+	mergeSum(another);
+	exatct_ = false;
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::mergeCross(const Cost &another) {
+	if (tryMergeNonAssigned(another, true)) {
+		return;
+	}
+
+	Cost sum = *this;
+	sum.mergeSum(another);
+
+	const bool exatctNext = resolveExactStatus(another, true);
+
+	multiplyInt(another);
+	multiplyFloat(another, intValue_);
+	exatct_ = exatctNext;
+	factor_ = mergeFactor(another, false);
+
+	if (compareTo(sum) < 0) {
+		*this = sum;
+	}
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::withAttributes(
+		const bool *indexed, const bool *reducible) const {
+	Cost dest = *this;
+	if (indexed != NULL) {
+		dest.indexed_ = *indexed;
+	}
+	if (reducible != NULL) {
+		dest.reducible_ = *reducible;
+	}
+	return dest;
+}
+
+SQLPreparedPlan::OptProfile::JoinCost
+SQLCompiler::SelectJoinDriving::Cost::toProfile() const {
+	OptProfile::JoinCost dest;
+	dest.approxSize_ = intValue_;
+	return dest;
+}
+
+SQLPreparedPlan::Constants::StringConstant
+SQLCompiler::SelectJoinDriving::Cost::getCriterion() const {
+	switch (factor_) {
+	case FACTOR_NONE:
+		return Constants::STR_NONE;
+	case FACTOR_TABLE:
+		return Constants::STR_TABLE;
+	case FACTOR_INDEX:
+		return Constants::STR_INDEX;
+	case FACTOR_SCHEMA:
+		return Constants::STR_SCHEMA;
+	case FACTOR_SYNTAX:
+		return Constants::STR_SYNTAX;
+	case FACTOR_HINT:
+		return Constants::STR_HINT;
+	default:
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+}
+
+bool SQLCompiler::SelectJoinDriving::Cost::tryMergeNonAssigned(
+		const Cost &another, bool unifying) {
+	static_cast<void>(unifying);
+	if (!another.isAssigned()) {
+		return true;
+	}
+	else if (!isAssigned()) {
+		*this = another;
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::Cost::ofInt(
+		int64_t intValue, bool exatct, CostFactor factor) {
+	const double floatVaue = static_cast<double>(intValue);
+	return of(intValue, floatVaue, exatct, factor);
+}
+
+SQLCompiler::SelectJoinDriving::Cost SQLCompiler::SelectJoinDriving::Cost::of(
+		int64_t intValue, double floatVaue, bool exatct, CostFactor factor) {
+	Cost cost;
+	cost.intValue_ = intValue;
+	cost.floatVaue_ = floatVaue;
+	cost.exatct_ = exatct;
+	cost.factor_ = factor;
+	return cost;
+}
+
+SQLCompiler::SelectJoinDriving::CostFactor
+SQLCompiler::SelectJoinDriving::Cost::mergeFactor(
+		const Cost &another, bool byMin) {
+	const int32_t baseComp = compareTo(another);
+	const int32_t comp = baseComp * (byMin ? 1 : -1);
+	return (comp <= 0 ? *this : another).factor_;
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::approxCompareInt(
+		int64_t v1, int64_t v2, uint32_t rate) {
+	if (rate > 1) {
+		const int64_t r = static_cast<int64_t>(rate);
+		if (
+				(v1 < v2 && v1 >= v2 / r) ||
+				(v2 < v1 && v2 >= v1 / r)) {
+			return 0;
+		}
+	}
+
+	return compareInt(v1, v2);
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::approxCompareFloat(
+		double v1, double v2, uint32_t rate) {
+	if (rate > 1) {
+		const double r = static_cast<double>(rate);
+		if (
+				(v1 < v2 && v1 >= v2 / r) ||
+				(v2 < v1 && v2 >= v1 / r)) {
+			return 0;
+		}
+	}
+
+	return compareFloat(v1, v2);
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::compareBool(bool v1, bool v2) {
+	return compareInt((v1 ? 1 : 0), (v2 ? 1 : 0));
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::compareInt(
+		int64_t v1, int64_t v2) {
+	if (v1 == v2) {
+		return 0;
+	}
+	else {
+		return (v1 < v2 ? -1 : 1);
+	}
+}
+
+int32_t SQLCompiler::SelectJoinDriving::Cost::compareFloat(
+		double v1, double v2) {
+	return SQLProcessor::ValueUtils::orderValue(
+			TupleValue(v1), TupleValue(v2), true);
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::addInt(const Cost &another) {
+	util::UtilityException::Code errorCode;
+	util::ArithmeticErrorHandlers::Checked checked(errorCode);
+
+	int64_t ret = util::NumberArithmetic::add(
+			intValue_, another.intValue_, checked);
+	if (checked.isError()) {
+		ret = std::numeric_limits<int64_t>::max();
+	}
+
+	intValue_ = ret;
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::addFloat(
+		const Cost &another, int64_t intResult) {
+	floatVaue_ += another.floatVaue_;
+	floatVaue_ = std::max(floatVaue_, static_cast<double>(intResult));
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::multiplyInt(const Cost &another) {
+	util::UtilityException::Code errorCode;
+	util::ArithmeticErrorHandlers::Checked checked(errorCode);
+
+	int64_t ret = util::NumberArithmetic::multiply(
+			intValue_, another.intValue_, checked);
+	if (checked.isError()) {
+		ret = std::numeric_limits<int64_t>::max();
+	}
+
+	intValue_ = ret;
+}
+
+void SQLCompiler::SelectJoinDriving::Cost::multiplyFloat(
+		const Cost &another, int64_t intResult) {
+	floatVaue_ *= another.floatVaue_;
+	floatVaue_ = std::max(floatVaue_, static_cast<double>(intResult));
+}
+
+bool SQLCompiler::SelectJoinDriving::Cost::resolveExactStatus(
+		const Cost &another, bool unifying) {
+	if (unifying) {
+		return (exatct_ || another.exatct_);
+	}
+	else {
+		return (exatct_ && another.exatct_);
+	}
+}
+
+
+SQLCompiler::SelectJoinDriving::CostResolver::CostResolver(
+		SQLCompiler &compiler, TableSizeList &tableSizeList,
+		bool withUnionScan, OptProfile::JoinDriving *profile) :
+		alloc_(compiler.alloc_),
+		compiler_(compiler),
+		tableSizeList_(tableSizeList),
+		withUnionScan_(withUnionScan),
+		profile_(profile),
+		inProfile_(NULL) {
+}
+
+bool SQLCompiler::SelectJoinDriving::CostResolver::isAcceptableNode(
+		const PlanNode &node, bool checkOnly) {
+	const size_t joinCount = JOIN_INPUT_COUNT;
+
+	if (node.type_ != SQLType::EXEC_JOIN ||
+			node.joinType_ != SQLType::JOIN_INNER ||
+			node.inputList_.size() != joinCount) {
+		return false;
+	}
+
+	if (checkOnly && (node.cmdOptionFlag_ & getJoinDrivingOptionMask()) != 0) {
+		return false;
+	}
+
+	return true;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveCost(
+		const Plan &plan, const PlanNode &node, uint32_t drivingInput) {
+	prepareProfiler(plan, node, drivingInput);
+
+	const uint32_t innerInput = getJoinAnotherSide(drivingInput);
+	bool byUniqueEqJoin;
+	const bool indexed = compiler_.findIndexedPredicate(
+			plan, node, innerInput, withUnionScan_, &byUniqueEqJoin);
+
+	bool forMax;
+	if (findAggressiveHints(node, drivingInput, forMax)) {
+		return finalizeFixedCost(
+				indexed, !forMax, (forMax ? Cost::ofMax() : Cost::ofMin()));
+	}
+
+	bool byEq;
+	bool byUnique;
+	resolveJoinPredCategory(plan, node, byEq, byUnique);
+
+	CostMap costMap(alloc_);
+
+	const PlanNode &drivingNode = node.getInput(plan, drivingInput);
+	const Cost &drivingCost = resolveOutputCost(plan, drivingNode, costMap);
+
+	bool reducible = false;
+	const PlanNode &innerNode = node.getInput(plan, innerInput);
+	const Cost &scanCost = (indexed ?
+			resolveInnerScanCost(
+					plan, innerNode, costMap, drivingCost, byUnique,
+					reducible) :
+			resolveOutputCost(plan, drivingNode, costMap));
+
+	return finalizeBasicCost(indexed, reducible, drivingCost, scanCost);
+}
+
+SQLPreparedPlan::OptProfile::JoinDriving*
+SQLCompiler::SelectJoinDriving::CostResolver::toProfile(
+		int32_t drivingInput) const {
+	if (profile_ == NULL) {
+		return NULL;
+	}
+
+	OptProfile::JoinDriving *dest =
+			ALLOC_NEW(alloc_) OptProfile::JoinDriving(*profile_);
+	if (drivingInput < 0) {
+		std::swap(dest->driving_, dest->left_);
+		std::swap(dest->inner_, dest->right_);
+	}
+	else if (drivingInput > 0) {
+		std::swap(dest->driving_, dest->inner_);
+	}
+
+	return dest;
+}
+
+bool SQLCompiler::SelectJoinDriving::CostResolver::findAggressiveHints(
+		const PlanNode &node, uint32_t drivingInput, bool &forMax) {
+	forMax = false;
+
+	if ((node.cmdOptionFlag_ & PlanNode::Config::CMD_OPT_JOIN_NO_INDEX) != 0) {
+		forMax = true;
+		return true;
+	}
+
+	const bool leadingList[] = {
+			(node.cmdOptionFlag_ &
+					PlanNode::Config::CMD_OPT_JOIN_LEADING_LEFT) != 0,
+			(node.cmdOptionFlag_ &
+					PlanNode::Config::CMD_OPT_JOIN_LEADING_RIGHT) != 0
+	};
+
+	const bool aggressiveList[] = { leadingList[0], leadingList[1] };
+
+	const bool aggressiveSome = (aggressiveList[0] || aggressiveList[1]);
+	if (!aggressiveSome) {
+		return false;
+	}
+
+	forMax = !aggressiveList[drivingInput];
+	return true;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveInnerScanCost(
+		const Plan &plan, const PlanNode &node, CostMap &costMap,
+		const Cost &drivingCost, bool byUniqueEqJoin,
+		bool &reducible) const {
+	const Cost innerTableCost =
+			resolveScanOutputCost(plan, node, costMap, false);
+
+	reducible = (drivingCost.approxCompareTo(
+			innerTableCost, SubConstants::DEFAULT_REDUCIBLE_RATE) < 0);
+
+	const bool byEq = true;
+	return mergeJoinCost(
+			drivingCost, innerTableCost, byEq, byUniqueEqJoin, node.joinType_);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveOutputCost(
+		const Plan &plan, const PlanNode &node, CostMap &costMap) const {
+	CostMap::iterator it = costMap.find(node.id_);
+	if (it != costMap.end()) {
+		return it->second;
+	}
+
+	Cost cost = resolveOutputCostByType(plan, node, costMap);
+
+	if (node.limit_ >= 0) {
+		const Cost costByLimit = Cost::ofExact(node.limit_, FACTOR_SYNTAX);
+		cost.mergeMin(costByLimit);
+	}
+
+	costMap.insert(std::make_pair(node.id_, cost));
+	return cost;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveOutputCostByType(
+		const Plan &plan, const PlanNode &node, CostMap &costMap) const {
+	switch (node.type_) {
+	case SQLType::EXEC_GROUP:
+		return resolveSimpleOutputCost(plan, node, costMap);
+	case SQLType::EXEC_JOIN:
+		return resolveJoinOutputCost(plan, node, costMap);
+	case SQLType::EXEC_LIMIT:
+		return resolveSimpleOutputCost(plan, node, costMap);
+	case SQLType::EXEC_SCAN:
+		return resolveScanOutputCost(plan, node, costMap, true);
+	case SQLType::EXEC_SELECT:
+		return resolveSimpleOutputCost(plan, node, costMap);
+	case SQLType::EXEC_SORT:
+		return resolveSimpleOutputCost(plan, node, costMap);
+	case SQLType::EXEC_UNION:
+		return resolveSimpleOutputCost(plan, node, costMap);
+	default:
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveSimpleOutputCost(
+		const Plan &plan, const PlanNode &node, CostMap &costMap) const {
+	const uint32_t inCount = static_cast<uint32_t>(node.inputList_.size());
+
+	if (inCount <= 0) {
+		return Cost::ofExact(1, FACTOR_SYNTAX);
+	}
+
+	Cost totalCost;
+	for (uint32_t i = 0; i < inCount; i++) {
+		const Cost cost =
+				resolveOutputCost(plan, node.getInput(plan, i), costMap);
+		if (i == 0) {
+			totalCost = cost;
+			if (node.unionType_ == SQLType::UNION_EXCEPT) {
+				break;
+			}
+			continue;
+		}
+
+		if (node.unionType_ == SQLType::UNION_INTERSECT) {
+			totalCost.mergeMin(cost);
+		}
+		else {
+			totalCost.mergeSum(cost);
+		}
+	}
+
+	return totalCost;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveJoinOutputCost(
+		const Plan &plan, const PlanNode &node, CostMap &costMap) const {
+	assert(node.inputList_.size() == JOIN_INPUT_COUNT);
+	bool byEq;
+	bool byUnique;
+	resolveJoinPredCategory(plan, node, byEq, byUnique);
+
+	const uint32_t left = JOIN_LEFT_INPUT;
+	const uint32_t right = JOIN_RIGHT_INPUT;
+
+	const Cost &leftCost =
+			resolveOutputCost(plan, node.getInput(plan, left), costMap);
+	const Cost &rightCost =
+			resolveOutputCost(plan, node.getInput(plan, right), costMap);
+
+	return mergeJoinCost(leftCost, rightCost, byEq, byUnique, node.joinType_);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveScanOutputCost(
+		const Plan &plan, const PlanNode &node, CostMap &costMap,
+		bool withPred) const {
+	if (node.type_ != SQLType::EXEC_SCAN) {
+		return resolveUnifiedScanOutputCost(plan, node, costMap, withPred);
+	}
+
+	Cost cost;
+
+	const TableInfo *tableInfo = findTableInfo(node);
+	if (tableInfo == NULL) {
+		cost = Cost::ofApprox(
+				SubConstants::DEFAULT_META_TABLE_SIZE, FACTOR_SYNTAX);
+	}
+	else {
+		if (withPred && !node.predList_.empty()) {
+			cost = resolveScanPredCost(
+					plan, node, node.predList_.front(), *tableInfo, NULL);
+		}
+
+		if (!cost.isAssigned()) {
+			cost = resolveScanTableCost(plan, node, *tableInfo);
+		}
+
+		saveAffectedTableSize(plan, node, *tableInfo, cost);
+	}
+
+	if (!node.inputList_.empty()) {
+		cost = resolveScanJoinCost(plan, node, 0, cost, costMap);
+	}
+
+	return cost;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveUnifiedScanOutputCost(
+		const Plan &plan, const PlanNode &node, CostMap &costMap,
+		bool withPred) const {
+	const uint32_t inCount = static_cast<uint32_t>(node.inputList_.size());
+
+	if (node.type_ != SQLType::EXEC_UNION) {
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	Cost totalCost;
+	for (uint32_t i = 0; i < inCount; i++) {
+		const Cost cost = resolveScanOutputCost(
+				plan, node.getInput(plan, i), costMap, withPred);
+		totalCost.mergeSum(cost);
+	}
+
+	return totalCost;
+}
+
+void SQLCompiler::SelectJoinDriving::CostResolver::resolveJoinPredCategory(
+		const Plan &plan, const PlanNode &node, bool &byEq,
+		bool &byUnique) const {
+	byEq = false;
+	byUnique = false;
+
+	std::pair<bool, bool> byFront;
+	for (PlanExprList::const_iterator it = node.predList_.begin();
+			it != node.predList_.end(); ++it) {
+		bool byEqSub;
+		std::pair<bool, bool> byFrontSub;
+		resolveJoinPredCategorySub(*it, byEqSub, byFrontSub);
+
+		byEq |= byEqSub;
+		byFront.first |= byFrontSub.first;
+		byFront.second |= byFrontSub.second;
+	}
+
+	const uint32_t left = JOIN_LEFT_INPUT;
+	const uint32_t right = JOIN_RIGHT_INPUT;
+
+	byUnique = (
+			(byFront.first && checkJoinInputUnique(plan, node, left)) &&
+			(byFront.second && checkJoinInputUnique(plan, node, right)));
+}
+
+void SQLCompiler::SelectJoinDriving::CostResolver::resolveJoinPredCategorySub(
+		const Expr &expr, bool &byEq, std::pair<bool, bool> &byFront) const {
+	byEq = false;
+	byFront = std::pair<bool, bool>();
+
+	const Expr *left = expr.left_;
+	const Expr *right = expr.right_;
+
+	if (expr.op_ == SQLType::EXPR_AND) {
+		for (size_t i = 0; i < 2; i++) {
+			bool byEqSub;
+			std::pair<bool, bool> byFrontSub;
+			resolveJoinPredCategorySub(
+					*(i == 0 ? left : right), byEqSub, byFrontSub);
+
+			byEq |= byEqSub;
+			byFront.first |= byFrontSub.first;
+			byFront.second |= byFrontSub.second;
+		}
+	}
+	else if (expr.op_ == SQLType::OP_EQ) {
+		if (left->op_ != SQLType::EXPR_COLUMN ||
+				right->op_ != SQLType::EXPR_COLUMN) {
+			return;
+		}
+
+		if (left->inputId_ != 0) {
+			std::swap(left, right);
+		}
+
+		if (left->inputId_ != 0 || right->inputId_ != 1) {
+			return;
+		}
+
+		byEq = true;
+		byFront = std::make_pair(
+				(left->columnId_ == 0),
+				(right->columnId_ == 0));
+	}
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::mergeJoinCost(
+		const Cost &left, const Cost &right, bool byEq, bool byUnique,
+		SQLType::JoinType joinType) const {
+	if (byEq) {
+		Cost cost;
+		if (byUnique) {
+			cost = Cost::ofMinMerged(left, right);
+		}
+		else {
+			cost = Cost::ofEqJoinMerged(left, right);;
+		}
+
+		if (joinType != SQLType::JOIN_INNER) {
+			Cost outerCost;
+			if (joinType == SQLType::JOIN_LEFT_OUTER) {
+				outerCost = left;
+			}
+			else if (joinType == SQLType::JOIN_RIGHT_OUTER) {
+				outerCost = right;
+			}
+			else {
+				outerCost = Cost::ofSumMerged(left, right);
+			}
+
+			if (cost.compareTo(outerCost) < 0) {
+				cost = outerCost;
+			}
+		}
+		return cost;
+	}
+	else {
+		return Cost::ofCrossMerged(left, right);
+	}
+}
+
+bool SQLCompiler::SelectJoinDriving::CostResolver::checkJoinInputUnique(
+		const Plan &plan, const PlanNode &node, uint32_t inputId) const {
+	if (node.type_ == SQLType::EXEC_SCAN) {
+		if (inputId == 0) {
+			return checkFrontColumnUnique(plan, node);
+		}
+	}
+	else if (node.type_ != SQLType::EXEC_JOIN) {
+		return false;
+	}
+
+	return checkFrontColumnUnique(plan, node.getInput(plan, inputId));
+}
+
+bool SQLCompiler::SelectJoinDriving::CostResolver::checkFrontColumnUnique(
+		const Plan &plan, const PlanNode &node) const {
+	if (node.type_ == SQLType::EXEC_UNION) {
+		const uint32_t inCount = static_cast<uint32_t>(node.inputList_.size());
+
+		for (uint32_t i = 0; i < inCount; i++) {
+			if (!checkFrontColumnUnique(plan, node.getInput(plan, i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	const TableInfo *tableInfo = findTableInfo(node);
+	if (tableInfo == NULL) {
+		return false;
+	}
+
+	return tableInfo->hasRowKey_;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveScanJoinCost(
+		const Plan &plan, const PlanNode &node, uint32_t inputId,
+		const Cost &baseCost, CostMap &costMap) const {
+	const Cost drivingCost =
+			resolveOutputCost(plan, node.getInput(plan, inputId), costMap);
+
+	bool byEq;
+	bool byUnique;
+	resolveJoinPredCategory(plan, node, byEq, byUnique);
+
+	const SQLType::JoinType joinType = SQLType::JOIN_INNER;
+	return mergeJoinCost(drivingCost, baseCost, byEq, byUnique, joinType);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveScanTableCost(
+		const Plan &plan, const PlanNode &node,
+		const TableInfo &tableInfo) const {
+	const bool withHint = true;
+
+	CostFactor factor;
+	const int64_t approxSize =
+			resolveTableApproxSize(plan, node, tableInfo, withHint, factor);
+
+	return Cost::ofApprox(approxSize, factor);
+}
+
+void SQLCompiler::SelectJoinDriving::CostResolver::saveAffectedTableSize(
+		const Plan &plan, const PlanNode &node,
+		const TableInfo &tableInfo, const Cost &cost) const {
+	if (node.tableIdInfo_.approxSize_ >= 0 ||
+			(node.id_ < tableSizeList_.size() &&
+					tableSizeList_[node.id_] >= 0)) {
+		return;
+	}
+
+	switch (cost.getFactor()) {
+	case FACTOR_TABLE:
+		break;
+	case FACTOR_INDEX:
+		break;
+	default:
+		return;
+	}
+
+	while (node.id_ >= tableSizeList_.size()) {
+		tableSizeList_.push_back(-1);
+	}
+
+	const bool withHint = false;
+
+	CostFactor factor;
+	tableSizeList_[node.id_] =
+			resolveTableApproxSize(plan, node, tableInfo, withHint, factor);
+}
+
+int64_t SQLCompiler::SelectJoinDriving::CostResolver::resolveTableApproxSize(
+		const Plan &plan, const PlanNode &node,
+		const TableInfo &tableInfo, bool withHint, CostFactor &factor) {
+	factor = FACTOR_TABLE;
+
+	int64_t approxSize;
+	const int32_t subId = node.tableIdInfo_.subContainerId_;
+	if (subId >= 0) {
+		const TableInfo::PartitioningInfo *partInfo = tableInfo.partitioning_;
+		assert(partInfo != NULL);
+
+		approxSize = partInfo->subInfoList_[subId].approxSize_;
+	}
+	else {
+		approxSize = tableInfo.idInfo_.approxSize_;
+		do {
+			if (!withHint) {
+				break;
+			}
+
+			const SQLHintInfo *hintInfo = plan.hintInfo_;
+			if (hintInfo == NULL) {
+				break;
+			}
+
+			const char8_t *tableName = tableInfo.tableName_.c_str();
+			const SQLHintValue *value = hintInfo->findStatisticalHint(
+					SQLHint::TABLE_ROW_COUNT, tableName);
+			if (value == NULL) {
+				break;
+			}
+
+			approxSize = value->getInt64();
+			factor = FACTOR_HINT;
+		}
+		while (false);
+	}
+
+	return adjustTableApproxSize(approxSize);
+}
+
+int64_t SQLCompiler::SelectJoinDriving::CostResolver::adjustTableApproxSize(
+		int64_t rawSize) {
+	if (rawSize < 0) {
+		return 0;
+	}
+
+	return rawSize;
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveScanPredCost(
+		const Plan &plan, const PlanNode &node, const Expr &expr,
+		const TableInfo &tableInfo, ScanRangeMap *rangeMap) const {
+	if (expr.op_ == SQLType::EXPR_OR) {
+		uint64_t elemCount = 0;
+		return resolveScanOrPredCost(plan, node, expr, tableInfo, elemCount);
+	}
+	else if (rangeMap == NULL) {
+		ScanRangeMap subMap(alloc_);
+		const Cost &predCost =
+				resolveScanPredCost(plan, node, expr, tableInfo, &subMap);
+		const Cost &rangeCost = resolveScanRangeMapCost(tableInfo, subMap);
+
+		return Cost::ofMinMerged(predCost, rangeCost);
+	}
+	else if (expr.op_ == SQLType::EXPR_AND) {
+		const Expr *left = expr.left_;
+		const Expr *right = expr.right_;
+		assert(left != NULL && right != NULL);
+
+		const Cost &leftCost = resolveScanPredCost(
+				plan, node, *left, tableInfo, rangeMap);
+		const Cost &rightCost = resolveScanPredCost(
+				plan, node, *right, tableInfo, rangeMap);
+
+		return Cost::ofMinMerged(leftCost, rightCost);
+	}
+	else {
+		util::LocalUniquePtr<ScanRangeKey> key;
+		if (makeScanRangeKey(plan, node, expr, tableInfo, key)) {
+			const std::pair<ScanRangeMap::iterator, bool> &ret =
+					rangeMap->insert(std::make_pair(key->column_, *key));
+			if (!ret.second) {
+				mergeRangeKey(ret.first->second, *key);
+			}
+		}
+		return Cost();
+	}
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveScanOrPredCost(
+		const Plan &plan, const PlanNode &node, const Expr &expr,
+		const TableInfo &tableInfo, uint64_t &elemCount) const {
+	if (expr.op_ != SQLType::EXPR_OR) {
+		if (++elemCount > SubConstants::DEFAULT_CONDITION_LIMIT) {
+			return Cost();
+		}
+		return resolveScanPredCost(plan, node, expr, tableInfo, NULL);
+	}
+
+	const Expr *left = expr.left_;
+	const Expr *right = expr.right_;
+	assert(left != NULL && right != NULL);
+
+	const Cost &leftCost =
+			resolveScanOrPredCost(plan, node, *left, tableInfo, elemCount);
+	const Cost &rightCost =
+			resolveScanOrPredCost(plan, node, *right, tableInfo, elemCount);
+	if (!leftCost.isAssigned() || !rightCost.isAssigned()) {
+		return Cost();
+	}
+
+	return Cost::ofSumMerged(leftCost, rightCost);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::resolveScanRangeMapCost(
+		const TableInfo &tableInfo, const ScanRangeMap &rangeMap) const {
+	const TableInfo::BasicIndexInfoList *basicInfo =
+			tableInfo.basicIndexInfoList_;
+	SQLIndexStatsCache &indexStats =
+			compiler_.getTableInfoList().getIndexStats();
+
+	Cost totalCost;
+	for (ScanRangeMap::const_iterator it = rangeMap.begin();
+			it != rangeMap.end(); ++it) {
+		if (basicInfo == NULL || !basicInfo->isIndexed(it->first)) {
+			continue;
+		}
+
+		SQLIndexStatsCache::Value statsValue;
+		if (indexStats.find(it->second, statsValue)) {
+			totalCost.mergeMin(
+					Cost::ofApprox(statsValue.approxSize_, FACTOR_INDEX));
+		}
+		else {
+			SQLIndexStatsCache::RequesterHolder *requester =
+					compiler_.getCompileOption().getIndexStatsRequester();
+			if (requester == NULL) {
+				assert(false);
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+			}
+
+			if (requester->get() == NULL) {
+				requester->assign(indexStats);
+			}
+
+			indexStats.putMissed(it->second, *requester->get());
+		}
+	}
+	return totalCost;
+}
+
+bool SQLCompiler::SelectJoinDriving::CostResolver::makeScanRangeKey(
+		const Plan &plan, const PlanNode &node, const Expr &expr,
+		const TableInfo &tableInfo,
+		util::LocalUniquePtr<ScanRangeKey> &key) const {
+	const Plan::ValueList *parameterList = &plan.parameterList_;
+	if (parameterList->empty()) {
+		parameterList = NULL;
+	}
+
+	uint32_t columnId;
+	std::pair<TupleValue, TupleValue> valuePair;
+	std::pair<bool, bool> inclusivePair;
+
+	if (!ProcessorUtils::findAdjustedRangeValues(
+			alloc_, tableInfo, parameterList, expr, columnId, valuePair,
+			inclusivePair)) {
+		return false;
+	}
+
+	ScanRangeKey localKey(
+			node.tableIdInfo_.partitionId_,
+			node.tableIdInfo_.containerId_,
+			columnId,
+			valuePair.first, valuePair.second,
+			inclusivePair.first, inclusivePair.second);
+	key = UTIL_MAKE_LOCAL_UNIQUE(key, ScanRangeKey, localKey);
+	return true;
+}
+
+void SQLCompiler::SelectJoinDriving::CostResolver::mergeRangeKey(
+		ScanRangeKey &target, const ScanRangeKey &src) {
+	assert(target.partitionId_ == src.partitionId_);
+	assert(target.containerId_ == src.containerId_);
+	assert(target.column_ == src.column_);
+
+	for (size_t i = 0; i < 2; i++) {
+		TupleValue &targetValue = (i == 0 ? target.lower_ : target.upper_);
+		const TupleValue &srcValue = (i == 0 ? src.lower_ : src.upper_);
+
+		bool &targetInclusive =
+				(i == 0 ? target.lowerInclusive_ : target.upperInclusive_);
+		const bool srcInclusive =
+				(i == 0 ? src.lowerInclusive_ : src.upperInclusive_);
+
+		int32_t cmp;
+		if (ColumnTypeUtils::isNull(targetValue.getType())) {
+			cmp = -1;
+		}
+		else if (ColumnTypeUtils::isNull(srcValue.getType())) {
+			cmp = 1;
+		}
+		else {
+			cmp = SQLProcessor::ValueUtils::orderValue(
+					targetValue, srcValue, true) * (i == 0 ? 1 : -1);
+		}
+
+		if (cmp < 0) {
+			targetValue = srcValue;
+			targetInclusive = srcInclusive;
+		}
+		else if (cmp == 0 && !srcInclusive) {
+			targetInclusive = false;
+		}
+	}
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::finalizeFixedCost(
+		bool indexed, bool reducible, const Cost &baseCost) const {
+	const Cost cost = baseCost.withAttributes(&indexed, &reducible);
+	return finalizeCost(cost, NULL, NULL);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::finalizeBasicCost(
+		bool indexed, bool reducible, const Cost &drivingCost,
+		const Cost &scanCost) const {
+	Cost cost = drivingCost.withAttributes(&indexed, &reducible);
+	cost.mergeSum(scanCost);
+	return finalizeCost(cost, &drivingCost, &scanCost);
+}
+
+SQLCompiler::SelectJoinDriving::Cost
+SQLCompiler::SelectJoinDriving::CostResolver::finalizeCost(
+		const Cost &cost, const Cost *drivingCost,
+		const Cost *scanCost) const {
+	profileCost(cost, drivingCost, scanCost);
+
+	if (!cost.isAssigned()) {
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	return cost;
+}
+
+void SQLCompiler::SelectJoinDriving::CostResolver::profileCost(
+		const Cost &cost, const Cost *tableScanCost,
+		const Cost *indexScanCost) const {
+	if (inProfile_ == NULL || !cost.isAssigned()) {
+		return;
+	}
+
+	inProfile_->cost_ = makeCostProfile(&cost);
+	inProfile_->tableScanCost_ = makeCostProfile(tableScanCost);
+	inProfile_->indexScanCost_ = makeCostProfile(indexScanCost);
+
+	inProfile_->criterion_ = cost.getCriterion();
+	inProfile_->indexed_ = cost.isIndexed();
+	inProfile_->reducible_ = cost.isReducible();
+}
+
+void SQLCompiler::SelectJoinDriving::CostResolver::prepareProfiler(
+		const Plan &plan, const PlanNode &node, uint32_t drivingInput) {
+	if (profile_ == NULL) {
+		inProfile_ = NULL;
+		return;
+	}
+
+	OptProfile::JoinDrivingInput *dest =
+			ALLOC_NEW(alloc_) OptProfile::JoinDrivingInput();
+	dest->qName_ =
+			makeQualifiedName(getInnerTableName(plan, node, drivingInput));
+
+	(drivingInput == 0 ? profile_->driving_ : profile_->inner_) = dest;
+	inProfile_ = dest;
+}
+
+const char8_t* SQLCompiler::SelectJoinDriving::CostResolver::getInnerTableName(
+		const Plan &plan, const PlanNode &node, uint32_t drivingInput) const {
+	assert(node.type_ == SQLType::EXEC_JOIN);
+
+	const uint32_t innerInput = getJoinAnotherSide(drivingInput);
+	const PlanNode &inNode = node.getInput(plan, innerInput);
+
+	const TableInfo *tableInfo = findTableInfo(inNode);
+	if (tableInfo == NULL) {
+		return NULL;
+	}
+
+	return tableInfo->tableName_.c_str();
+}
+
+const SQLTableInfo* SQLCompiler::SelectJoinDriving::CostResolver::findTableInfo(
+		const PlanNode &node) const {
+	if (node.type_ != SQLType::EXEC_SCAN ||
+			node.tableIdInfo_.type_ != SQLType::TABLE_CONTAINER) {
+		return NULL;
+	}
+
+	return &compiler_.getTableInfoList().resolve(node.tableIdInfo_.id_);
+}
+
+SQLPreparedPlan::OptProfile::JoinCost*
+SQLCompiler::SelectJoinDriving::CostResolver::makeCostProfile(
+		const Cost *src) const {
+	if (src == NULL) {
+		return NULL;
+	}
+
+	OptProfile::JoinCost *dest =
+			ALLOC_NEW(alloc_) OptProfile::JoinCost(src->toProfile());
+	return dest;
+}
+
+SyntaxTree::QualifiedName*
+SQLCompiler::SelectJoinDriving::CostResolver::makeQualifiedName(
+		const char8_t *src) const {
+	if (src == NULL || strlen(src) == 0) {
+		return NULL;
+	}
+
+	QualifiedName *dest = ALLOC_NEW(alloc_) QualifiedName(alloc_);
+	dest->table_ = ALLOC_NEW(alloc_) util::String(src, alloc_);
+	return dest;
+}
+
+
+
+SQLCompiler::SelectJoinDriving::Rewriter::Rewriter(
+		SQLCompiler &compiler, TableSizeList &tableSizeList,
+		bool checkOnly) :
+		alloc_(compiler.alloc_),
+		compiler_(compiler),
+		tableSizeList_(tableSizeList),
+		checkOnly_(checkOnly) {
+}
+
+void SQLCompiler::SelectJoinDriving::Rewriter::rewrite(
+		Plan &plan, PlanNode &node, uint32_t drivingInput,
+		OptProfile::JoinDriving *profile) {
+	assert(CostResolver::isAcceptableNode(node, false));
+
+	if (checkOnly_) {
+		return;
+	}
+
+	const uint32_t smaller = drivingInput;
+	const uint32_t larger = getJoinAnotherSide(smaller);
+
+	util::Map<uint32_t, uint32_t> inputIdMap(alloc_);
+	inputIdMap[smaller] = 1;
+
+	util::Vector<uint32_t> nodeRefList(alloc_);
+	compiler_.makeNodeRefList(plan, nodeRefList);
+
+	const PlanNodeId largerId = node.inputList_[larger];
+	PlanNode &largerNode = node.getInput(plan, larger);
+
+	PlanExprList predList(alloc_);
+	compiler_.dereferenceExprList(
+			plan, node, larger, node.predList_, predList,
+			node.aggPhase_, &inputIdMap);
+	if (predList.size() >= 2) {
+		if (!isTrueExpr(predList[1])) {
+			Expr *predExpr;
+			compiler_.mergeAndOp(
+					ALLOC_NEW(alloc_) Expr(predList[0]),
+					ALLOC_NEW(alloc_) Expr(predList[1]),
+					plan, MODE_WHERE, predExpr);
+			predList[0] = (predExpr == NULL ? compiler_.genConstExpr(
+					plan, makeBoolValue(true), MODE_WHERE) : *predExpr);
+		}
+		while (predList.size() > 1) {
+			predList.pop_back();
+		}
+	}
+
+	if (!largerNode.predList_.empty() &&
+			!isTrueExpr(largerNode.predList_[0])) {
+		Expr *predExpr;
+		compiler_.mergeAndOp(
+				ALLOC_NEW(alloc_) Expr(predList[0]),
+				ALLOC_NEW(alloc_) Expr(largerNode.predList_[0]),
+				plan, MODE_WHERE, predExpr);
+		if (predExpr != NULL) {
+			predList[0] = *predExpr;
+		}
+	}
+
+	PlanExprList outList(alloc_);
+	compiler_.dereferenceExprList(
+			plan, node, larger, node.outputList_, outList,
+			node.aggPhase_, &inputIdMap);
+
+	node.type_ = SQLType::EXEC_SCAN;
+	node.inputList_.erase(node.inputList_.begin() + larger);
+	node.predList_.swap(predList);
+	node.outputList_.swap(outList);
+	node.tableIdInfo_ = largerNode.tableIdInfo_;
+	node.indexInfoList_ = largerNode.indexInfoList_;
+	node.cmdOptionFlag_ |= largerNode.cmdOptionFlag_;
+
+	compiler_.refreshColumnTypes(plan, node, node.predList_, false, false);
+	compiler_.refreshColumnTypes(plan, node, node.outputList_, true, false);
+
+	if (nodeRefList[largerId] <= 1) {
+		compiler_.setDisabledNodeType(largerNode);
+	}
+
+	compiler_.addOptimizationProfile(&plan, &node, profile);
+}
+
+void SQLCompiler::SelectJoinDriving::Rewriter::rewriteNonDriving(
+		Plan &plan, PlanNode &node, OptProfile::JoinDriving *profile) {
+	if (checkOnly_) {
+		return;
+	}
+
+	compiler_.addOptimizationProfile(&plan, &node, profile);
+}
+
+void SQLCompiler::SelectJoinDriving::Rewriter::rewriteTotal(Plan &plan) {
+	if (checkOnly_) {
+		return;
+	}
+
+	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
+			nodeIt != plan.nodeList_.end(); ++nodeIt) {
+		PlanNode &node = *nodeIt;
+
+		if (node.id_ >= tableSizeList_.size()) {
+			break;
+		}
+
+		int64_t &dest = node.tableIdInfo_.approxSize_;
+		const int64_t src = tableSizeList_[node.id_];
+
+		if (dest < 0 && src >= 0) {
+			dest = src;
+		}
+	}
+}
+
+
+SQLCompiler::SelectJoinDriving::SubOptimizer::SubOptimizer(
+		SQLCompiler &compiler, bool checkOnly) :
+		compiler_(compiler),
+		tableSizeList_(compiler_.alloc_),
+		checkOnly_(checkOnly),
+		profiling_(isProfiling(compiler)) {
+}
+
+bool SQLCompiler::SelectJoinDriving::SubOptimizer::optimize(Plan &plan) {
+	NodeCursor cursor = makeNodeCursor(plan);
+	Rewriter rewriter = makeRewriter();
+
+	for (PlanNode *node; (node = cursor.next()) != NULL;) {
+		if (!CostResolver::isAcceptableNode(*node, checkOnly_)) {
+			continue;
+		}
+
+		OptProfile::JoinDriving *profile;
+		const int32_t drivingInput = resolveDrivingInput(plan, *node, profile);
+		applyJoinOptions(*node, drivingInput);
+
+		if (drivingInput >= 0) {
+			rewriter.rewrite(
+					plan, *node, static_cast<uint32_t>(drivingInput),
+					profile);
+			cursor.markCurrent();
+		}
+		else {
+			rewriter.rewriteNonDriving(plan, *node, profile);
+		}
+	}
+
+	rewriter.rewriteTotal(plan);
+	return cursor.isSomeMarked();
+}
+
+int32_t SQLCompiler::SelectJoinDriving::SubOptimizer::resolveDrivingInput(
+		const Plan &plan, const PlanNode &node,
+		OptProfile::JoinDriving *&profile) {
+	profile = NULL;
+
+	const uint32_t left = JOIN_LEFT_INPUT;
+	const uint32_t right = JOIN_RIGHT_INPUT;
+
+	CostResolver resolver = makeCostResolver();
+	const Cost leftCost = resolver.resolveCost(plan, node, left);
+	const Cost rightCost = resolver.resolveCost(plan, node, right);
+
+	const int32_t comp = leftCost.compareTo(rightCost);
+	int32_t drivingInput = SubConstants::JOIN_UNKNOWN_INPUT;
+	if (comp < 0 && leftCost.isIndexed() && leftCost.isReducible()) {
+		drivingInput = left;
+	}
+	else if (comp > 0 && rightCost.isIndexed() && rightCost.isReducible()) {
+		drivingInput = right;
+	}
+
+	profile = resolver.toProfile(drivingInput);
+	return drivingInput;
+}
+
+void SQLCompiler::SelectJoinDriving::SubOptimizer::applyJoinOptions(
+		PlanNode &node, int32_t drivingInput) {
+	if (!checkOnly_) {
+		return;
+	}
+
+	const PlanNode::CommandOptionFlag drivingSome =
+			PlanNode::Config::CMD_OPT_JOIN_DRIVING_SOME;
+	const PlanNode::CommandOptionFlag noneOrLeft =
+			PlanNode::Config::CMD_OPT_JOIN_DRIVING_NONE_LEFT;
+
+	PlanNode::CommandOptionFlag drivingFlags;
+	if (drivingInput >= 0) {
+		if (drivingInput == JOIN_LEFT_INPUT) {
+			drivingFlags = (drivingSome | noneOrLeft);
+		}
+		else {
+			drivingFlags = drivingSome;
+		}
+	}
+	else {
+		drivingFlags = noneOrLeft;
+	}
+
+	node.cmdOptionFlag_ |= drivingFlags;
+}
+
+SQLCompiler::SelectJoinDriving::NodeCursor
+SQLCompiler::SelectJoinDriving::SubOptimizer::makeNodeCursor(Plan &plan) {
+	const bool modifiable = !checkOnly_;
+	return NodeCursor(plan, modifiable);
+}
+
+SQLCompiler::SelectJoinDriving::CostResolver
+SQLCompiler::SelectJoinDriving::SubOptimizer::makeCostResolver() {
+	const bool withUnionScan = checkOnly_;
+	OptProfile::JoinDriving *profile = NULL;
+	if (profiling_) {
+		profile = ALLOC_NEW(compiler_.alloc_) OptProfile::JoinDriving();
+	}
+	return CostResolver(compiler_, tableSizeList_, withUnionScan, profile);
+}
+
+SQLCompiler::SelectJoinDriving::Rewriter
+SQLCompiler::SelectJoinDriving::SubOptimizer::makeRewriter() {
+	return Rewriter(compiler_, tableSizeList_, checkOnly_);
+}
+
+bool SQLCompiler::SelectJoinDriving::SubOptimizer::isProfiling(
+		SQLCompiler &compiler) {
+	return (compiler.explainType_ != SyntaxTree::EXPLAIN_NONE);
 }

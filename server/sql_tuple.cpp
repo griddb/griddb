@@ -2245,9 +2245,10 @@ void TupleList::Writer::allocateNewBlock() {
 	varTopAddr_ = static_cast<uint8_t*>(block.data()) + blockSize_;
 	varTailAddr_ = NULL;
 	tupleCount_ = 0;
-	TupleBlockHeader::setTupleCount(block.data(), 0);
-	TupleBlockHeader::setNextFixDataOffset(block.data(), TupleList::BLOCK_HEADER_SIZE);
-	TupleBlockHeader::setNextVarDataOffset(block.data(), blockSize_);
+	uint8_t *blockTop = static_cast<uint8_t*>(block.data());
+	TupleBlockHeader::setTupleCount(blockTop, 0);
+	TupleBlockHeader::setNextFixDataOffset(blockTop, TupleList::BLOCK_HEADER_SIZE);
+	TupleBlockHeader::setNextVarDataOffset(blockTop, blockSize_);
 	contiguousBlockCount_ = 0;
 	block_ = block;
 	varBlock_ = block;

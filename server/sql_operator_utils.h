@@ -218,6 +218,8 @@ public:
 	void applySummaryAggregationColumns(const Projection &proj);
 	static void applyAggregationColumns(
 			const Projection &aggrProj, SummaryTupleSet &tupleSet);
+	static void applyDecrementalType(
+			SQLExprs::ExprFactoryContext &cxt, const Projection &proj);
 
 	void addColumnUsage(const OpCode &code, bool withId);
 

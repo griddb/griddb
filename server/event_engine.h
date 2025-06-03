@@ -547,6 +547,8 @@ public:
 	Event(const Event &ev);
 	Event& operator=(const Event &ev);
 
+	void resetAttributes(EventType type);
+
 	void resetAttributes(EventType type, PartitionId partitionId,
 			const NodeDescriptor &senderND);
 
@@ -2690,6 +2692,10 @@ inline Event& EventEngine::Event::operator=(const Event &ev) {
 	mergeExtraMessages();
 
 	return *this;
+}
+
+inline void EventEngine::Event::resetAttributes(EventType type) {
+	type_ = type;
 }
 
 inline void EventEngine::Event::resetAttributes(

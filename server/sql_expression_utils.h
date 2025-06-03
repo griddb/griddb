@@ -66,6 +66,11 @@ public:
 			const SQLValues::CompColumnList *compColumnList,
 			bool orderingRestricted) const;
 
+	static void applySummaryTupleOptions(
+			ExprFactoryContext &cxt, SQLValues::SummaryTupleSet &tupleSet);
+	static void applyDecrementalType(
+			ExprFactoryContext &cxt, const SQLExprs::ExprCode &code);
+
 	void setCodeSetUpAlways(bool enabled);
 
 	void setMultiStageGrouping(bool enabled);
@@ -435,6 +440,14 @@ public:
 
 	SyntaxExpr* toSyntaxExpr(const Expression &src) const;
 	SyntaxExprList toSyntaxExprList(const Expression &src) const;
+
+	Expression& makeExpr(ExprType type, const SyntaxExprList *argList) const;
+
+	bool findAdjustedRangeValues(
+			const SyntaxExpr &expr,
+			const util::Vector<TupleColumnType> &columnTypeList,
+			const util::Vector<TupleValue> *parameterList,
+			SQLExprs::IndexCondition &cond) const;
 
 	static TupleValue evalConstExpr(
 			ExprContext &cxt, const ExprFactory &factory,
@@ -976,6 +989,9 @@ struct SQLExprs::ExprTypeUtils {
 	static bool isNoColumnTyped(ExprType type);
 	static bool isCompOp(ExprType type, bool withNe);
 
+	static bool isNormalWindow(ExprType type);
+	static bool isDecremental(ExprType type);
+
 	static ExprType swapCompOp(ExprType type);
 	static ExprType negateCompOp(ExprType type);
 	static ExprType getLogicalOp(ExprType type, bool negative);
@@ -1043,9 +1059,9 @@ struct SQLExprs::DataPartitionUtils {
 			const SyntaxExpr &expr, bool &uncovered,
 			util::Vector<int64_t> *affinityList, util::Set<int64_t> &affinitySet,
 			const util::Vector<TupleValue> *parameterList,
-			bool &placeholderAffected);
+			bool &placeholderAffected, util::Set<int64_t> &unmatchAffinitySet);
 
-	static bool isReduceableTablePartitionCondition(
+	static bool isReducibleTablePartitionCondition(
 			const PlanPartitioningInfo &partitioning, TupleColumnType columnType,
 			const util::Vector<uint32_t> &affinityRevList, int64_t nodeAffinity,
 			ExprType condType, uint32_t condColumn, const TupleValue &condValue);
@@ -1090,14 +1106,33 @@ struct SQLExprs::DataPartitionUtils {
 struct SQLExprs::RangeGroupUtils {
 	static bool isRangeGroupSupportedType(
 			TupleColumnType type);
-	static TupleValue getRangeGroupBoundary(
-			util::StackAllocator &alloc, TupleColumnType keyType, TupleValue base,
-			bool forLower, bool inclusive);
+
+	static void resolveRangeGroupInterval(
+			TupleColumnType type, int64_t baseInterval, int64_t baseOffset,
+			util::DateTime::FieldType unit, const util::TimeZone &timeZone,
+			RangeKey &interval, RangeKey &offset);
+	static RangeKey resolveRangeGroupIntervalValue(
+			int64_t baseInterval, util::DateTime::FieldType unit, bool forInterval);
+	static void adjustRangeGroupInterval(
+			RangeKey &interval, RangeKey &offset, const util::TimeZone &timeZone);
+
+	static void checkRangeGroupInterval(
+			TupleColumnType type, const RangeKey &interval);
+	static RangeKey getRangeGroupMinInterval(TupleColumnType type);
+
+	static bool findRangeGroupBoundary(
+			util::StackAllocator &alloc, TupleColumnType keyType,
+			const TupleValue &base, bool forLower, bool inclusive,
+			RangeKey &boundary);
 	static bool adjustRangeGroupBoundary(
-			TupleValue &lower, TupleValue &upper, int64_t interval,
-			int64_t offset);
+			RangeKey &lower, RangeKey &upper, const RangeKey &interval,
+			const RangeKey &offset);
+	static TupleValue mergeRangeGroupBoundary(
+			const TupleValue &base1, const TupleValue &base2, bool forLower);
+
 	static bool getRangeGroupId(
-			TupleValue key, int64_t interval, int64_t offset, int64_t &id);
+			const TupleValue &key, const RangeKey &interval,
+			const RangeKey &offset, RangeKey &id);
 };
 
 #endif

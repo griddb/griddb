@@ -2956,6 +2956,67 @@ bool NoSQLStore::getTable(
 	}
 }
 
+void NoSQLStore::estimateIndexSearchSize(
+		EventContext &ec, SQLExecution &execution,
+		SQLIndexStatsCache &indexStats, uint64_t requester) {
+	util::StackAllocator &alloc = ec.getAllocator();
+
+	SQLIndexStatsCache::KeyList keyList(alloc);
+	util::Vector<int64_t> estimationList(alloc);
+
+	NoSQLStoreOption option(&execution, NULL, NULL);
+	NoSQLSyncContext &syncContext = execution.getContext().getSyncContext();
+
+	PartitionId partitionId = 0;
+	for (;;) {
+		partitionId = indexStats.getMissedKeys(
+				alloc, requester, partitionId, keyList);
+		if (keyList.empty()) {
+			break;
+		}
+
+		const PartitionId curPartitionId = keyList.front().partitionId_;
+		NoSQLContainer targetContainers(
+				ec, curPartitionId, syncContext, &execution);
+		try {
+			targetContainers.estimateIndexSearchSize(
+					keyList, option, estimationList);
+		}
+		catch (std::exception &e) {
+			GS_RETHROW_USER_OR_SYSTEM(
+					e, GS_EXCEPTION_MERGE_MESSAGE(
+							e, "Failed to estimate index search size"));
+		}
+
+		applyIndexSearchSize(keyList, estimationList, indexStats, requester);
+	}
+}
+
+void NoSQLStore::applyIndexSearchSize(
+		const SQLIndexStatsCache::KeyList &keyList,
+		const util::Vector<int64_t> &estimationList,
+		SQLIndexStatsCache &indexStats, uint64_t requester) {
+	assert(keyList.size() == estimationList.size());
+
+	typedef SQLIndexStatsCache::KeyList::const_iterator KeyIt;
+	typedef util::Vector<int64_t>::const_iterator EstimationIt;
+
+	KeyIt keyIt = keyList.begin();
+	EstimationIt estimationIt = estimationList.begin();
+
+	while (
+			keyIt != keyList.end() &&
+			estimationIt != estimationList.end()) {
+		SQLIndexStatsCache::Value statsValue;
+		statsValue.approxSize_ = *estimationIt;
+
+		indexStats.put(*keyIt, requester, statsValue);
+
+		++keyIt;
+		++estimationIt;
+	}
+}
+
 /*!
 	@brief beginコマンドを実行する
 */

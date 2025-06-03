@@ -95,6 +95,9 @@ struct BtreeMap::MapKeyTraits<CompositeInfoObject136> {
 #if !GS_BTREE_MAP_DEFINE_SWITCHER_ONLY
 int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 						 const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting) {
+
+	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+
 	int32_t ret = 0;
 	TreeFuncInfo *funcInfo = setting.getFuncInfo();
 	assert(funcInfo != NULL);
@@ -133,6 +136,9 @@ int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManagerV4 &obj
 template <>
 bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 						 const CompositeInfoObject *e, BaseIndex::Setting &setting) {
+
+	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+
 	bool isMatch = true;
 	TreeFuncInfo *funcInfo = setting.getFuncInfo();
 	VariableArrayCursor *cursor = NULL;

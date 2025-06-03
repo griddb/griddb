@@ -33,6 +33,7 @@
 #include "key_data_store.h"
 #include "database_manager.h"
 #include "query_processor.h"
+
 UTIL_TRACER_DECLARE(SQL_SERVICE);
 
 
@@ -357,7 +358,9 @@ MetaType::Coders::LIST_DATABASE_STATS[] = {
 	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE),
 	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_TASK_COUNT),
 	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_PENDING_JOB_COUNT),
-	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE)
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_SQL_TOTAL_REQUEST_COUNT),
+	UTIL_NAME_CODER_ENTRY(DATABASE_STATS_TRANSACTION_TOTAL_REQUEST_COUNT)
 };
 
 const util::NameCoderEntry<MetaType::DatabaseMeta>
@@ -544,6 +547,22 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_TASK_ORDINAL),
 	UTIL_NAME_CODER_ENTRY(STR_TASK_TYPE),
 	UTIL_NAME_CODER_ENTRY(STR_PLAN),
+
+	UTIL_NAME_CODER_ENTRY(STR_SQL_TOTAL_REQUEST_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_TRANSACTION_TOTAL_REQUEST_COUNT),
+
+	UTIL_NAME_CODER_ENTRY(STR_CLUSTER_REPLICATION_ROLE),
+	UTIL_NAME_CODER_ENTRY(STR_PRIMARY_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(STR_PRIMARY_PORT),
+	UTIL_NAME_CODER_ENTRY(STR_STANDBY_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(STR_STANDBY_PORT),
+	UTIL_NAME_CODER_ENTRY(STR_PRIMARY_LSN),
+	UTIL_NAME_CODER_ENTRY(STR_STANDBY_LSN),
+	UTIL_NAME_CODER_ENTRY(STR_PRIMARY_LAST_UPDATED_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_STANDBY_LAST_UPDATED_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_REPLICATION_STATUS),
+	UTIL_NAME_CODER_ENTRY(STR_LAST_ERROR_CODE),
+	UTIL_NAME_CODER_ENTRY(STR_LAST_ERROR_TIME)
 };
 
 const util::NameCoder<MetaType::StringConstants, MetaType::END_STR>
@@ -818,7 +837,9 @@ const MetaType::CoreColumns::Entry<MetaType::DatabaseStatsMeta>
 	of(DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE).asLong(),
 	of(DATABASE_STATS_SQL_TASK_COUNT).asLong(),
 	of(DATABASE_STATS_SQL_PENDING_JOB_COUNT).asLong(),
-	of(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE).asLong()
+	of(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE).asLong(),
+	of(DATABASE_STATS_SQL_TOTAL_REQUEST_COUNT).asLong(),
+	of(DATABASE_STATS_TRANSACTION_TOTAL_REQUEST_COUNT).asLong(),
 };
 
 const MetaType::CoreColumns::Entry<MetaType::DatabaseMeta>
@@ -1191,7 +1212,9 @@ const MetaType::RefColumns::Entry<MetaType::DatabaseStatsMeta>
 	of(DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE, STR_SQL_STORE_SWAP_WRITE_SIZE),
 	of(DATABASE_STATS_SQL_TASK_COUNT, STR_SQL_TASK_COUNT),
 	of(DATABASE_STATS_SQL_PENDING_JOB_COUNT, STR_SQL_PENDING_JOB_COUNT),
-	of(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE, STR_SQL_SEND_MESSAGE_SIZE)
+	of(DATABASE_STATS_SQL_SEND_MESSAGE_SIZE, STR_SQL_SEND_MESSAGE_SIZE),
+	of(DATABASE_STATS_SQL_TOTAL_REQUEST_COUNT, STR_SQL_TOTAL_REQUEST_COUNT),
+	of(DATABASE_STATS_TRANSACTION_TOTAL_REQUEST_COUNT, STR_TRANSACTION_TOTAL_REQUEST_COUNT)
 };
 
 const MetaType::RefColumns::Entry<MetaType::DatabaseMeta>
@@ -1279,7 +1302,8 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_CORE[] = {
 
 	coreOf(
 			TYPE_DATABASE, "_core_databases",
-			CoreColumns::COLUMNS_DATABASE, Coders::CODER_DATABASE, 0)
+			CoreColumns::COLUMNS_DATABASE, Coders::CODER_DATABASE, 0),
+
 };
 
 const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
@@ -4819,7 +4843,6 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 
 	LocalTempStore& store = jobManager->getStore();
 	const uint32_t sqlTmpBlockSize = store.getDefaultBlockSize();
-	
 	for (auto& dbInfo : statsMap) {
 		DatabaseStats& stats = *dbInfo.second;
 		DatabaseId currentDbId = dbInfo.first;
@@ -4828,6 +4851,11 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 		if (!isAdministrator && currentDbId != dbId) {
 			continue;
 		}
+		dbInfo.second->connectionStats_.sqlRequestCount_ 
+			= getContext().getSource().transactionManager_->getDatabaseManager().getRequestCount(currentDbId, true);
+
+		dbInfo.second->connectionStats_.nosqlRequestCount_
+			= getContext().getSource().transactionManager_->getDatabaseManager().getRequestCount(currentDbId, true);
 
 		builder.set(
 			MetaType::DATABASE_STATS_DATABASE_ID,
@@ -4911,7 +4939,15 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 
 		builder.set(
 			MetaType::DATABASE_STATS_SQL_SEND_MESSAGE_SIZE,
-			ValueUtils::makeLong(stats.jobStats_.pendingJobCount_));
+			ValueUtils::makeLong(stats.jobStats_.sendMessageSize_));
+
+		builder.set(
+			MetaType::DATABASE_STATS_SQL_TOTAL_REQUEST_COUNT,
+			ValueUtils::makeLong(dbManager.getRequestCount(currentDbId, true)));
+
+		builder.set(
+			MetaType::DATABASE_STATS_TRANSACTION_TOTAL_REQUEST_COUNT,
+			ValueUtils::makeLong(dbManager.getRequestCount(currentDbId, false)));
 
 		getContext().getRowHandler()(txn, builder.build());
 	}

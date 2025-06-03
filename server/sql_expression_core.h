@@ -68,6 +68,7 @@ struct SQLCoreExprs {
 	class NoopExpression;
 	class RangeKeyExpression;
 	class LinearExpression;
+	class RangeGroupIdExpression;
 
 	struct Functions;
 };
@@ -203,22 +204,31 @@ struct SQLCoreExprs::Specs {
 				Base::In<TupleTypes::TYPE_ANY> > > Type;
 	};
 
+	template<int C> struct Spec<SQLType::EXPR_WINDOW_OPTION, C> {
+		typedef Base::Type< TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
 	template<int C> struct Spec<SQLType::EXPR_RANGE_GROUP, C> {
 		typedef Base::Type< TupleTypes::TYPE_LONG, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY>,
 				Base::In<TupleTypes::TYPE_LONG>,
-				Base::In<TupleTypes::TYPE_LONG>,
-				Base::In<TupleTypes::TYPE_LONG>,
-				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_ANY>,
 				Base::In<TupleTypes::TYPE_LONG> >,
 				ExprSpec::FLAG_DYNAMIC> Type;
 	};
 
 	template<int C> struct Spec<SQLType::EXPR_RANGE_GROUP_ID, C> {
-		typedef Base::Type< TupleTypes::TYPE_LONG, Base::InList<
+		typedef Base::Type< TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY>,
-				Base::In<TupleTypes::TYPE_LONG>,
-				Base::In<TupleTypes::TYPE_LONG> >,
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_INHERIT1 |
 				ExprSpec::FLAG_DYNAMIC> Type;
 	};
 
@@ -1581,10 +1591,47 @@ public:
 	virtual TupleValue eval(ExprContext &cxt) const;
 
 private:
-	static SQLValues::TypeUtils::TypeCategory resolveEvaluationCategory(
+	typedef TupleValue (LinearExpression::*InterpolationFunc)(
+			ExprContext&, const TupleValue&, const TupleValue&,
+			const TupleValue&, const TupleValue&, const TupleValue&) const;
+
+	static InterpolationFunc resolveInterpolationFunction(
 			TupleColumnType type);
 
-	SQLValues::TypeUtils::TypeCategory category_;
+	SQLValues::DateTimeElements interpolateDateTime(
+			const TupleValue &x1, const TupleValue &y1, const TupleValue &x2,
+			const TupleValue &y2, const TupleValue &x) const;
+
+	TupleValue interpolateLong(
+			ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+			const TupleValue &x2, const TupleValue &y2,
+			const TupleValue &x) const;
+	TupleValue interpolateDouble(
+			ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+			const TupleValue &x2, const TupleValue &y2,
+			const TupleValue &x) const;
+	TupleValue interpolateMicroTimestamp(
+			ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+			const TupleValue &x2, const TupleValue &y2,
+			const TupleValue &x) const;
+	TupleValue interpolateNanoTimestamp(
+			ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+			const TupleValue &x2, const TupleValue &y2,
+			const TupleValue &x) const;
+	TupleValue interpolateNonNumeric(
+			ExprContext &cxt, const TupleValue &x1, const TupleValue &y1,
+			const TupleValue &x2, const TupleValue &y2,
+			const TupleValue &x) const;
+
+	TupleValue convertToResultValue(
+			ExprContext &cxt, const TupleValue &src) const;
+
+	InterpolationFunc interpolationFunc_;
+};
+
+class SQLCoreExprs::RangeGroupIdExpression : public SQLExprs::Expression {
+public:
+	virtual TupleValue eval(ExprContext &cxt) const;
 };
 
 struct SQLCoreExprs::Functions {
@@ -1592,9 +1639,9 @@ struct SQLCoreExprs::Functions {
 
 	struct RangeGroupId {
 		template<typename C>
-		std::pair<int64_t, bool> operator()(
-				C &cxt, const TupleValue &value, int64_t interval,
-				int64_t offset);
+		TupleValue operator()(
+				C &cxt, const TupleValue &value, const TupleValue &interval,
+				const TupleValue &offset);
 	};
 
 	struct Coalesce {

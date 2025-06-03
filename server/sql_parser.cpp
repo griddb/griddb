@@ -1755,6 +1755,8 @@ bool SyntaxTree::checkGroupIntervalTimeField(util::DateTime::FieldType type) {
 	case util::DateTime::FIELD_MINUTE:
 	case util::DateTime::FIELD_SECOND:
 	case util::DateTime::FIELD_MILLISECOND:
+	case util::DateTime::FIELD_MICROSECOND:
+	case util::DateTime::FIELD_NANOSECOND:
 		return true;
 	default:
 		return false;
@@ -2595,19 +2597,24 @@ int64_t SQLParserContext::checkAndGetViewSelectStr(SyntaxTree::Expr* &table) {
 SyntaxTree::WindowOption::WindowOption(SQLAllocator &alloc):
 		alloc_(alloc),
 		partitionByList_(NULL),
-		orderByList_(NULL) {
+		orderByList_(NULL),
+		frameOption_(NULL)
+{
 }
 
 SyntaxTree::WindowOption::WindowOption(const WindowOption &another) :
 		alloc_(another.alloc_), 
 		partitionByList_(NULL),
-		orderByList_(NULL) {
+		orderByList_(NULL),
+		frameOption_(NULL)
+{
 	*this = another;
 }
 
 SyntaxTree::WindowOption& SyntaxTree::WindowOption::operator=(const WindowOption &another) {
 	partitionByList_ = another.partitionByList_;
 	orderByList_ = another.orderByList_;
+	frameOption_ = another.frameOption_;
 
 	return *this;
 }
@@ -2647,5 +2654,682 @@ void SyntaxTree::WindowOption::dump(std::ostream &os) {
 		}
 		os << "]";
 	}
+	if (frameOption_) {
+		frameOption_->dump(os);
+	}
 	os << "}}";
+}
+
+SyntaxTree::WindowFrameOption::WindowFrameOption() :
+		frameMode_(FRAME_MODE_NONE),
+		frameStartBoundary_(NULL),
+		frameFinishBoundary_(NULL) {
+}
+
+void SyntaxTree::WindowFrameOption::dump(std::ostream &os) {
+	os << "{\"WindowFrameOption\":{";
+	os << ", \"frameMode:" << static_cast<int32_t>(frameMode_);
+	if (frameStartBoundary_) {
+		os << ", \"frameStart\":{";
+		frameStartBoundary_->dump(os);
+		os << "}";
+	}
+	if (frameFinishBoundary_) {
+		os << ", \"frameFinish\":{";
+		frameFinishBoundary_->dump(os);
+		os << "}";
+	}
+	os << "}}";
+}
+
+SyntaxTree::WindowFrameBoundary::WindowFrameBoundary(SQLAllocator &alloc):
+		alloc_(alloc),
+		boundaryType_(BOUNDARY_NONE),
+		boundaryValueExpr_(NULL),
+		boundaryLongValue_(-1),
+		boundaryTimeUnit_(-1)
+{
+}
+
+SyntaxTree::WindowFrameBoundary::WindowFrameBoundary(const WindowFrameBoundary &another) :
+		alloc_(another.alloc_), 
+		boundaryType_(BOUNDARY_NONE),
+		boundaryValueExpr_(NULL),
+		boundaryLongValue_(-1),
+		boundaryTimeUnit_(-1)
+{
+	*this = another;
+}
+
+SyntaxTree::WindowFrameBoundary& SyntaxTree::WindowFrameBoundary::operator=(const WindowFrameBoundary &another) {
+	boundaryType_ = another.boundaryType_;
+	boundaryValueExpr_ = another.boundaryValueExpr_;
+	boundaryLongValue_ = another.boundaryLongValue_;
+	boundaryTimeUnit_ = another.boundaryTimeUnit_;
+
+	return *this;
+}
+
+void SyntaxTree::WindowFrameBoundary::dump(std::ostream &os) {
+	os << "{\"WindowFrameBoundary\":{";
+	os << "\"frameBoundaryType:" << static_cast<int32_t>(boundaryType_);
+	os << ", \"boundaryValueExpr\":{";
+	if (boundaryValueExpr_) {
+		if (boundaryValueExpr_) {
+			boundaryValueExpr_->dump(os);
+		}
+	}
+	os << "}";
+	os << ", \"boundaryLongValue\":" << boundaryLongValue_;
+	os << ", \"boundaryTimeUnit\":" << boundaryTimeUnit_;
+}
+
+
+struct SQLIndexStatsCache::Body {
+	struct Entry;
+	struct RequesterKey;
+
+	struct ValueHolder;
+	struct KeyHolder;
+
+	typedef util::AllocMap<Key, Entry> KeyMap;
+	typedef KeyMap::iterator KeyIterator;
+
+	typedef util::AllocMap<RequesterKey, KeyIterator> RequesterMap;
+
+	typedef util::StdAllocator<KeyIterator, void> KeyRefAlloc;
+	typedef std::list<KeyIterator, KeyRefAlloc> KeyRefList;
+
+	typedef KeyRefList::iterator KeyRefIterator;
+
+	explicit Body(
+			SQLVariableSizeGlobalAllocator &globalVarAlloc,
+			const Option &option);
+	~Body();
+
+	static Body* create(
+			SQLVariableSizeGlobalAllocator &globalVarAlloc,
+			const Option &option);
+	static void reset(Body *&body);
+
+	bool findSub(const Key &key, Value &value);
+	void putSub(const Key &key, uint64_t requester, const Value &value);
+
+	bool checkKeyResolvedSub(uint64_t requester);
+	PartitionId getMissedKeysSub(
+			util::StackAllocator &alloc, uint64_t requester,
+			PartitionId startPartitionId, KeyList &keyList);
+
+	uint64_t addRequesterSub();
+	void removeRequesterSub(uint64_t requester);
+
+	void adjustFreeList();
+
+	void clear();
+	void eraseKeyDirect(const KeyIterator &it);
+
+	static int32_t compareValue(const TupleValue &v1, const TupleValue &v2);
+	static int32_t compareBool(bool v1, bool v2);
+
+	template<typename T>
+	static int32_t compareIntegral(const T &v1, const T &v2);
+
+	SQLVariableSizeGlobalAllocator &globalVarAlloc_;
+	SQLVarSizeAllocator varAlloc_;
+	util::Mutex lock_;
+	Option option_;
+
+	util::Atomic<uint64_t> nextRequester_;
+
+	KeyMap keyMap_;
+	RequesterMap requesterMap_;
+	KeyRefList freeList_;
+};
+
+struct SQLIndexStatsCache::Body::Entry {
+	explicit Entry(const KeyRefIterator &freeIt);
+
+	Value value_;
+	uint64_t requesterCount_;
+	KeyRefIterator freeIt_;
+};
+
+struct SQLIndexStatsCache::Body::RequesterKey {
+	RequesterKey(uint64_t requester, PartitionId partitionId, const Key *key);
+
+	bool operator<(const RequesterKey &another) const;
+	int32_t compare(const RequesterKey &another) const;
+
+	uint64_t requester_;
+	PartitionId partitionId_;
+	const Key *key_;
+};
+
+struct SQLIndexStatsCache::Body::ValueHolder {
+public:
+	explicit ValueHolder(SQLVarSizeAllocator &varAlloc);
+	~ValueHolder();
+
+	TupleValue& get();
+
+	void attach(const TupleValue &value);
+	void detach();
+
+	void duplicate(const TupleValue &value);
+	void destroy();
+
+private:
+	ValueHolder(const ValueHolder &another);
+	ValueHolder& operator=(const ValueHolder &another);
+
+	SQLVarSizeAllocator &varAlloc_;
+	TupleValue target_;
+};
+
+struct SQLIndexStatsCache::Body::KeyHolder {
+public:
+	explicit KeyHolder(SQLVarSizeAllocator &varAlloc);
+	~KeyHolder();
+
+	Key& get();
+
+	void attach(const Key &key);
+	void detach();
+
+	void duplicate(const Key &key);
+	void destroy();
+
+	static Key duplicateBy(util::StackAllocator &alloc, const Key &src);
+
+private:
+	KeyHolder(const KeyHolder &another);
+	KeyHolder& operator=(const KeyHolder &another);
+
+	SQLVarSizeAllocator &varAlloc_;
+	util::LocalUniquePtr<Key> target_;
+	ValueHolder lowerValueHolder_;
+	ValueHolder upperValueHolder_;
+};
+
+
+SQLIndexStatsCache::SQLIndexStatsCache(
+		SQLVariableSizeGlobalAllocator &globalVarAlloc,
+		const Option &option) :
+		body_(Body::create(globalVarAlloc, option)) {
+}
+
+SQLIndexStatsCache::~SQLIndexStatsCache() {
+	Body::reset(body_);
+}
+
+bool SQLIndexStatsCache::find(const Key &key, Value &value) const {
+	return body_->findSub(key, value);
+}
+
+void SQLIndexStatsCache::put(
+		const Key &key, uint64_t requester, const Value &value) {
+	body_->putSub(key, requester, value);
+}
+
+void SQLIndexStatsCache::putMissed(const Key &key, uint64_t requester) {
+	body_->putSub(key, requester, Value());
+}
+
+bool SQLIndexStatsCache::checkKeyResolved(uint64_t requester) {
+	return body_->checkKeyResolvedSub(requester);
+}
+
+PartitionId SQLIndexStatsCache::getMissedKeys(
+		util::StackAllocator &alloc, uint64_t requester,
+		PartitionId startPartitionId, KeyList &keyList) {
+	return body_->getMissedKeysSub(alloc, requester, startPartitionId, keyList);
+}
+
+uint64_t SQLIndexStatsCache::addRequester() {
+	return body_->addRequesterSub();
+}
+
+void SQLIndexStatsCache::removeRequester(uint64_t requester) {
+	body_->removeRequesterSub(requester);
+}
+
+
+SQLIndexStatsCache::Key::Key(
+		PartitionId partitionId, ContainerId containerId, uint32_t column,
+		const TupleValue &lower, const TupleValue &upper,
+		bool lowerInclusive, bool upperInclusive) :
+		partitionId_(partitionId),
+		containerId_(containerId),
+		column_(column),
+		lower_(lower),
+		upper_(upper),
+		lowerInclusive_(lowerInclusive),
+		upperInclusive_(upperInclusive) {
+}
+
+bool SQLIndexStatsCache::Key::operator<(const Key &another) const {
+	return (compare(another) < 0);
+}
+
+int32_t SQLIndexStatsCache::Key::compare(const Key &another) const {
+	int32_t cmp;
+	if ((cmp =
+			Body::compareIntegral(partitionId_, another.partitionId_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp =
+			Body::compareIntegral(containerId_, another.containerId_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = Body::compareIntegral(column_, another.column_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = Body::compareValue(lower_, another.lower_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = Body::compareValue(upper_, another.upper_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = Body::compareBool(
+			lowerInclusive_, another.lowerInclusive_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = Body::compareBool(
+			upperInclusive_, another.upperInclusive_)) != 0) {
+		return cmp;
+	}
+
+	return cmp;
+}
+
+
+SQLIndexStatsCache::Value::Value() :
+		approxSize_(-1) {
+}
+
+bool SQLIndexStatsCache::Value::isEmpty() const {
+	return approxSize_ < 0;
+}
+
+
+SQLIndexStatsCache::Option::Option() :
+		expirationMillis_(-1),
+		freeElementLimit_(100 * 1000) {
+}
+
+
+SQLIndexStatsCache::RequesterHolder::RequesterHolder() :
+		cache_(NULL),
+		requester_(0) {
+}
+
+SQLIndexStatsCache::RequesterHolder::~RequesterHolder() {
+	try {
+		reset();
+	}
+	catch (...) {
+	}
+}
+
+void SQLIndexStatsCache::RequesterHolder::assign(SQLIndexStatsCache &cache) {
+	reset();
+
+	const uint64_t nextRequester = cache.addRequester();
+	cache_ = &cache;
+	requester_ = nextRequester;
+}
+
+void SQLIndexStatsCache::RequesterHolder::reset() {
+	if (cache_ == NULL) {
+		return;
+	}
+
+	SQLIndexStatsCache *cache = cache_;
+	const uint64_t requester = requester_;
+
+	cache_ = NULL;
+	requester_ = 0;
+
+	cache->removeRequester(requester);
+}
+
+const uint64_t* SQLIndexStatsCache::RequesterHolder::get() {
+	if (cache_ == NULL) {
+		return NULL;
+	}
+
+	return &requester_;
+}
+
+
+SQLIndexStatsCache::Body::Body(
+		SQLVariableSizeGlobalAllocator &globalVarAlloc, const Option &option) :
+		globalVarAlloc_(globalVarAlloc),
+		varAlloc_(util::AllocatorInfo(
+				ALLOCATOR_GROUP_SQL_JOB, "sqlIndexStatsCache")),
+		option_(option),
+		keyMap_(varAlloc_),
+		requesterMap_(varAlloc_),
+		freeList_(varAlloc_) {
+}
+
+SQLIndexStatsCache::Body::~Body() {
+	clear();
+}
+
+SQLIndexStatsCache::Body* SQLIndexStatsCache::Body::create(
+		SQLVariableSizeGlobalAllocator &globalVarAlloc, const Option &option) {
+	return ALLOC_NEW(globalVarAlloc) Body(globalVarAlloc, option);
+}
+
+void SQLIndexStatsCache::Body::reset(Body *&body) {
+	if (body != NULL) {
+		ALLOC_DELETE(body->globalVarAlloc_, body);
+	}
+	body = NULL;
+}
+
+bool SQLIndexStatsCache::Body::findSub(const Key &key, Value &value) {
+	util::LockGuard<util::Mutex> guard(lock_);
+
+	KeyIterator it = keyMap_.find(key);
+	if (it == keyMap_.end() || it->second.value_.isEmpty()) {
+		value = Value();
+		return false;
+	}
+	value = it->second.value_;
+	return true;
+}
+
+void SQLIndexStatsCache::Body::putSub(
+		const Key &key, uint64_t requester, const Value &value) {
+	util::LockGuard<util::Mutex> guard(lock_);
+
+	KeyIterator it = keyMap_.find(key);
+
+	if (it == keyMap_.end()) {
+		KeyHolder keyHolder(varAlloc_);
+		keyHolder.duplicate(key);
+		keyMap_.insert(std::make_pair(keyHolder.get(), Entry(freeList_.end())));
+		keyHolder.detach();
+	}
+	else {
+		KeyRefIterator &freeIt = it->second.freeIt_;
+		if (freeIt != freeList_.end()) {
+			freeList_.erase(freeIt);
+			freeIt = freeList_.end();
+		}
+	}
+
+	if (it->second.value_.isEmpty() && value.isEmpty()) {
+		RequesterKey reqKey(requester, key.partitionId_, &it->first);
+		if (requesterMap_.insert(std::make_pair(reqKey, it)).second) {
+			it->second.requesterCount_++;
+		}
+	}
+	else if (!value.isEmpty()) {
+		it->second.value_ = value;
+	}
+}
+
+bool SQLIndexStatsCache::Body::checkKeyResolvedSub(uint64_t requester) {
+	util::LockGuard<util::Mutex> guard(lock_);
+
+	const RequesterKey reqKey(requester, 0, NULL);
+	RequesterMap::iterator it = requesterMap_.lower_bound(reqKey);
+
+	return (it == requesterMap_.end() || it->first.requester_ != requester);
+}
+
+PartitionId SQLIndexStatsCache::Body::getMissedKeysSub(
+		util::StackAllocator &alloc, uint64_t requester,
+		PartitionId startPartitionId, KeyList &keyList) {
+	util::LockGuard<util::Mutex> guard(lock_);
+
+	keyList.clear();
+
+	const RequesterKey reqKey(requester, startPartitionId, NULL);
+	RequesterMap::iterator it = requesterMap_.lower_bound(reqKey);
+
+	if (it == requesterMap_.end() || it->first.requester_ != requester) {
+		return UNDEF_PARTITIONID;
+	}
+
+	const PartitionId curPartitionId = it->first.partitionId_;
+	const RequesterKey nextKey(requester, curPartitionId + 1, NULL);
+	do {
+		keyList.push_back(
+				KeyHolder::duplicateBy(alloc, it->second->first));
+	}
+	while (++it != requesterMap_.end() && it->first < nextKey);
+	return nextKey.partitionId_;
+}
+
+uint64_t SQLIndexStatsCache::Body::addRequesterSub() {
+	for (;;) {
+		const uint64_t requester = ++nextRequester_;
+		if (0 < requester && requester < std::numeric_limits<uint64_t>::max()) {
+			return requester;
+		}
+	}
+}
+
+void SQLIndexStatsCache::Body::removeRequesterSub(uint64_t requester) {
+	util::LockGuard<util::Mutex> guard(lock_);
+
+	const RequesterKey reqKey(requester, 0, NULL);
+	RequesterMap::iterator it = requesterMap_.lower_bound(reqKey);
+
+	const RequesterKey nextKey(requester + 1, 0, NULL);
+	for (; it != requesterMap_.end() && it->first < nextKey;) {
+		RequesterMap::iterator nextIt = it;
+		++nextIt;
+
+		KeyIterator keyIt = it->second;
+		uint64_t &requesterCount = keyIt->second.requesterCount_;
+
+		if (--requesterCount == 0) {
+			KeyRefIterator &freeIt = keyIt->second.freeIt_;
+			if (freeIt == freeList_.end()) {
+				freeList_.push_back(keyIt);
+				freeIt--;
+			}
+		}
+
+		requesterMap_.erase(it);
+		it = nextIt;
+	}
+
+	adjustFreeList();
+}
+
+void SQLIndexStatsCache::Body::adjustFreeList() {
+	while (freeList_.size() > option_.freeElementLimit_) {
+		KeyIterator keyIt = freeList_.front();
+
+		const uint64_t &requesterCount = keyIt->second.requesterCount_;
+		if (requesterCount == 0) {
+			eraseKeyDirect(keyIt);
+		}
+
+		freeList_.pop_front();
+	}
+}
+
+void SQLIndexStatsCache::Body::clear() {
+	for (KeyIterator it = keyMap_.begin(); it != keyMap_.end(); ++it) {
+		it->second.freeIt_ = freeList_.end();
+	}
+
+	freeList_.clear();
+	requesterMap_.clear();
+
+	for (KeyIterator it = keyMap_.begin(); it != keyMap_.end();) {
+		KeyIterator nextIt = it;
+		++nextIt;
+
+		eraseKeyDirect(it);
+
+		it = nextIt;
+	}
+}
+
+void SQLIndexStatsCache::Body::eraseKeyDirect(const KeyIterator &it) {
+	KeyHolder keyHolder(varAlloc_);
+	keyHolder.attach(it->first);
+
+	keyMap_.erase(it);
+	keyHolder.destroy();
+}
+
+int32_t SQLIndexStatsCache::Body::compareValue(
+		const TupleValue &v1, const TupleValue &v2) {
+	const bool null1 = (v1.getType() == TupleList::TYPE_NULL);
+	const bool null2 = (v1.getType() == TupleList::TYPE_NULL);
+	if (!null1 != !null2) {
+		return compareBool(null1, null2);
+	}
+
+	return SQLProcessor::ValueUtils::orderValue(v1, v2);
+}
+
+int32_t SQLIndexStatsCache::Body::compareBool(bool v1, bool v2) {
+	return compareIntegral((v1 ? 1 : 0), (v2 ? 1 : 0));
+}
+
+template<typename T>
+int32_t SQLIndexStatsCache::Body::compareIntegral(const T &v1, const T &v2) {
+	if (v1 != v2) {
+		return (v1 < v2 ? -1 : 1);
+	}
+	return 0;
+}
+
+
+SQLIndexStatsCache::Body::Entry::Entry(const KeyRefIterator &freeIt) :
+		requesterCount_(0),
+		freeIt_(freeIt) {
+}
+
+
+SQLIndexStatsCache::Body::RequesterKey::RequesterKey(
+		uint64_t requester, PartitionId partitionId, const Key *key) :
+		requester_(requester),
+		partitionId_(partitionId),
+		key_(key) {
+}
+
+bool SQLIndexStatsCache::Body::RequesterKey::operator<(
+		const RequesterKey &another) const {
+	return (compare(another) < 0);
+}
+
+int32_t SQLIndexStatsCache::Body::RequesterKey::compare(
+		const RequesterKey &another) const {
+	int32_t cmp;
+	if ((cmp = compareIntegral(requester_, another.requester_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = compareIntegral(partitionId_, another.partitionId_)) != 0) {
+		return cmp;
+	}
+
+	if ((cmp = compareIntegral(key_, another.key_)) != 0) {
+		return cmp;
+	}
+
+	return cmp;
+}
+
+
+SQLIndexStatsCache::Body::ValueHolder::ValueHolder(
+		SQLVarSizeAllocator &varAlloc) :
+		varAlloc_(varAlloc) {
+}
+
+SQLIndexStatsCache::Body::ValueHolder::~ValueHolder() {
+	destroy();
+}
+
+TupleValue& SQLIndexStatsCache::Body::ValueHolder::get() {
+	return target_;
+}
+
+void SQLIndexStatsCache::Body::ValueHolder::attach(const TupleValue &value) {
+	target_ = value;
+}
+
+void SQLIndexStatsCache::Body::ValueHolder::detach() {
+	target_ = TupleValue();
+}
+
+void SQLIndexStatsCache::Body::ValueHolder::duplicate(const TupleValue &value) {
+	destroy();
+	target_ = SQLProcessor::ValueUtils::duplicateValue(varAlloc_, value);
+}
+
+void SQLIndexStatsCache::Body::ValueHolder::destroy() {
+	SQLProcessor::ValueUtils::destroyValue(varAlloc_, target_);
+}
+
+
+SQLIndexStatsCache::Body::KeyHolder::KeyHolder(SQLVarSizeAllocator &varAlloc) :
+		varAlloc_(varAlloc),
+		lowerValueHolder_(varAlloc),
+		upperValueHolder_(varAlloc) {
+}
+
+SQLIndexStatsCache::Body::KeyHolder::~KeyHolder() {
+	destroy();
+}
+
+SQLIndexStatsCache::Key& SQLIndexStatsCache::Body::KeyHolder::get() {
+	return *target_;
+}
+
+void SQLIndexStatsCache::Body::KeyHolder::attach(const Key &key) {
+	target_ = UTIL_MAKE_LOCAL_UNIQUE(target_, Key, key);
+	lowerValueHolder_.attach(target_->lower_);
+	upperValueHolder_.attach(target_->upper_);
+}
+
+void SQLIndexStatsCache::Body::KeyHolder::detach() {
+	lowerValueHolder_.detach();
+	upperValueHolder_.detach();
+	target_.reset();
+}
+
+void SQLIndexStatsCache::Body::KeyHolder::duplicate(const Key &key) {
+	destroy();
+
+	lowerValueHolder_.duplicate(key.lower_);
+	upperValueHolder_.duplicate(key.upper_);
+
+	Key subKey = key;
+	subKey.lower_ = lowerValueHolder_.get();
+	subKey.upper_ = upperValueHolder_.get();
+
+	attach(subKey);
+}
+
+void SQLIndexStatsCache::Body::KeyHolder::destroy() {
+	lowerValueHolder_.destroy();
+	upperValueHolder_.destroy();
+	target_.reset();
+}
+
+SQLIndexStatsCache::Key
+SQLIndexStatsCache::Body::KeyHolder::duplicateBy(
+		util::StackAllocator &alloc, const Key &src) {
+	Key dest = src;
+	dest.lower_ = SQLProcessor::ValueUtils::duplicateValue(alloc, src.lower_);
+	dest.upper_ = SQLProcessor::ValueUtils::duplicateValue(alloc, src.upper_);
+	return dest;
 }

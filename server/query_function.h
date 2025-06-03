@@ -41,6 +41,7 @@ struct FunctionUtils {
 
 	struct NumberArithmetic;
 
+	struct TimeFieldChecker;
 	struct TimeErrorHandler;
 
 	template<typename T>
@@ -150,6 +151,20 @@ struct FunctionUtils::NumberArithmetic::ErrorHandler {
 	void errorValueOverflow() const;
 };
 
+struct FunctionUtils::TimeFieldChecker {
+public:
+	TimeFieldChecker();
+
+	TimeFieldChecker withPrecise(bool on = true) const;
+	TimeFieldChecker withDays(bool on = true) const;
+
+	void operator()(int64_t fieldType) const;
+
+private:
+	bool precise_;
+	bool days_;
+};
+
 struct FunctionUtils::TimeErrorHandler {
 	void errorTimeParse(std::exception &e) const;
 	void errorTimeFormat(std::exception &e) const;
@@ -186,7 +201,7 @@ struct FunctionUtils::AggregationValueOperations {
 		}
 		template<typename C> T operator()(
 				C &cxt, const util::TrueType&) const {
-			if (cxt.template checkNullAggrValue<N>()) {
+			if (cxt.template checkNullAggrValue<N, T>()) {
 				return ValueTraits<T>::toFullType(BaseType(), false);
 			}
 			return ValueTraits<T>::toFullType(
@@ -223,9 +238,10 @@ struct FunctionUtils::AggregationValueOperations {
 			return cxt.template incrementAggrValue<N, BaseType>();
 		}
 	};
-	template<uint32_t N> struct NullChecker {
+	template<uint32_t N, typename T> struct NullChecker {
 		template<typename C> bool operator()(C &cxt) {
-			return cxt.template checkNullAggrValue<N>();
+			typedef typename ValueTraits<T>::BaseType BaseType;
+			return cxt.template checkNullAggrValue<N, BaseType>();
 		}
 	};
 };
@@ -247,7 +263,7 @@ struct FunctionUtils::AggregationValues {
 		typedef typename Ops::Adder<N, Type, util::TrueType> Adder;
 		typedef typename Ops::Adder<N, Type, util::FalseType> UncheckedAdder;
 		typedef typename Ops::Incrementer<N, Type> Incrementer;
-		typedef typename Ops::NullChecker<N> NullChecker;
+		typedef typename Ops::NullChecker<N, Type> NullChecker;
 	};
 
 	template<uint32_t N> typename At<N>::Getter get() const {
@@ -415,6 +431,31 @@ template<typename T> inline T FunctionUtils::NumberArithmetic::divide(
 template<typename T> inline T FunctionUtils::NumberArithmetic::remainder(
 		const T &value1, const T &value2) {
 	return Base::remainder(value1, value2, ErrorHandler());
+}
+
+
+inline FunctionUtils::TimeFieldChecker::TimeFieldChecker() :
+		precise_(false),
+		days_(false) {
+}
+
+inline FunctionUtils::TimeFieldChecker
+FunctionUtils::TimeFieldChecker::withPrecise(bool on) const {
+	TimeFieldChecker ret = *this;
+	ret.precise_ = on;
+	return ret;
+}
+
+inline FunctionUtils::TimeFieldChecker
+FunctionUtils::TimeFieldChecker::withDays(bool on) const {
+	TimeFieldChecker ret = *this;
+	ret.days_ = on;
+	return ret;
+}
+
+inline void FunctionUtils::TimeFieldChecker::operator()(
+		int64_t fieldType) const {
+	return checkTimeField(fieldType, precise_, days_);
 }
 
 #endif

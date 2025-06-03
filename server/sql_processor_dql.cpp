@@ -1522,30 +1522,36 @@ DQLProcs::SortOption::SortOption(util::StackAllocator &alloc) :
 		subLimit_(-1),
 		orderColumns_(alloc),
 		output_(NULL),
-		forWindow_(false) {
+		forWindow_(false),
+		windowOption_(NULL) {
 }
 
 void DQLProcs::SortOption::fromPlanNode(OptionInput &in) {
 	const ProcPlan::Node &node = in.resolvePlanNode();
 	SQLExprs::SyntaxExprRewriter rewriter = in.createPlanRewriter();
 
+	util::StackAllocator &alloc = in.getAllocator();
+
+	forWindow_ = ((node.cmdOptionFlag_ &
+			ProcPlan::Node::Config::CMD_OPT_WINDOW_SORTED) != 0);
+
+	ProcPlan::Node::ExprList *srcWindowOption = NULL;
+	if (forWindow_) {
+		srcWindowOption = ALLOC_NEW(alloc) ProcPlan::Node::ExprList(alloc);
+	}
+
 	subOffset_ = node.subOffset_;
 	subLimit_ = node.subLimit_;
 
 	for (ProcPlan::Node::ExprList::const_iterator it = node.predList_.begin();
 			it != node.predList_.end(); ++it) {
-		SortColumn column;
-
-		column.column_ = it->columnId_;
-		column.order_ = (it->sortAscending_ ?
-				SQLType::DIRECTION_ASC : SQLType::DIRECTION_DESC);
-
-		orderColumns_.push_back(column);
+		planExprToOptions(*it, orderColumns_, srcWindowOption);
 	}
 
 	output_ = &rewriter.toProjection(node.outputList_);
-	forWindow_ = ((node.cmdOptionFlag_ &
-			ProcPlan::Node::Config::CMD_OPT_WINDOW_SORTED) != 0);
+	windowOption_ = (srcWindowOption == NULL || srcWindowOption->empty() ?
+			NULL : &rewriter.makeExpr(
+					SQLType::EXPR_WINDOW_OPTION, srcWindowOption));
 }
 
 void DQLProcs::SortOption::toPlanNode(OptionOutput &out) const {
@@ -1580,10 +1586,34 @@ void DQLProcs::SortOption::toCode(
 	if (forWindow_) {
 		code.setPipeProjection(&builder.toGroupingProjectionByExpr(
 				output_, code.getAggregationPhase(), forWindow_));
+		code.setFilterPredicate(windowOption_);
 	}
 	else {
 		code.setPipeProjection(&builder.toNormalProjectionByExpr(
 				output_, code.getAggregationPhase()));
+	}
+}
+
+void DQLProcs::SortOption::planExprToOptions(
+		const ProcPlan::Node::Expr &expr, SortColumnList &orderColumns,
+		ProcPlan::Node::ExprList *windowOption) {
+	if (expr.op_ == SQLType::EXPR_CONSTANT) {
+		if (windowOption == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_OPTION, "");
+		}
+		windowOption->push_back(expr);
+	}
+	else if (expr.op_ == SQLType::EXPR_COLUMN) {
+		SortColumn column;
+
+		column.column_ = expr.columnId_;
+		column.order_ = (expr.sortAscending_ ?
+				SQLType::DIRECTION_ASC : SQLType::DIRECTION_DESC);
+
+		orderColumns.push_back(column);
+	}
+	else {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_OPTION, "");
 	}
 }
 
@@ -1793,6 +1823,21 @@ int64_t SQLProcessor::ValueUtils::intervalToAffinity(
 			affinityList, interval, hash);
 }
 
+TupleValue SQLProcessor::ValueUtils::duplicateValue(
+		const util::StdAllocator<void, void> &alloc, const TupleValue &src) {
+	return SQLValues::ValueUtils::duplicateAllocValue(alloc, src);
+}
+
+void SQLProcessor::ValueUtils::destroyValue(
+		const util::StdAllocator<void, void> &alloc, TupleValue &value) {
+	SQLValues::ValueUtils::destroyAllocValue(alloc, value);
+}
+
+const void* SQLProcessor::ValueUtils::getValueBody(
+		const TupleValue &value, size_t &size) {
+	return SQLValues::ValueUtils::getValueBody(value, size);
+}
+
 
 void SQLProcessor::DQLTool::decodeSimulationEntry(
 		const picojson::value &value, SimulationEntry &entry) {
@@ -1905,7 +1950,8 @@ bool SQLCompiler::ProcessorUtils::reducePartitionedTarget(
 		TupleValue::VarContext &varCxt, const TableInfo &tableInfo,
 		const Expr &expr, bool &uncovered, util::Vector<int64_t> *affinityList,
 		util::Vector<uint32_t> *subList,
-		const Plan::ValueList *parameterList, bool &placeholderAffected) {
+		const Plan::ValueList *parameterList, bool &placeholderAffected,
+		util::Set<int64_t> &unmatchAffinitySet) {
 	typedef SQLTableInfo::SubInfoList SubInfoList;
 	typedef SQLTableInfo::SQLColumnInfoList ColumnInfoList;
 
@@ -1932,7 +1978,8 @@ bool SQLCompiler::ProcessorUtils::reducePartitionedTarget(
 
 	const bool reduced = SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 			cxt, forContainer, partitioning, columnTypeList, expr, uncovered,
-			affinityList, affinitySet, parameterList, placeholderAffected);
+			affinityList, affinitySet, parameterList, placeholderAffected,
+			unmatchAffinitySet);
 
 	if (subList != NULL) {
 		const SubInfoList &subInfoList = tableInfo.partitioning_->subInfoList_;
@@ -1955,7 +2002,7 @@ bool SQLCompiler::ProcessorUtils::reducePartitionedTarget(
 	return reduced;
 }
 
-bool SQLCompiler::ProcessorUtils::isReduceableTablePartitionCondition(
+bool SQLCompiler::ProcessorUtils::isReducibleTablePartitionCondition(
 		const Expr &expr, const TableInfo &tableInfo,
 		const util::Vector<uint32_t> &affinityRevList,
 		int32_t subContainerId) {
@@ -2003,7 +2050,7 @@ bool SQLCompiler::ProcessorUtils::isReduceableTablePartitionCondition(
 		return false;
 	}
 
-	return SQLExprs::DataPartitionUtils::isReduceableTablePartitionCondition(
+	return SQLExprs::DataPartitionUtils::isReducibleTablePartitionCondition(
 			*partitioning, columnType, affinityRevList, nodeAffinity, condType,
 			columnExpr->columnId_, valueExpr->value_);
 }
@@ -2069,18 +2116,111 @@ bool SQLCompiler::ProcessorUtils::isRangeGroupSupportedType(ColumnType type) {
 	return SQLExprs::RangeGroupUtils::isRangeGroupSupportedType(type);
 }
 
-TupleValue SQLCompiler::ProcessorUtils::getRangeGroupBoundary(
-		util::StackAllocator &alloc, ColumnType keyType, TupleValue base,
-		bool forLower, bool inclusive) {
-	return SQLExprs::RangeGroupUtils::getRangeGroupBoundary(
-			alloc, keyType, base, forLower, inclusive);
+void SQLCompiler::ProcessorUtils::resolveRangeGroupInterval(
+		util::StackAllocator &alloc, ColumnType type, int64_t baseInterval,
+		int64_t baseOffset, util::DateTime::FieldType unit,
+		const util::TimeZone &timeZone, TupleValue &interval,
+		TupleValue &offset) {
+	typedef SQLExprs::RangeKey RangeKey;
+	SQLValues::ValueContext cxt(SQLValues::ValueContext::ofAllocator(alloc));
+
+	RangeKey outInterval = RangeKey::invalid();
+	RangeKey outOffset = RangeKey::invalid();
+	SQLExprs::RangeGroupUtils::resolveRangeGroupInterval(
+			type, baseInterval, baseOffset, unit, timeZone, outInterval, outOffset);
+
+	interval = SQLValues::ValueUtils::toAnyByLongInt(cxt, outInterval);
+	offset = SQLValues::ValueUtils::toAnyByLongInt(cxt, outOffset);
+}
+
+bool SQLCompiler::ProcessorUtils::findRangeGroupBoundary(
+		util::StackAllocator &alloc, ColumnType keyType,
+		const TupleValue &base, bool forLower, bool inclusive,
+		TupleValue &boundary) {
+	typedef SQLExprs::RangeKey RangeKey;
+	SQLValues::ValueContext cxt(SQLValues::ValueContext::ofAllocator(alloc));
+
+	RangeKey outBoundary = RangeKey::invalid();
+	const bool found = SQLExprs::RangeGroupUtils::findRangeGroupBoundary(
+			alloc, keyType, base, forLower, inclusive, outBoundary);
+
+	boundary = SQLValues::ValueUtils::toAnyByLongInt(cxt, outBoundary);
+	return found;
 }
 
 bool SQLCompiler::ProcessorUtils::adjustRangeGroupBoundary(
-		TupleValue &lower, TupleValue &upper, int64_t interval,
-		int64_t offset) {
-	return SQLExprs::RangeGroupUtils::adjustRangeGroupBoundary(
-			lower, upper, interval, offset);
+		util::StackAllocator &alloc, TupleValue &lower, TupleValue &upper,
+		const TupleValue &interval, const TupleValue &offset) {
+	typedef SQLExprs::RangeKey RangeKey;
+	SQLValues::ValueContext cxt(SQLValues::ValueContext::ofAllocator(alloc));
+
+	RangeKey outLower = SQLValues::ValueUtils::toLongInt(lower);
+	RangeKey outUpper = SQLValues::ValueUtils::toLongInt(upper);
+
+	const RangeKey &rangeInterval = SQLValues::ValueUtils::toLongInt(interval);
+	const RangeKey &rangeOffset = SQLValues::ValueUtils::toLongInt(offset);
+
+	const bool normal = SQLExprs::RangeGroupUtils::adjustRangeGroupBoundary(
+			outLower, outUpper, rangeInterval, rangeOffset);
+
+	lower = SQLValues::ValueUtils::toAnyByLongInt(cxt, outLower);
+	upper = SQLValues::ValueUtils::toAnyByLongInt(cxt, outUpper);
+	return normal;
+}
+
+TupleValue SQLCompiler::ProcessorUtils::mergeRangeGroupBoundary(
+		const TupleValue &base1, const TupleValue &base2, bool forLower) {
+	return SQLExprs::RangeGroupUtils::mergeRangeGroupBoundary(
+			base1, base2, forLower);
+}
+
+bool SQLCompiler::ProcessorUtils::findAdjustedRangeValues(
+		util::StackAllocator &alloc, const TableInfo &tableInfo,
+		const util::Vector<TupleValue> *parameterList,
+		const Expr &expr, uint32_t &columnId,
+		std::pair<TupleValue, TupleValue> &valuePair,
+		std::pair<bool, bool> &inclusivePair) {
+	typedef SQLTableInfo::SQLColumnInfoList ColumnInfoList;
+
+	SQLValues::ValueContext cxt(SQLValues::ValueContext::ofAllocator(alloc));
+
+	const ColumnInfoList &columnInfoList = tableInfo.columnInfoList_;
+	util::Vector<ColumnType> columnTypeList(alloc);
+	for (ColumnInfoList::const_iterator it = columnInfoList.begin();
+			it != columnInfoList.end(); ++it) {
+		columnTypeList.push_back(it->first);
+	}
+
+	SQLExprs::SyntaxExprRewriter rewriter(cxt, NULL);
+	SQLExprs::IndexCondition cond;
+	const bool found = rewriter.findAdjustedRangeValues(
+			expr, columnTypeList, parameterList, cond);
+
+	if (found) {
+		switch (cond.opType_) {
+		case SQLType::OP_EQ:
+			cond.valuePair_.second = cond.valuePair_.first;
+			cond.inclusivePair_.second = cond.inclusivePair_.first;
+			break;
+		case SQLType::EXPR_BETWEEN:
+			break;
+		default:
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+	}
+
+	columnId = cond.column_;
+	valuePair = cond.valuePair_;
+	inclusivePair = cond.inclusivePair_;
+	return found;
+}
+
+TupleValue SQLCompiler::ProcessorUtils::makeTimestampValue(
+		util::StackAllocator &alloc, const util::PreciseDateTime &src) {
+	SQLValues::ValueContext cxt(SQLValues::ValueContext::ofAllocator(alloc));
+	return SQLValues::ValueUtils::toAnyByLongInt(
+			cxt, SQLValues::DateTimeElements(src).toLongInt());
 }
 
 TupleValue SQLCompiler::ProcessorUtils::evalConstExpr(

@@ -227,6 +227,8 @@ public:
 		CheckpointService* cpSvc,
 		bool useLongSyncLog, bool isCheck, SearchLogInfo& logInfo);
 
+	bool getLogs(PartitionId pId, int64_t startLogVersion, int64_t startOffset, LogManager<MutexLocker>* logMgr);
+
 
 	bool getChunks(
 		util::StackAllocator& alloc, PartitionId pId,
@@ -1007,10 +1009,37 @@ struct SyncRedoRequestInfo {
 */
 class RedoLogHandler : public SyncHandler {
 public:
+	static const size_t LOG_MEM_POOL_SIZE_BITS = 12; 
+	struct MemoryBlock {
+		MemoryBlock() : memoryPool_(util::AllocatorInfo(ALLOCATOR_GROUP_SYNC, "syncFixed"), 1 << LOG_MEM_POOL_SIZE_BITS),
+			stackAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYNC, "syncFixed"), &memoryPool_) {
+		}
+		util::FixedSizeAllocator<util::Mutex> memoryPool_;
+		util::StackAllocator stackAlloc_;
+	};
+
 	RedoLogHandler() {}
+
+	void initialize(const ManagerSet& mgrSet) {
+		SyncHandler::initialize(mgrSet);
+		for (int32_t pId = 0; pId < pt_->getPartitionNum(); pId++) {
+			memoryBlockList_.push_back(UTIL_NEW MemoryBlock);
+		}
+	}
+
+	~RedoLogHandler() {
+		for (int32_t pId = 0; pId < pt_->getPartitionNum(); pId++) {
+			delete memoryBlockList_[pId];
+		}
+	}
+
 	void operator()(EventContext& ec, EventEngine::Event& ev);
+	util::StackAllocator& getLogStackAllocator(PartitionId pId) {
+		return memoryBlockList_[pId]->stackAlloc_;
+	}
 
 private:
+	std::vector<MemoryBlock*> memoryBlockList_;
 
 	bool isSemiSyncReplication();
 	bool checkStandby(RedoContext& cxt);
@@ -1027,5 +1056,6 @@ private:
 	void complete(RedoContext& cxt);
 	void checkBackupError(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
 };
+
 
 #endif

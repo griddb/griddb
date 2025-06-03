@@ -46,9 +46,9 @@ class DataStoreV4;
 class NoLocker;
 class MutexLocker;
 template <class L> class LogManager;
+struct ManagerSet;
 class PartitionList;
 class SQLService;
-struct ManagerSet;
 
 struct ebb_request_parser;
 struct ebb_request;
@@ -216,11 +216,12 @@ public:
 			const picojson::value *paramValue, bool noUnit);
 
 	void getPartitions(
-			util::StackAllocator &alloc,
-			picojson::value &result, int32_t partitionNo,
-			const ServiceTypeInfo &addressType, bool lossOnly = false,
-			bool force = false, bool isSelf = false, bool lsnDump = false,
-			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
+		util::StackAllocator& alloc,
+		picojson::value& result, int32_t partitionNo,
+		const ServiceTypeInfo& addressType, bool lossOnly,
+		bool force, bool isSelf, bool lsnDump,
+		bool notDumpRole, uint32_t partitionGroupNo, bool sqlOwnerDump, bool replication);
+
 
 	bool setGoalPartitions(util::StackAllocator &alloc,
 		const picojson::value *request, picojson::value &result);
@@ -234,6 +235,10 @@ public:
 		DatabaseId dbId, picojson::value& result);
 
 	void getLogs(
+			picojson::value &result, std::string &searchStr,
+			std::string &searchStr2, std::string &ignoreStr, uint32_t length);
+
+	void getAuditLogs(
 			picojson::value &result, std::string &searchStr,
 			std::string &searchStr2, std::string &ignoreStr, uint32_t length);
 

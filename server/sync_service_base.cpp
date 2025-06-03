@@ -38,10 +38,10 @@ UTIL_TRACER_DECLARE(REDO_MANAGER);
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
-class PartitionRevisionMesage {
+class PartitionRevisionMessage {
 
 public:
-	PartitionRevisionMesage(PartitionRevision& revision) : revision_(revision) {}
+	PartitionRevisionMessage(PartitionRevision& revision) : revision_(revision) {}
 
 	void encode(EventByteOutStream& out) {
 		out << revision_.addr_;
@@ -528,15 +528,10 @@ bool SyncRequestInfo::getLogs(
 			<< ", offset=" << logIt.getOffset() << ", version=" << logIt.getLogVersion());
 		if (!logIt.checkExists(request_.startLsn_)) {
 			if (request_.syncMode_ == MODE_LONGTERM_SYNC || useLongSyncLog) {
-//				if (!isCheck) {
-//					GS_TRACE_CLUSTER_INFO(
-//						"Long term log find failed, pId=" << pId << ", SSN=" << sId << ", start Lsn=" << request_.startLsn_);
-//				}
 				GS_THROW_USER_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED,
 					"Long term log find failed, start Lsn=" << request_.startLsn_);
 			}
 			else {
-//				GS_TRACE_CLUSTER_INFO("Short term log find failed, pId=" << pId << ", SSN=" << sId << ", start Lsn=" << current);
 				GS_THROW_USER_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED,
 					"Short term log find failed, start Lsn=" << request_.startLsn_);
 			}
@@ -570,6 +565,55 @@ bool SyncRequestInfo::getLogs(
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
+
+
+bool SyncRequestInfo::getLogs(PartitionId pId, int64_t startLogVersion, int64_t startOffset, LogManager<MutexLocker>* logMgr) {
+	binaryLogRecords_.clear();
+	LogSequentialNumber lastLsn = 0;
+	std::unique_ptr<Log> log;
+	try {
+		LogSequentialNumber current = request_.startLsn_;
+		LogIterator<MutexLocker> logIt = logMgr->createXLogIterator(current);
+		if (startLogVersion == logIt.getLogVersion()) {
+			logIt.setOffset(startOffset);
+		}
+		GS_OUTPUT_SYNC2(pt_->getDumpLock(),
+			"GetLog start, pId=" << pId << ", startLsn=" << request_.startLsn_ << ", endLsn=" << request_.endLsn_
+			<< ", offset=" << logIt.getOffset() << ", version=" << logIt.getLogVersion());
+		try {
+			if (!logIt.checkExists(request_.startLsn_)) {
+				return false;
+			}
+		}
+		catch (std::exception& e) {
+			UTIL_TRACE_EXCEPTION_WARNING(
+				SYNC_SERVICE, e, "reason=" << GS_EXCEPTION_MESSAGE(e));
+			return false;
+		}
+		while (true) {
+			util::StackAllocator::Scope scope(logMgr->getAllocator());
+			log = logIt.next(false);
+			if (log == NULL) break;
+			log->encode(logMgr->getAllocator(), binaryLogRecords_);
+			lastLsn = log->getLsn();
+			if (log->getLsn() >= request_.endLsn_) {
+				break;
+			}
+		}
+		logIt.fin();
+		request_.endLsn_ = lastLsn;
+		request_.binaryLogSize_ = static_cast<uint32_t>(binaryLogRecords_.size());
+		GS_OUTPUT_SYNC2(pt_->getDumpLock(),
+			"GetLog end, pId=" << pId << ", startLsn=" << request_.startLsn_ << ", endLsn=" << request_.endLsn_
+			<< ", size=" << request_.binaryLogSize_ << ", offset=" << logIt.getOffset() << ", version=" << info.logVersion_);
+		return true;
+	}
+	catch (std::exception& e) {
+		request_.endLsn_ = lastLsn;
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
 
 /*!
 	@brief Gets Chunks
@@ -606,7 +650,7 @@ bool SyncRequestInfo::getChunks(
 			if (lastChunkGet) break;
 		}
 		GS_OUTPUT_SYNC2(
-			pt_->getDumpLock(), "GetChunk, pId=" << pId << ", chunkn num = " << request_.numChunk_ << ", lastChunkGet = " << (int)lastChunkGet);
+			pt_->getDumpLock(), "GetChunk, pId=" << pId << ", chunk num = " << request_.numChunk_ << ", lastChunkGet = " << (int)lastChunkGet);
 		if (lastChunkGet) {
 			LogManager<MutexLocker>& logManager = partition->logManager();
 			std::unique_ptr<Log> log;
@@ -1123,7 +1167,7 @@ void SyncManagerInfo::decode(EventByteInStream& in, const char8_t* bodyBuffer) {
 
 void SyncCheckEndInfo::decode(EventByteInStream& in, const char8_t*) {
 
-	PartitionRevisionMesage revision(ptRev_);
+	PartitionRevisionMessage revision(ptRev_);
 	revision.decode(in);
 	syncId_.decode(in);
 	int32_t tmpSyncMode;
@@ -1137,7 +1181,7 @@ void SyncCheckEndInfo::encode(EventByteOutStream& out) {
 		GS_THROW_USER_ERROR(GS_ERROR_SYNC_SERVICE_ENCODE_MESSAGE_FAILED, "pId=" << pId_);
 	}
 
-	PartitionRevisionMesage revision(context_->getPartitionRevision());
+	PartitionRevisionMessage revision(context_->getPartitionRevision());
 	revision.encode(out);
 	syncId_.encode(out);
 	out << static_cast<int32_t>(syncMode_);
@@ -1208,7 +1252,7 @@ void SyncRequestInfo::Request::encode(
 	EventByteOutStream& out, bool isOwner) {
 
 	out << syncMode_;
-	PartitionRevisionMesage revision(ptRev_);
+	PartitionRevisionMessage revision(ptRev_);
 	revision.encode(out);
 	requestInfo_->syncId_.encode(out);
 	requestInfo_->backupSyncId_.encode(out);
@@ -1239,7 +1283,7 @@ void SyncRequestInfo::Request::encode(
 void SyncRequestInfo::Request::decode(EventByteInStream& in) {
 
 	in >> syncMode_;
-	PartitionRevisionMesage revision(ptRev_);
+	PartitionRevisionMessage revision(ptRev_);
 	revision.decode(in);
 	requestInfo_->syncId_.decode(in);
 	requestInfo_->backupSyncId_.decode(in);
@@ -1257,7 +1301,7 @@ void SyncRequestInfo::Request::decode(EventByteInStream& in) {
 void SyncResponseInfo::Response::encode(EventByteOutStream& out) {
 
 	out << syncMode_;
-	PartitionRevisionMesage revision(ptRev_);
+	PartitionRevisionMessage revision(ptRev_);
 	revision.encode(out);
 	responseInfo_->syncId_.encode(out);
 	responseInfo_->backupSyncId_.encode(out);
@@ -1270,7 +1314,7 @@ void SyncResponseInfo::Response::encode(EventByteOutStream& out) {
 void SyncResponseInfo::Response::decode(EventByteInStream& in) {
 
 	in >> syncMode_;
-	PartitionRevisionMesage revision(ptRev_);
+	PartitionRevisionMessage revision(ptRev_);
 	revision.decode(in);
 	responseInfo_->syncId_.decode(in);
 	responseInfo_->backupSyncId_.decode(in);
@@ -1294,8 +1338,8 @@ void SyncHandler::removePartition(PartitionId pId) {
 
 void ShortTermSyncHandler::undoPartition(
 	util::StackAllocator& alloc, SyncContext* context, PartitionId pId) {
-	bool isStandy = clsMgr_->getStandbyInfo().isStandby();
-	if (!syncMgr_->isUndoCompleted(pId) && !isStandy) {
+	bool isStandby = clsMgr_->getStandbyInfo().isStandby();
+	if (!syncMgr_->isUndoCompleted(pId) && !isStandby) {
 		LogSequentialNumber prevLsn = pt_->getLSN(pId);
 		const size_t undoNum = partitionList_->partition(pId).undo(alloc);
 		if (undoNum > 0) {
@@ -1414,7 +1458,7 @@ void ShortTermSyncHandler::executeSyncRequest(
 		PartitionTable::PT_SYNC, PT_CHANGE_SYNC_START);
 
 	util::Set<NodeId> syncTargetNodeSet(alloc);
-	syncMgr_->setShortermSyncRequest(
+	syncMgr_->setShorttermSyncRequest(
 		context, syncRequestInfo, syncTargetNodeSet);
 	addCheckEndEvent(
 		ec, pId, alloc,
@@ -1450,7 +1494,7 @@ void ShortTermSyncHandler::executeSyncStart(EventContext& ec, Event& ev, Partiti
 	}
 	GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(ev.getType()) << ":START]", "");
 	context->setEvent(ev.getType());
-	syncMgr_->setShortermSyncStart(context, syncRequestInfo, senderNodeId);
+	syncMgr_->setShorttermSyncStart(context, syncRequestInfo, senderNodeId);
 	syncMgr_->checkRestored(pId);
 	addCheckEndEvent(ec, pId, alloc, MODE_SHORTTERM_SYNC, context, false);
 	sendResponse(ec, TXN_SHORTTERM_SYNC_START_ACK, pId, syncRequestInfo, syncResponseInfo, context, senderNodeId);
@@ -1732,7 +1776,7 @@ bool RedoManager::put(
 	catch (std::exception& e) {
 		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
 		util::NormalOStringStream oss;
-		oss << "Internal error orrcured  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
+		oss << "Internal error ocurred  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
 		restCxt.setError(WEBAPI_REDO_INVALID_REQUEST_ID, oss.str().c_str());
 		return false;
 	}
@@ -1785,7 +1829,7 @@ bool RedoManager::getStatus(PartitionId pId, std::string& uuidString, RequestId 
 	catch (std::exception& e) {
 		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
 		util::NormalOStringStream oss;
-		oss << "Internal error orrcured  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
+		oss << "Internal error ocurred  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
 		restCxt.setError(WEBAPI_REDO_INVALID_UUID, oss.str().c_str());
 		return false;
 	}
@@ -1806,7 +1850,7 @@ bool RedoManager::cancel(
 	catch (std::exception& e) {
 		UTIL_TRACE_EXCEPTION(REDO_MANAGER, e, "");
 		util::NormalOStringStream oss;
-		oss << "Internal error orrcured  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
+		oss << "Internal error ocurred  (pId=" << pId << ", uuid = " << uuidString << ", requestId = " << requestId << ")";
 		restCxt.setError(WEBAPI_REDO_INVALID_REQUEST_ID, oss.str().c_str());
 		return false;
 	}
@@ -1992,7 +2036,7 @@ void RedoContext::setException(std::exception& e, const char* str) {
 
 bool RedoContext::checkLsn() {
 	GS_TRACE_INFO(REDO_MANAGER, GS_TRACE_SYNC_REDO_OPERATION,
-		"Redo complete (reqeustId=" << requestId_ << ", startLsn = " << startLsn_ << ", endLsn = " << endLsn_ << ", elapsedMills=" << watch_.elapsedMillis() << ")");
+		"Redo complete (requestId=" << requestId_ << ", startLsn = " << startLsn_ << ", endLsn = " << endLsn_ << ", elapsedMills=" << watch_.elapsedMillis() << ")");
 	return true;
 }
 
@@ -2313,7 +2357,6 @@ bool RedoLogHandler::readLogFile(EventContext& ec, RedoContext& cxt, SyncRedoReq
 	}
 	cxt.isContinue_ = true;
 	Partition& partition = partitionList_->partition(cxt.partitionId_);
-	util::StackAllocator& alloc = ec.getAllocator();
 	util::XArray<uint8_t>& logList = syncRedoRequestInfo.binaryLogRecords_;
 	syncRedoRequestInfo.initLog();
 	try {
@@ -2326,7 +2369,7 @@ bool RedoLogHandler::readLogFile(EventContext& ec, RedoContext& cxt, SyncRedoReq
 		WALBuffer cpWALBuffer(cxt.partitionId_, cxt.logMgrStats_);
 
 		std::unique_ptr<MutexLocker> locker(UTIL_NEW MutexLocker());
-		LogManager<MutexLocker> logManager(partition.getConfig(), std::move(locker), alloc,
+		LogManager<MutexLocker> logManager(partition.getConfig(), std::move(locker), getLogStackAllocator(cxt.partitionId_),
 			xWALBuffer, cpWALBuffer,
 			cxt.logFilePathName_.c_str(), cxt.partitionId_, cxt.logMgrStats_);
 
@@ -2387,7 +2430,7 @@ bool RedoLogHandler::readLogFile(EventContext& ec, RedoContext& cxt, SyncRedoReq
 				continue;
 			}
 			actualLsn = currentLsn;
-			log->encode(alloc, logList);
+			log->encode(logManager.getAllocator(), logList);
 		}
 		logIt.fin();
 		if (logList.size() == 0) {
@@ -2417,7 +2460,7 @@ bool RedoLogHandler::redoLog(EventContext& ec, RedoContext& cxt, SyncRedoRequest
 	LogSequentialNumber endLsn = startLsn;
 	try {
 		syncMgr_->checkRestored(cxt.partitionId_);
-		partition.redoLogList(&alloc, REDO_MODE_ARCHIVE,
+		partition.redoLogList(&alloc, REDO_MODE_LONG_TERM_SYNC,
 			ec.getHandlerStartTime(), ec.getHandlerStartMonotonicTime(),
 			reinterpret_cast<uint8_t*>(syncRedoRequestInfo.binaryLogRecords_.data()),
 			syncRedoRequestInfo.binaryLogRecords_.size(),

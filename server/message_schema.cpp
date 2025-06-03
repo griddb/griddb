@@ -27,6 +27,7 @@
 
 const int32_t MessageSchema::DEFAULT_VERSION = 0;
 const int32_t MessageSchema::V4_1_VERSION = 1;
+const int32_t MessageSchema::V5_8_VERSION = 2;
 
 MessageSchema::MessageSchema(util::StackAllocator &alloc,
 	const DataStoreConfig &dsConfig, const char *,
@@ -197,6 +198,17 @@ void MessageSchema::validateRenameColumnSchema(util::ArrayByteInStream &in) {
 	in >> optionSize;
 }
 
+void MessageSchema::validateFixColumnSchema(util::ArrayByteInStream &in) {
+	int32_t optionSize;
+	in >> optionSize;
+
+	if (optionSize != 0) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_DS_DS_SCHEMA_INVALID,
+				"Invalid fix column option size (size=" << optionSize << ")");
+	}
+}
+
 MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 	const DataStoreConfig &dsConfig,
 	const char *containerName, util::ArrayByteInStream &in, int32_t featureVersion)
@@ -223,6 +235,9 @@ MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 				case RENAME_COLUMN:
 					isRenameColumn_ = true;
 					validateRenameColumnSchema(in);
+					break;
+				case FIX_COLUMN:
+					validateFixColumnSchema(in);
 					break;
 				default:
 					GS_THROW_USER_ERROR(
@@ -275,6 +290,9 @@ MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
 				case RENAME_COLUMN:
 					isRenameColumn_ = true;
 					validateRenameColumnSchema(in);
+					break;
+				case FIX_COLUMN:
+					validateFixColumnSchema(in);
 					break;
 				default:
 					GS_THROW_USER_ERROR(

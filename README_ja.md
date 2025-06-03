@@ -30,7 +30,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
     $ cd java_client
     $ ./make_source_for_mvn.sh
     $ mvn clean
-    $ mvn install
+    $ mvn package
 
 ### サーバの起動
     $ export GS_HOME=$PWD
@@ -129,6 +129,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [V5.5 Release Notes](docs/GridDB-5.5-CE-RELEASE_NOTES_ja.md)
   * [V5.6 Release Notes](docs/GridDB-5.6-CE-RELEASE_NOTES_ja.md)
   * [V5.7 Release Notes](docs/GridDB-5.7-CE-RELEASE_NOTES_ja.md)
+  * [V5.8 Release Notes](docs/GridDB-5.7-CE-RELEASE_NOTES_ja.md)
 
 ## クライアントとコネクタ
   Java以外のクライアント、APIもあります。

@@ -91,10 +91,14 @@ protected:
 		FuncTableByAggr(
 				const FuncTableByTypes &advance,
 				const FuncTableByTypes &merge,
-				const FuncTableByTypes &finish);
+				const FuncTableByTypes &finish,
+				const FuncTableByTypes &decrForward,
+				const FuncTableByTypes &decrBackward);
 		FuncTableByTypes advance_;
 		FuncTableByTypes merge_;
 		FuncTableByTypes finish_;
+		FuncTableByTypes decrForward_;
+		FuncTableByTypes decrBackward_;
 	};
 
 	struct BasicFuncTable {
@@ -121,6 +125,11 @@ protected:
 	static FactoryFunc resolveFactoryFunc(
 			ExprFactoryContext &cxt, const AggrFuncTable &table,
 			const ExprSpec &spec);
+
+	static const FuncTableByTypes& resolveAggregationSubTable(
+			ExprFactoryContext &cxt, const FuncTableByAggr &baseTable);
+	static const FuncTableByTypes& resolveDecrementalSubTable(
+			ExprFactoryContext &cxt, const FuncTableByAggr &baseTable);
 
 	static size_t getArgCountVariant(
 			ExprFactoryContext &cxt, const ExprSpec &spec);
@@ -277,8 +286,13 @@ struct SQLExprs::ExprSpecBase {
 					(N == 0 ? T1 :
 					(N == 1 ? T2 :
 					static_cast<TupleColumnType>(TupleTypes::TYPE_NULL)));
+			typedef SQLValues::TypeUtils::Traits<COLUMN_TYPE> TraitsType;
+
 			enum {
-				TYPE_EMPTY = (COLUMN_TYPE == TupleTypes::TYPE_NULL)
+				TYPE_EMPTY = (COLUMN_TYPE == TupleTypes::TYPE_NULL),
+				NON_NUMERIC = (!TYPE_EMPTY &&
+						COLUMN_TYPE != TupleTypes::TYPE_NUMERIC &&
+						!TraitsType::FOR_NUMERIC_EXPLICIT)
 			};
 
 			static const TupleColumnType EXPANDED_COLUMN_TYPE =
@@ -306,6 +320,8 @@ struct SQLExprs::ExprSpecBase {
 					(Flags & ExprSpec::FLAG_NON_NULLABLE) == 0),
 			TYPE_NULLABLE =
 					(!TYPE_NULLABLE_ANY && (Flags & ExprSpec::FLAG_EXACT) == 0),
+			TYPE_NON_NUMERIC =
+					(TypeAt<0>::NON_NUMERIC || TypeAt<1>::NON_NUMERIC),
 			ANY_PROMOTABLE =
 					(TYPE_ANY && (Flags & ExprSpec::FLAG_PROMOTABLE) != 0),
 			ARG_CHECK = ((Flags & ExprSpec::FLAG_EXACT) != 0)
@@ -323,7 +339,7 @@ struct SQLExprs::ExprSpecBase {
 	template<
 			typename In1 = In<>, typename In2 = In<>, typename In3 = In<>,
 			typename In4 = In<>, typename In5 = In<>, typename In6 = In<>,
-			typename In7 = In<> >
+			typename In7 = In<>, typename In8 = In<> >
 	struct InList {
 		template<size_t N>
 		struct At : public util::Conditional<
@@ -333,8 +349,9 @@ struct SQLExprs::ExprSpecBase {
 				N == 3, In4, typename util::Conditional<
 				N == 4, In5, typename util::Conditional<
 				N == 5, In6, typename util::Conditional<
-				N == 6, In7,
-				void>::Type>::Type>::Type>::Type>::Type>::Type>::Type {
+				N == 6, In7, typename util::Conditional<
+				N == 7, In8,
+				void>::Type>::Type>::Type>::Type>::Type>::Type>::Type>::Type {
 		};
 		template<size_t N> static void getAll(ExprSpec::In (&dest)[N]) {
 			const ExprSpec::In src[ExprSpec::IN_LIST_SIZE] = {
@@ -344,7 +361,8 @@ struct SQLExprs::ExprSpecBase {
 				At<3>::create(),
 				At<4>::create(),
 				At<5>::create(),
-				At<6>::create()
+				At<6>::create(),
+				At<7>::create()
 			};
 			UTIL_STATIC_ASSERT((N <= sizeof(src) / sizeof(*src)));
 			for (size_t i = 0; i < N; i++) {
@@ -360,7 +378,8 @@ struct SQLExprs::ExprSpecBase {
 					typename M::template BaseType< At<3> >::Type,
 					typename M::template BaseType< At<4> >::Type,
 					typename M::template BaseType< At<5> >::Type,
-					typename M::template BaseType< At<6> >::Type> Type;
+					typename M::template BaseType< At<6> >::Type,
+					typename M::template BaseType< At<7> >::Type> Type;
 		};
 		template<typename M>
 		struct IndexOf {
@@ -372,7 +391,8 @@ struct SQLExprs::ExprSpecBase {
 						(M::template Type< At<3> >::VALUE) ? 3 :
 						(M::template Type< At<4> >::VALUE) ? 4 :
 						(M::template Type< At<5> >::VALUE) ? 5 :
-						(M::template Type< At<6> >::VALUE) ? 6 : 7
+						(M::template Type< At<6> >::VALUE) ? 6 :
+						(M::template Type< At<7> >::VALUE) ? 7 : 8
 			};
 		};
 		template<typename M>
@@ -438,6 +458,13 @@ struct SQLExprs::ExprSpecBase {
 				};
 			};
 		};
+		struct NonNumericMatch {
+			template<typename I> struct Type {
+				enum {
+					VALUE = I::TYPE_NON_NUMERIC
+				};
+			};
+		};
 		typedef typename ModOf<NullableInvMod>::Type NullableInv;
 		enum {
 			MIN_COUNT = IndexOf<EmptyOrOptionalMatch>::VALUE,
@@ -446,7 +473,8 @@ struct SQLExprs::ExprSpecBase {
 			MULTI_COLUMN_TYPE2 = MatchWith<MultiMatch2>::VALUE,
 			IN_NULLABLE_ANY = MatchWith<NullableAnyTypeMatch>::VALUE,
 			IN_ANY_PROMOTABLE = MatchWith<AnyPromotableMatch>::VALUE,
-			IN_ARG_CHECKING = MatchWith<ArgCheckMatch>::VALUE
+			IN_ARG_CHECKING = MatchWith<ArgCheckMatch>::VALUE,
+			IN_NON_NUMERIC = MatchWith<NonNumericMatch>::VALUE
 		};
 	};
 
@@ -486,7 +514,15 @@ struct SQLExprs::ExprSpecBase {
 			RESULT_NULLABLE =
 					!RESULT_NON_NULLABLE && (IN_NULLABLE_ANY || ((TYPE_FLAGS & (
 							ExprSpec::FLAG_NULLABLE |
-							ExprSpec::FLAG_INHERIT_NULLABLE1)) != 0))
+							ExprSpec::FLAG_INHERIT_NULLABLE1)) != 0)),
+			AGGR_IN_NON_NUMERIC = AggrListType::IN_NON_NUMERIC,
+			AGGR_DECREMENTAL = (
+					(TYPE_FLAGS & ExprSpec::FLAG_WINDOW) != 0 &&
+					(TYPE_FLAGS & ExprSpec::FLAG_COMP_SENSITIVE) == 0 &&
+					!AGGR_IN_NON_NUMERIC),
+			TYPE_AUTO_FLAGS =
+					(AGGR_DECREMENTAL ? ExprSpec::FLAG_AGGR_DECREMENTAL : 0),
+			TYPE_FULL_FLAGS = (TYPE_FLAGS | TYPE_AUTO_FLAGS),
 		};
 
 		static ExprSpec create() {
@@ -494,7 +530,7 @@ struct SQLExprs::ExprSpecBase {
 			InListType::getAll(spec.inList_);
 			AggrListType::getAll(spec.aggrList_);
 			spec.outType_ = RESULT_TYPE;
-			spec.flags_ = TYPE_FLAGS;
+			spec.flags_ = TYPE_FULL_FLAGS;
 			spec.argCounts_ =
 					std::pair<int32_t, int32_t>(IN_MIN_COUNT, IN_MAX_COUNT);
 			spec.distinctExprType_ = DISTINCT_TYPE;
@@ -524,6 +560,7 @@ struct SQLExprs::ExprSpecBase {
 
 struct SQLExprs::ExprUtils {
 	typedef SQLValues::ValueContext ValueContext;
+	typedef ExprSpec::DecrementalType DecrementalType;
 
 	template<typename T, bool Initializable> struct ResultWriter;
 	template<typename T> struct AggregationManipulator;
@@ -535,6 +572,8 @@ struct SQLExprs::ExprUtils {
 	class CustomFunctionContext;
 	template<typename Alloc, typename W, typename C>
 	class AggregationFunctionContext;
+	template<typename Alloc, typename W, typename C, typename F>
+	class DecrementalFunctionContext;
 
 	template<typename Enabled> class BaseAllocatorScope;
 	template<TupleColumnType T, typename Nullable> struct ArgHolder;
@@ -546,7 +585,8 @@ struct SQLExprs::ExprUtils {
 	struct FunctorPolicy;
 
 	template<size_t M = 0> struct VariantTraits;
-	template<size_t M, AggregationPhase Phase> struct AggregationVariantTraits;
+	template<size_t M, AggregationPhase Phase, DecrementalType D>
+	struct AggregationVariantTraits;
 
 	template<ExprType T, typename S, typename V> struct FunctorTraits;
 
@@ -794,7 +834,7 @@ private:
 template<typename Alloc, typename W, typename C>
 class SQLExprs::ExprUtils::AggregationFunctionContext :
 		public SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W, C> {
-private:
+protected:
 	template<typename T>
 	struct TypeTagOf {
 		static const TupleColumnType COLUMN_TYPE =
@@ -862,7 +902,7 @@ public:
 				typename TypeTagOf<T>::Type>(aggrColumns_[N]);
 	}
 
-	template<size_t N> bool checkNullAggrValue() {
+	template<size_t N, typename T> bool checkNullAggrValue() {
 		return isAggregationNull(aggrColumns_[N]);
 	}
 
@@ -871,6 +911,11 @@ public:
 				NormalFunctionContext::getBase().getWindowState();
 		assert(state != NULL);
 		return state->partitionValueCount_;
+	}
+
+protected:
+	const SummaryColumn* getAggrColumns() {
+		return aggrColumns_;
 	}
 
 private:
@@ -925,6 +970,62 @@ private:
 	}
 
 	const SummaryColumn *aggrColumns_;
+};
+
+template<typename Alloc, typename W, typename C, typename F>
+class SQLExprs::ExprUtils::DecrementalFunctionContext :
+		public SQLExprs::ExprUtils::AggregationFunctionContext<Alloc, W, C> {
+private:
+	typedef AggregationFunctionContext<Alloc, W, C> AggrContext;
+
+	template<typename T>
+	struct AggrTagOf {
+		typedef typename AggrContext::template TypeTagOf<T>::Type Type;
+	};
+
+public:
+	explicit DecrementalFunctionContext(
+			const std::pair<
+					ExprContext*, const AggregationExpressionBase*> &src);
+
+	DecrementalFunctionContext& getFunctionContext() {
+		return *this;
+	}
+
+	template<size_t N, typename T, typename Promo>
+	void setAggrValue(const T &value, const Promo&) {
+		UTIL_STATIC_ASSERT(!Promo::VALUE);
+		NormalFunctionContext::getBase().template setDecrementalValueBy<
+				typename AggrTagOf<T>::Type, F>(getAggrColumns()[N], value);
+	}
+
+	template<size_t N, typename T, typename Checked> void addAggrValue(
+			const T &value) {
+		if (Checked::VALUE && F::VALUE) {
+			typedef typename AggregationManipulator<T>::RetType RetType;
+			AggregationManipulator<T>::add(
+					this, AggrContext::template getAggrValue<N, RetType>(),
+					value, Checked());
+		}
+		NormalFunctionContext::getBase().template addDecrementalValueBy<
+				typename AggrTagOf<T>::Type, F>(getAggrColumns()[N], value);
+	}
+
+	template<size_t N, typename T> void incrementAggrValue() {
+		NormalFunctionContext::getBase().template incrementDecrementalValueBy<
+				typename AggrTagOf<T>::Type, F>(getAggrColumns()[N]);
+	}
+
+	template<size_t N, typename T> bool checkNullAggrValue() {
+		ExprContext &base = NormalFunctionContext::getBase();
+		return base.template checkDecrementalCounterAs<
+				typename AggrTagOf<T>::Type, F>(getAggrColumns()[N]);
+	}
+
+private:
+	const SummaryColumn* getAggrColumns() {
+		return AggrContext::getAggrColumns();
+	}
 };
 
 template<typename Enabled>
@@ -1312,6 +1413,7 @@ template<size_t M>
 struct SQLExprs::ExprUtils::VariantTraits {
 	static const size_t MULTI_COLUMN_TYPE_ORDINAL = M;
 	static const AggregationPhase AGGR_PHASE = SQLType::AGG_PHASE_ADVANCE_PIPE;
+	static const DecrementalType DECREMENTAL_TYPE = ExprSpec::DECREMENTAL_NONE;
 
 	template<typename S, typename A0, typename A1, typename A2>
 	struct AggregationValuesResolver {
@@ -1319,10 +1421,14 @@ struct SQLExprs::ExprUtils::VariantTraits {
 	};
 };
 
-template<size_t M, SQLType::AggregationPhase Phase>
+template<
+		size_t M,
+		SQLType::AggregationPhase Phase,
+		SQLExprs::ExprSpec::DecrementalType D>
 struct SQLExprs::ExprUtils::AggregationVariantTraits {
 	static const size_t MULTI_COLUMN_TYPE_ORDINAL = M;
 	static const AggregationPhase AGGR_PHASE = Phase;
+	static const DecrementalType DECREMENTAL_TYPE = D;
 
 	template<typename S, typename A0, typename A1, typename A2>
 	struct AggregationValuesResolver {
@@ -1339,9 +1445,14 @@ struct SQLExprs::ExprUtils::FunctorTraits {
 			util::IsSame<V, void>::VALUE, VariantTraits<>, V>::Type VariantType;
 	static const size_t MULTI_COLUMN_TYPE_ORDINAL =
 			VariantType::MULTI_COLUMN_TYPE_ORDINAL;
+	static const DecrementalType DECREMENTAL_TYPE =
+			VariantType::DECREMENTAL_TYPE;
 
 	enum {
 		FOR_AGGR = (SpecType::AggrListType::MIN_COUNT > 0),
+		FOR_DECREMENTAL = (DECREMENTAL_TYPE != ExprSpec::DECREMENTAL_NONE),
+		FOR_DECREMENTAL_FORWARD =
+				(DECREMENTAL_TYPE == ExprSpec::DECREMENTAL_FORWARD),
 		FOR_COMP = (FOR_AGGR ?
 				!!SpecType::IN_NULLABLE_ANY :
 				(SpecType::IN_ANY_PROMOTABLE && SpecType::IN_MIN_COUNT > 1)),
@@ -1462,6 +1573,9 @@ struct SQLExprs::ExprUtils::FunctorTraits {
 			FOR_AGGR,
 			AggregationExpressionBase,
 			NonAggrSourceExpressionType>::Type SourceExpressionType;
+
+	typedef typename util::BoolType<
+			FOR_DECREMENTAL_FORWARD>::Result ForwardDecrementalType;
 };
 
 template<typename F, typename Traits>
@@ -1507,12 +1621,26 @@ private:
 			Traits::FOR_COMP,
 			BasicComparatorRef, EmptyComparatorRef>::Type ComparatorType;
 
+	template<bool D, typename G = typename Traits::ForwardDecrementalType>
+	struct AggregationFunctionContextOf {
+		typedef DecrementalFunctionContext<
+				AllocatorType, RetWriterType, ComparatorType, G> Type;
+	};
+
+	template<typename G>
+	struct AggregationFunctionContextOf<false, G> {
+		typedef AggregationFunctionContext<
+				AllocatorType, RetWriterType, ComparatorType> Type;
+	};
+
+	typedef typename AggregationFunctionContextOf<
+			Traits::FOR_DECREMENTAL>::Type BaseAggregationFunctionContext;
 	typedef typename util::Conditional<
 			Traits::FOR_AGGR,
-			AggregationFunctionContext<
-					AllocatorType, RetWriterType, ComparatorType>,
+			BaseAggregationFunctionContext,
 			CustomFunctionContext<AllocatorType, RetWriterType, ComparatorType>
 			>::Type BaseFunctionContext;
+
 	typedef typename util::Conditional<
 			CONTEXT_CUSTOMIZED,
 			BaseFunctionContext, NormalFunctionContext>::Type FunctionContext;
@@ -1662,6 +1790,7 @@ protected:
 	typedef typename Traits::template ArgTraits<4>::Type A4;
 	typedef typename Traits::template ArgTraits<5>::Type A5;
 	typedef typename Traits::template ArgTraits<6>::Type A6;
+	typedef typename Traits::template ArgTraits<7>::Type A7;
 };
 
 template<typename F, typename Traits>
@@ -1800,6 +1929,30 @@ class SQLExprs::BasicExpression<F, 7, Traits> :
 					typename Base::A2(v2)(), typename Base::A3(v3)(),
 					typename Base::A4(v4)(), typename Base::A5(v5)(),
 					typename Base::A6(v6)()));
+		}
+		return TupleValue();
+	}
+};
+
+template<typename F, typename Traits>
+class SQLExprs::BasicExpression<F, 8, Traits> :
+		public SQLExprs::BasicExpressionBase<F, Traits> {
+	typedef BasicExpressionBase<F, Traits> Base;
+	virtual TupleValue eval(ExprContext &cxt) const {
+		for (typename Base::Evaluator e(cxt, *this);;) {
+			const TupleValue &v0 = e.top().eval(cxt); if (!e.check(v0)) break;
+			const TupleValue &v1 = e.next().eval(cxt); if (!e.check(v1)) break;
+			const TupleValue &v2 = e.next().eval(cxt); if (!e.check(v2)) break;
+			const TupleValue &v3 = e.next().eval(cxt); if (!e.check(v3)) break;
+			const TupleValue &v4 = e.next().eval(cxt); if (!e.check(v4)) break;
+			const TupleValue &v5 = e.next().eval(cxt); if (!e.check(v5)) break;
+			const TupleValue &v6 = e.next().eval(cxt); if (!e.check(v6)) break;
+			const TupleValue &v7 = e.next().eval(cxt); if (!e.check(v7)) break;
+			return e(e.func()(e.context(),
+					typename Base::A0(v0)(), typename Base::A1(v1)(),
+					typename Base::A2(v2)(), typename Base::A3(v3)(),
+					typename Base::A4(v4)(), typename Base::A5(v5)(),
+					typename Base::A6(v6)(), typename Base::A7(v7)()));
 		}
 		return TupleValue();
 	}
@@ -2024,6 +2177,8 @@ protected:
 	}
 
 private:
+	typedef ExprSpec::DecrementalType DecrementalType;
+
 	template<ExprType T, typename F>
 	static Expression& create(
 			ExprFactoryContext &cxt, const ExprCode &code) {
@@ -2035,7 +2190,7 @@ private:
 	static const AggrFuncTable& resolveTable() {
 		static const AggrFuncTable table(createTable<T, F>());
 		return table;
-	};
+	}
 
 	template<ExprType T, typename F>
 	static AggrFuncTable createTable() {
@@ -2043,22 +2198,46 @@ private:
 		return AggrFuncTable(FuncTableByAggr(
 				createSubTable<T, typename F::Advance, 0>(),
 				createSubTable<T, typename F::Merge, 1>(),
-				createSubTable<T, typename F::Finish, 2>()), checker);
-	};
+				createSubTable<T, typename F::Finish, 2>(),
+				createDecrementalSubTable<T, F, true>(),
+				createDecrementalSubTable<T, F, false>()), checker);
+	}
+
+	template<ExprType T, typename F, bool Forward>
+	static FuncTableByTypes createDecrementalSubTable() {
+		typedef typename SpecOf<S, T>::SpecType SpecType;
+
+		const size_t phase = 0;
+		const DecrementalType decrBase = (Forward ?
+				ExprSpec::DECREMENTAL_FORWARD :
+				ExprSpec::DECREMENTAL_BACKWARD);
+		const DecrementalType decr = (SpecType::AGGR_DECREMENTAL ?
+				decrBase : ExprSpec::DECREMENTAL_NONE);
+		return createSubTableDetail<T, typename F::Advance, phase, decr>();
+	}
 
 	template<ExprType T, typename G, size_t Phase>
 	static FuncTableByTypes createSubTable() {
-		typedef typename util::BoolType<
-				(!util::IsSame<G, void>::VALUE)>::Result Available;
+		const DecrementalType decr = ExprSpec::DECREMENTAL_NONE;
+		return createSubTableDetail<T, G, Phase, decr>();
+	}
+
+	template<ExprType T, typename G, size_t Phase, DecrementalType D>
+	static FuncTableByTypes createSubTableDetail() {
+		typedef typename SpecOf<S, T>::SpecType SpecType;
+
+		const bool available = (!util::IsSame<G, void>::VALUE);
+		typedef typename util::BoolType<available>::Result Available;
+
 		UTIL_STATIC_ASSERT(Available::VALUE || Phase == 2 ||
-				(Phase == 1 && (SpecOf<S, T>::SpecType::TYPE_FLAGS & (
+				(Phase == 1 && (SpecType::TYPE_FLAGS & (
 						SQLExprs::ExprSpec::FLAG_WINDOW_ONLY |
 						SQLExprs::ExprSpec::FLAG_PSEUDO_WINDOW)) != 0));
 
 		const FactoryFunc list[] = {
-			createFactoryFunc<T, G, Phase, 0>(Available()),
-			createFactoryFunc<T, G, Phase, 1>(Available()),
-			createFactoryFunc<T, G, Phase, 2>(Available())
+			createFactoryFunc<T, G, Phase, 0, D>(Available()),
+			createFactoryFunc<T, G, Phase, 1, D>(Available()),
+			createFactoryFunc<T, G, Phase, 2, D>(Available())
 		};
 		return FuncTableByTypes(list);
 	}
@@ -2075,7 +2254,8 @@ private:
 	template<ExprType T, typename F>
 	static FactoryFunc createCheckerFuncDetail(const util::TrueType&) {
 		typedef typename F::Checker CheckerType;
-		return createFactoryFunc<T, CheckerType, 0, 0>(util::TrueType());
+		const DecrementalType decr = ExprSpec::DECREMENTAL_NONE;
+		return createFactoryFunc<T, CheckerType, 0, 0, decr>(util::TrueType());
 	}
 
 	template<ExprType, typename>
@@ -2083,7 +2263,7 @@ private:
 		return FactoryFunc();
 	}
 
-	template<ExprType T, typename F, size_t Phase, size_t M>
+	template<ExprType T, typename F, size_t Phase, size_t M, DecrementalType D>
 	static FactoryFunc createFactoryFunc(const util::TrueType&) {
 		typedef typename S::template Spec<T>::Type SpecType;
 
@@ -2095,7 +2275,7 @@ private:
 				Phase == 2 ? SQLType::AGG_PHASE_MERGE_FINISH :
 				SQLType::AGG_PHASE_ADVANCE_PIPE;
 		typedef ExprUtils::AggregationVariantTraits<
-				multiColumnTypeOrdinal, aggrPhase> VariantTraitsType;
+				multiColumnTypeOrdinal, aggrPhase, D> VariantTraitsType;
 		typedef typename ExprUtils::FunctorTraits<
 				T, S, VariantTraitsType> Traits;
 
@@ -2113,7 +2293,7 @@ private:
 		return &createDirectCustom<Expr>;
 	}
 
-	template<ExprType, typename, size_t, size_t>
+	template<ExprType, typename, size_t, size_t, DecrementalType>
 	static FactoryFunc createFactoryFunc(const util::FalseType&) {
 		return FactoryFunc();
 	}
@@ -2370,6 +2550,14 @@ inline SQLExprs::ExprUtils::AggregationFunctionContext<
 		const std::pair<ExprContext*, const AggregationExpressionBase*> &src) :
 		CustomFunctionContext<Alloc, W, C>(src),
 		aggrColumns_(src.second->getAggregationColumns()) {
+}
+
+
+template<typename Alloc, typename W, typename C, typename F>
+inline SQLExprs::ExprUtils::DecrementalFunctionContext<
+		Alloc, W, C, F>::DecrementalFunctionContext(
+		const std::pair<ExprContext*, const AggregationExpressionBase*> &src) :
+		AggregationFunctionContext<Alloc, W, C>(src) {
 }
 
 

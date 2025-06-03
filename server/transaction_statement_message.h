@@ -192,6 +192,8 @@ struct StatementMessage {
 		static const OptionType PRAGMA_LIST = 14001;
 
 		static const OptionType LOCK_CONFLICT_START_TIME = 15001;
+		static const OptionType SITE_OWNER_ADDRESS = 15002;
+		static const OptionType HANDLING_SUSPENDED = 15003;
 	};
 
 	/*!
@@ -411,6 +413,14 @@ struct StatementMessage {
 			public PrimitiveOptionCoder<EventMonotonicTime, -1, C> {
 	};
 
+	template<int C> struct OptionCoder<Options::SITE_OWNER_ADDRESS, C> :
+		public CustomOptionCoder<NodeAddress, C> {
+	};
+
+	template<int C> struct OptionCoder<Options::HANDLING_SUSPENDED, C> :
+			public PrimitiveOptionCoder<bool, false, C> {
+	};
+
 	static bool isUpdateStatement(EventType stmtType);
 };
 
@@ -440,6 +450,8 @@ private:
 			T == REPLICATION_LOG2 ||
 			T == REPLICATION_ACK2 ||
 			T == UPDATE_DATA_STORE_STATUS ||
+			T == TXN_SITE_REPLICATION_REDO_ASYNC ||
+			T == TXN_SITE_REPLICATION_REDO_SEMISYNC ||
 			T == UPDATE_CONTAINER_STATUS ?
 			FixedTypes::BASIC :
 
@@ -1281,6 +1293,12 @@ inline bool StatementMessage::OptionTypeSwitcher<
 	case Options::LOCK_CONFLICT_START_TIME:
 		action.template opType<Options::LOCK_CONFLICT_START_TIME>();
 		break;
+	case Options::SITE_OWNER_ADDRESS:
+		action.template opType<Options::SITE_OWNER_ADDRESS>();
+		break;
+	case Options::HANDLING_SUSPENDED:
+		action.template opType<Options::HANDLING_SUSPENDED>();
+		break;
 	default:
 		return false;
 	}
@@ -1582,6 +1600,12 @@ inline bool StatementMessage::EventTypeSwitcher::switchByEventType(
 		break;
 	case REPLICATION_ACK2:
 		action.template opEventType<REPLICATION_ACK2>();
+		break;
+	case TXN_SITE_REPLICATION_REDO_ASYNC:
+		action.template opEventType<TXN_SITE_REPLICATION_REDO_ASYNC>();
+		break;
+	case TXN_SITE_REPLICATION_REDO_SEMISYNC:
+		action.template opEventType<TXN_SITE_REPLICATION_REDO_SEMISYNC>();
 		break;
 	default:
 		return false;
@@ -2157,6 +2181,28 @@ StatementMessage::CustomOptionCoder<
 	}
 	return value;
 }
+
+template<>
+template<typename S>
+inline void StatementMessage::CustomOptionCoder<NodeAddress, 0>::encode(
+	S& out, const ValueType& value) const {
+	out << value.address_;
+	out << value.port_;
+}
+
+template<>
+template<typename S>
+inline NodeAddress StatementMessage::CustomOptionCoder<NodeAddress, 0>::decode(
+	S& in, util::StackAllocator& alloc) const {
+	UNUSED_VARIABLE(alloc);
+
+	NodeAddress nodeAddress;
+	in >> nodeAddress.address_;
+	in >> nodeAddress.port_;
+	return nodeAddress;
+}
+
+
 
 /*!
 	@brief Checks if UPDATE statement is requested
