@@ -12,6 +12,10 @@ The main changes in GridDB CE version 5.8 are as follows:
 
     Supported moving average calculation for SQL analytic functions. And improved the accuracy of date arithmetic functions.
 
+- Python NoSQL Interface Enhancements
+
+    Provided Python NoSQL Interface supported additional functionalities like accessing partitioning table. It is developed using GridDB Java Client, [JPype](https://github.com/jpype-project/jpype) and [Apache Arrow](https://arrow.apache.org/).
+
 ---
 
 ## SQL Optimization Enhancements
@@ -123,4 +127,9 @@ And The following functions now support calculations with microsecond and nanose
   * TIMESTAMPADD(time_unit, timestamp, duration)/TIMESTAMPDIFF(time_unit, timestamp1, timestamp2)
   Note: We have also added TIMESTAMP_ADD()/TIMESTAMP_DIFF(), which have the same names as the SQL functions.
 ```
+
+## Python NoSQL Interface Enhancements
+
+Please refer to the following URL.
+- https://github.com/griddb/python_api
 
