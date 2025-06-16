@@ -14,6 +14,10 @@ GridDB CE V5.8の主な変更点は以下のとおりです。
 
     日付演算機能の精度向上：現状のSQLによる日時型演算機能の一部で行えなかった、マイクロ秒・ナノ秒精度の演算が可能となりました。
 
+- Python API (NoSQLインタフェース)の機能強化
+
+    パーティショニングされたテーブルへのアクセスなど、従来のPythonクライアントではサポートされていなかった機能を利用可能とするPython API (NoSQL) インターフェースを提供します。これらの機能は、JPype (OSS) を利用してGridDB Java APIを経由し、サーバへの操作を実現します。また、大量データ操作を高速化するため、Apache Arrow (OSS) を活用したインターフェースを提供します。
+
 ---
 
 ## SQL最適化の強化
@@ -124,4 +128,9 @@ SQLおよびTQLに以下の関数を追加しました。
   * TIMESTAMPADD(time_unit, timestamp, duration)/TIMESTAMPDIFF(time_unit, timestamp1, timestamp2)
   ※ SQLの関数と同名のTIMESTAMP_ADD()/TIMESTAMP_DIFF()も追加しました。
 ```
+## Python API (NoSQLインタフェース)の機能強化
+
+以下をご参照ください。
+- https://github.com/griddb/python_client
+
 
