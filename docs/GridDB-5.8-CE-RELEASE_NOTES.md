@@ -131,5 +131,5 @@ And The following functions now support calculations with microsecond and nanose
 ## Python NoSQL Interface Enhancements
 
 Please refer to the following URL.
-- https://github.com/griddb/python_api
+- https://github.com/griddb/python_client
 
