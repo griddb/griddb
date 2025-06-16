@@ -131,6 +131,6 @@ SQLおよびTQLに以下の関数を追加しました。
 ## Python API (NoSQLインタフェース)の機能強化
 
 以下をご参照ください。
-- https://github.com/griddb/python_client
+- https://github.com/griddb/python_client/blob/master/README_ja.md
 
 
