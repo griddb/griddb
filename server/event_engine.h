@@ -36,6 +36,12 @@ struct NodeDescriptor;
 */
 class EventEngine {
 public:
+        template<class Arg1, class Arg2, class Result >
+        struct binary_function {
+            using first_argument_type = Arg1;
+            using second_argument_type = Arg2;
+            using result_type = Result;
+        };
 	friend struct NodeDescriptor;
 
 	struct Config;
@@ -1131,7 +1137,7 @@ public:
 	void releaseTimeMap(TimeMap *&map);
 
 	struct SocketAddressLess :
-			public std::binary_function<util::SocketAddress, util::SocketAddress, bool> {
+			public binary_function<util::SocketAddress, util::SocketAddress, bool> {
 		bool operator()(
 				const util::SocketAddress &left,
 				const util::SocketAddress &right) const;
@@ -1685,7 +1691,7 @@ private:
 	};
 
 	struct ActiveEntryLess :
-			public std::binary_function<ActiveEntry, ActiveEntry, bool> {
+			public binary_function<ActiveEntry, ActiveEntry, bool> {
 		bool operator()(
 				const ActiveEntry &left, const ActiveEntry &right) const;
 	};
