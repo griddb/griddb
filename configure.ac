@@ -61,5 +61,12 @@ AS_IF([test x$enable_system_libs = xyes], [
   PKG_CHECK_MODULES([ZSTD], [libzstd], [ AM_CONDITIONAL([USE_SYSTEM_ZSTD], true) ], [true])
 ])
 
+AM_CONDITIONAL([USE_SYSTEM_MSGPACK], false)
+AC_LANG_PUSH([C++])
+AS_IF([test x$enable_system_libs = xyes], [
+  AC_CHECK_HEADERS([msgpack.hpp], [ AM_CONDITIONAL([USE_SYSTEM_MSGPACK], true) ])
+])
+AC_LANG_POP([C++])
+
 AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT

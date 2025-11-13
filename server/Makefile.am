@@ -389,14 +389,12 @@ $(sqlitedebugopt) \
 NEWSQL_LDADD = \
 $(QP_LDADD) \
 $(utildir)/libutil.a \
-$(libdir)/MessagePack/libmsgpack.a \
 -lpthread -lrt -ldl -lstdc++ -lz \
 $(sqliteworkdir)/libsqlite3.a
 
 NEWSQL_INCLUDES = \
 -I$(srcdir) \
 -I$(utildir) \
--I$(libdir)/MessagePack/include \
 -I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
 -I$(libdir)/fletcher32_simd \
@@ -435,6 +433,12 @@ NEWSQL_CPPFLAGS += @ZSTD_CFLAGS@
 else
 NEWSQL_LDADD += $(libdir)/zstd/lib/libzstd.a
 NEWSQL_INCLUDES += -I$(libdir)/zstd/lib
+endif
+
+if USE_SYSTEM_MSGPACK
+else
+NEWSQL_LDADD += $(libdir)/MessagePack/libmsgpack.a
+NEWSQL_INCLUDES += -I$(libdir)/MessagePack/include
 endif
 
 gsserver_SOURCES = $(NEWSQL_SOURCES)
