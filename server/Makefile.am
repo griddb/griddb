@@ -228,16 +228,6 @@ NEWSQL_SOURCES = \
 $(QP_SOURCES)\
 $(libdir)/ebb/ebb_request_parser.c \
 $(libdir)/sha2/sha2.c \
-$(libdir)/uuid/uuid/clear.c \
-$(libdir)/uuid/uuid/compare.c \
-$(libdir)/uuid/uuid/copy.c \
-$(libdir)/uuid/uuid/gen_uuid.c \
-$(libdir)/uuid/uuid/isnull.c \
-$(libdir)/uuid/uuid/pack.c \
-$(libdir)/uuid/uuid/parse.c \
-$(libdir)/uuid/uuid/unpack.c \
-$(libdir)/uuid/uuid/unparse.c \
-$(libdir)/uuid/uuid/uuid_time.c \
 $(srcdir)/zlib_utils.cpp \
 $(srcdir)/array_processor.cpp \
 $(srcdir)/authentication.cpp \
@@ -412,7 +402,6 @@ NEWSQL_INCLUDES = \
 -I$(libdir)/ebb \
 -I$(libdir)/fletcher32_simd \
 -I$(libdir)/sha2 \
--I$(libdir)/uuid \
 -I$(srcdir)/tr-cpp \
 -I$(sqliteworkdir) \
 -I$(sqlitedir)/src \
@@ -421,6 +410,26 @@ NEWSQL_INCLUDES = \
 
 NEWSQL_LDFLAG = \
 -rdynamic
+
+if USE_SYSTEM_UUID
+NEWSQL_LDADD += @UUID_LIBS@
+NEWSQL_CPPFLAGS += @UUID_CFLAGS@
+else
+NEWSQL_SOURCES += \
+$(libdir)/uuid/uuid/clear.c \
+$(libdir)/uuid/uuid/compare.c \
+$(libdir)/uuid/uuid/copy.c \
+$(libdir)/uuid/uuid/gen_uuid.c \
+$(libdir)/uuid/uuid/isnull.c \
+$(libdir)/uuid/uuid/pack.c \
+$(libdir)/uuid/uuid/parse.c \
+$(libdir)/uuid/uuid/unpack.c \
+$(libdir)/uuid/uuid/unparse.c \
+$(libdir)/uuid/uuid/uuid_time.c
+
+NEWSQL_INCLUDES += \
+-I$(libdir)/uuid
+endif
 
 gsserver_SOURCES = $(NEWSQL_SOURCES)
 gsserver_CPPFLAGS = $(NEWSQL_CPPFLAGS) $(NEWSQL_INCLUDES)

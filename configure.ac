@@ -51,5 +51,10 @@ AC_CHECK_DECL(
 
 AC_ARG_ENABLE(system-libs, AS_HELP_STRING([--enable-system-libs], [use system libraries whenever possible]))
 
+AM_CONDITIONAL([USE_SYSTEM_UUID], false)
+AS_IF([test x$enable_system_libs = xyes], [
+  PKG_CHECK_MODULES([UUID], [uuid], [ AM_CONDITIONAL([USE_SYSTEM_UUID], true) ], [true])
+])
+
 AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT
