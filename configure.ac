@@ -49,5 +49,7 @@ AC_CHECK_DECL(
   [AC_MSG_ERROR([fallocate and FALLOC_FL_PUNCH_HOLE must be supported])],
   [[#include <linux/falloc.h>]])
 
+AC_ARG_ENABLE(system-libs, AS_HELP_STRING([--enable-system-libs], [use system libraries whenever possible]))
+
 AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT
