@@ -395,7 +395,6 @@ $(sqliteworkdir)/libsqlite3.a
 NEWSQL_INCLUDES = \
 -I$(srcdir) \
 -I$(utildir) \
--I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
 -I$(libdir)/fletcher32_simd \
 -I$(libdir)/sha2 \
@@ -439,6 +438,11 @@ if USE_SYSTEM_MSGPACK
 else
 NEWSQL_LDADD += $(libdir)/MessagePack/libmsgpack.a
 NEWSQL_INCLUDES += -I$(libdir)/MessagePack/include
+endif
+
+if USE_SYSTEM_PICOJSON
+else
+NEWSQL_INCLUDES += -I$(libdir)/picojson/include
 endif
 
 gsserver_SOURCES = $(NEWSQL_SOURCES)

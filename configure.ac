@@ -68,5 +68,12 @@ AS_IF([test x$enable_system_libs = xyes], [
 ])
 AC_LANG_POP([C++])
 
+AM_CONDITIONAL([USE_SYSTEM_PICOJSON], false)
+AC_LANG_PUSH([C++])
+AS_IF([test x$enable_system_libs = xyes], [
+  AC_CHECK_HEADERS([picojson.h], [ AM_CONDITIONAL([USE_SYSTEM_PICOJSON], true) ])
+])
+AC_LANG_POP([C++])
+
 AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT
