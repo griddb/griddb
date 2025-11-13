@@ -1159,9 +1159,9 @@ void SyncManagerInfo::decode(EventByteInStream& in, const char8_t* bodyBuffer) {
 	const char8_t* dataBuffer = bodyBuffer + in.base().position();
 	const size_t lastSize = in.base().position() + bodySize;
 	msgpack::unpacked msg;
-	msgpack::unpack(&msg, dataBuffer, static_cast<size_t>(bodySize));
+	msgpack::unpack(msg, dataBuffer, static_cast<size_t>(bodySize));
 	msgpack::object obj = msg.get();
-	obj.convert(&partitionRole_);
+	obj.convert(partitionRole_);
 	in.base().position(lastSize);
 }
 
