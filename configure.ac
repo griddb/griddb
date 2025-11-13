@@ -56,5 +56,10 @@ AS_IF([test x$enable_system_libs = xyes], [
   PKG_CHECK_MODULES([UUID], [uuid], [ AM_CONDITIONAL([USE_SYSTEM_UUID], true) ], [true])
 ])
 
+AM_CONDITIONAL([USE_SYSTEM_ZSTD], false)
+AS_IF([test x$enable_system_libs = xyes], [
+  PKG_CHECK_MODULES([ZSTD], [libzstd], [ AM_CONDITIONAL([USE_SYSTEM_ZSTD], true) ], [true])
+])
+
 AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT

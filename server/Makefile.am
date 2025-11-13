@@ -390,7 +390,6 @@ NEWSQL_LDADD = \
 $(QP_LDADD) \
 $(utildir)/libutil.a \
 $(libdir)/MessagePack/libmsgpack.a \
-$(libdir)/zstd/lib/libzstd.a \
 -lpthread -lrt -ldl -lstdc++ -lz \
 $(sqliteworkdir)/libsqlite3.a
 
@@ -405,7 +404,6 @@ NEWSQL_INCLUDES = \
 -I$(srcdir)/tr-cpp \
 -I$(sqliteworkdir) \
 -I$(sqlitedir)/src \
--I$(libdir)/zstd/lib \
 -I$(newsqlincdir)
 
 NEWSQL_LDFLAG = \
@@ -429,6 +427,14 @@ $(libdir)/uuid/uuid/uuid_time.c
 
 NEWSQL_INCLUDES += \
 -I$(libdir)/uuid
+endif
+
+if USE_SYSTEM_ZSTD
+NEWSQL_LDADD += @ZSTD_LIBS@
+NEWSQL_CPPFLAGS += @ZSTD_CFLAGS@
+else
+NEWSQL_LDADD += $(libdir)/zstd/lib/libzstd.a
+NEWSQL_INCLUDES += -I$(libdir)/zstd/lib
 endif
 
 gsserver_SOURCES = $(NEWSQL_SOURCES)
