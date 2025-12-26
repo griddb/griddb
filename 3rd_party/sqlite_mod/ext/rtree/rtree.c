@@ -3256,6 +3256,7 @@ static int rtreeInit(
 ** list, containing the 8-byte rowid/pageno followed by the 
 ** <num-dimension>*2 coordinates.
 */
+/*
 static void rtreenode(sqlite3_context *ctx, int nArg, sqlite3_value **apArg){
   char *zText = 0;
   RtreeNode node;
@@ -3300,6 +3301,7 @@ static void rtreenode(sqlite3_context *ctx, int nArg, sqlite3_value **apArg){
   
   sqlite3_result_text(ctx, zText, -1, sqlite3_free);
 }
+*/
 
 /* This routine implements an SQL function that returns the "depth" parameter
 ** from the front of a blob that is an r-tree node.  For example:
@@ -3327,6 +3329,7 @@ static void rtreedepth(sqlite3_context *ctx, int nArg, sqlite3_value **apArg){
 ** virtual table module "rtree" and the debugging/analysis scalar 
 ** function "rtreenode".
 */
+/*
 int sqlite3RtreeInit(sqlite3 *db){
   const int utf8 = SQLITE_UTF8;
   int rc;
@@ -3350,6 +3353,7 @@ int sqlite3RtreeInit(sqlite3 *db){
 
   return rc;
 }
+*/
 
 /*
 ** This routine deletes the RtreeGeomCallback object that was attached
