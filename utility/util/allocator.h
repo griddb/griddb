@@ -2886,7 +2886,7 @@ void FixedSizeAllocator<Mutex>::setFreeElementLimit(size_t limit) {
 template<typename Mutex>
 inline void FixedSizeAllocator<Mutex>::setErrorHandler(
 		AllocationErrorHandler *errorHandler) {
-	errorHandler_ = &errorHandler;
+	errorHandler_ = errorHandler;
 }
 
 template<typename Mutex>
