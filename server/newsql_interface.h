@@ -17,6 +17,7 @@
 #ifndef NEWSQL_INTERFACE_H_
 #define NEWSQL_INTERFACE_H_
 
+#include <stdbool.h>
 
 enum SQLExtendedType {
 	GS_TYPE_STRING_NULL = 20,	
@@ -93,7 +94,7 @@ int gsGetConnectionEnv(SQLStatement *pSqlStatement, int type);
 
 int gsGetValueString(SQLCursor *pCur, int iCol, char **value, size_t *size);
 
-int gsGetValueBool(SQLCursor *pCur, int iCol, int8_t *value);
+int gsGetValueBool(SQLCursor *pCur, int iCol, bool *value);
 
 int gsGetValueByte(SQLCursor *pCur, int iCol, int8_t *value);
 
@@ -114,7 +115,7 @@ int gsGetValueBlob(SQLCursor *pCur, int iCol, struct GSBlobTag *value);
 
 int gsGetValueStringNull(SQLCursor *pCur, int iCol, char **value, size_t *size, int *pRes);
 
-int gsGetValueBoolNull(SQLCursor *pCur, int iCol, int8_t *value, int *pRes);
+int gsGetValueBoolNull(SQLCursor *pCur, int iCol, bool *value, int *pRes);
 
 int gsGetValueByteNull(SQLCursor *pCur, int iCol, int8_t *value, int *pRes);
 

@@ -19,9 +19,9 @@
 #include "vdbeInt.h"
 #include "backend.hpp"
 #include "newsql_interface.h"
-typedef char bool;
 
 #define XPRINTF
+#include <stdbool.h>
 
 static int sqlite3gsAdapterOpen(GsAdapter **ppGsAdapter) {
   GsAdapter *p = NULL;
