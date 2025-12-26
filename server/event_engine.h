@@ -1130,8 +1130,7 @@ public:
 	int64_t& prepareLastEventTime(TimeMap *&map, EventType type);
 	void releaseTimeMap(TimeMap *&map);
 
-	struct SocketAddressLess :
-			public std::binary_function<util::SocketAddress, util::SocketAddress, bool> {
+	struct SocketAddressLess {
 		bool operator()(
 				const util::SocketAddress &left,
 				const util::SocketAddress &right) const;
@@ -1684,8 +1683,7 @@ private:
 		Event *ev_;
 	};
 
-	struct ActiveEntryLess :
-			public std::binary_function<ActiveEntry, ActiveEntry, bool> {
+	struct ActiveEntryLess {
 		bool operator()(
 				const ActiveEntry &left, const ActiveEntry &right) const;
 	};
