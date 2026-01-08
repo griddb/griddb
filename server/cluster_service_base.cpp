@@ -831,9 +831,9 @@ void ClusterService::decode(Event& ev, T& t) {
 		}
 		try {
 			msgpack::unpacked msg;
-			msgpack::unpack(&msg, bodyBuffer, remainSize);
+			msgpack::unpack(msg, bodyBuffer, remainSize);
 			msgpack::object obj = msg.get();
-			obj.convert(&t);
+			obj.convert(t);
 		}
 		catch (std::exception& e) {
 			GS_RETHROW_USER_ERROR(
@@ -876,9 +876,9 @@ void ClusterService::decode(
 			in.base().position()) + packedSize;
 		try {
 			msgpack::unpacked msg;
-			msgpack::unpack(&msg, bodyBuffer, packedSize);
+			msgpack::unpack(msg, bodyBuffer, packedSize);
 			msgpack::object obj = msg.get();
-			obj.convert(&t);
+			obj.convert(t);
 		}
 		catch (std::exception& e) {
 			GS_RETHROW_USER_ERROR(
