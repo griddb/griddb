@@ -141,6 +141,7 @@ struct SQLContainerImpl {
 class SQLContainerImpl::CursorImpl : public SQLContainerUtils::ScanCursor {
 public:
 	class IndexConditionCursor;
+	class ScanInterruptionHandler;
 
 	struct Data;
 	class HolderImpl;
@@ -234,7 +235,8 @@ private:
 
 	ContainerRowScanner* tryCreateScanner(
 			OpContext &cxt, const Projection &proj,
-			const BaseContainer &container, RowIdFilter *rowIdFilter);
+			const BaseContainer &container, RowIdFilter *rowIdFilter,
+			bool interruptible);
 	void updateScanner(OpContext &cxt, bool finished);
 	void clearScanner();
 
@@ -246,6 +248,11 @@ private:
 			util::Vector<ContainerColumnType> *condTypeList, size_t condPos);
 	bool finishPartialSearch(
 			OpContext &cxt, BtreeSearchContext &sc, bool forIndex);
+
+	void clearPartialExecutionProgress(OpContext &cxt);
+	void updatePartialExecutionProgress(
+			OpContext &cxt, BtreeSearchContext &sc, bool forIndex,
+			bool finished);
 	void updatePartialExecutionSize(OpContext &cxt, bool done);
 
 	static bool checkUpdatesStart(
@@ -259,6 +266,11 @@ private:
 	static void applyRangeScanResultProfile(
 			OpContext &cxt, OIdTable *oIdTable);
 
+	IndexTargetType resolveTargetIndexCondition(
+			OpContext &cxt, BaseContainer *container, IndexInfoList &infoList,
+			const SQLExprs::IndexConditionList &condList,
+			IndexConditionCursor &condCursor, IndexSearchContext *sc,
+			ColumnIdList &columnList, size_t &pos);
 	IndexTargetType acceptIndexCondition(
 			OpContext &cxt, BaseContainer *container, IndexInfoList &infoList,
 			const SQLExprs::IndexConditionList &targetCondList, size_t pos,
@@ -274,8 +286,26 @@ private:
 	static void applyIndexResultProfile(
 			IndexSearchContext *sc, IndexProfiler &profiler);
 
+	bool selectIndexByCost(
+			OpContext &cxt, BaseContainer *container,
+			const SQLExprs::IndexConditionList &targetCondList, size_t basePos,
+			size_t &selectedPos);
+
+	int64_t estimateFullScanCost(BaseContainer *container);
+	int64_t estimateIndexScanCost(
+			OpContext &cxt, BaseContainer *container,
+			const SQLExprs::IndexConditionList &targetCondList, size_t pos);
+	int64_t resolveIndexScanTotalCost(
+			OpContext &cxt, BaseContainer *container, int64_t baseCost);
+
+	void profileIndexScanCost(OpContext &cxt, size_t pos, int64_t cost);
+	void profileFullScanCost(OpContext &cxt, int64_t cost);
+
+	void profileIndexScanCriterion(OpContext &cxt, bool done);
+
 	OIdTableGroupId getIndexGroupId(size_t pos);
 	uint32_t getIndexOrdinal(size_t pos);
+	uint32_t getNoIndexOrdinal();
 
 	IndexSearchContext& prepareIndexSearchContext(
 			OpContext &cxt, const IndexScanInfo *info);
@@ -355,6 +385,9 @@ public:
 	void setCurrentSubPosition(size_t subPos);
 	size_t getCurrentSubPosition();
 
+	bool isCostResolved();
+	void setCostResolved();
+
 private:
 	IndexConditionCursor(const IndexConditionCursor&);
 	IndexConditionCursor& operator=(const IndexConditionCursor&);
@@ -364,6 +397,24 @@ private:
 
 	size_t nextPos_;
 	size_t condCount_;
+
+	bool costResolved_;
+};
+
+class SQLContainerImpl::CursorImpl::ScanInterruptionHandler :
+		public SQLOps::OpContext::TransferInterruptionHandler {
+public:
+	ScanInterruptionHandler();
+	virtual ~ScanInterruptionHandler();
+
+	void bind(OpContext &cxt, ContainerRowScanner &scanner);
+	void unbind();
+
+	virtual void onInterrupted();
+
+private:
+	OpContext *cxt_;
+	ContainerRowScanner *scanner_;
 };
 
 struct SQLContainerImpl::CursorImpl::Data {
@@ -507,6 +558,9 @@ public:
 	void acceptIndexAbortion(bool duplicatableOrLost);
 	void setRangeScanFinished();
 
+	void setLastCriterion(SQLOpTypes::PlannigCriterion criterion);
+	SQLOpTypes::PlannigCriterion getLastCriterion();
+
 	void initializeScanRange(
 			TransactionContext &txn, BaseContainer &container);
 	RowId getMaxRowId(
@@ -518,6 +572,8 @@ public:
 	static void getIndexInfoList(
 			TransactionContext &txn, BaseContainer &container,
 			IndexInfoList &indexInfoList);
+	static bool isUniqueIndex(
+			BaseContainer &container, const IndexInfo &info);
 
 	OIdTable& resolveOIdTable();
 	OIdTable& prepareOIdTable(BaseContainer &container);
@@ -527,6 +583,9 @@ public:
 			TransactionContext &txn, BaseContainer &container);
 	RowIdFilter* findRowIdFilter();
 	void clearRowIdFilter();
+
+	CursorImpl::ScanInterruptionHandler& prepareInterruptionHandler();
+	void clearInterruptionHandler();
 
 	static TransactionContext& prepareTransactionContext(ExtOpContext &cxt);
 
@@ -634,6 +693,8 @@ private:
 	bool partialExecCountBased_;
 
 	const SQLExprs::IndexSelector *indexSelection_;
+	SQLOpTypes::PlannigCriterion lastCriterion_;
+	util::LocalUniquePtr<CursorImpl::ScanInterruptionHandler> interruptionHandler_;
 };
 
 template<TupleColumnType T, bool VarSize>
@@ -1397,7 +1458,8 @@ public:
 
 	ContainerRowScanner& create(
 			OpContext &cxt, CursorImpl &cursor, CursorAccessorImpl &accessor,
-			const Projection &proj, RowIdFilter *rowIdFilter) const;
+			const Projection &proj, RowIdFilter *rowIdFilter,
+			bool interruptible) const;
 
 	ContainerRowScanner::HandlerSet& create(
 				FactoryContext &cxt, const Projection &proj) const;

@@ -302,6 +302,7 @@ $(srcdir)/sql_compiler_join.cpp \
 $(srcdir)/sql_execution.cpp \
 $(srcdir)/sql_internal_parser.cpp \
 $(srcdir)/sql_job_manager.cpp \
+$(srcdir)/sql_job_manager_priority.cpp \
 $(srcdir)/sql_lexer.cpp \
 $(srcdir)/sql_parser.cpp \
 $(srcdir)/sql_processor.cpp \

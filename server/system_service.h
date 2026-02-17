@@ -49,6 +49,7 @@ template <class L> class LogManager;
 struct ManagerSet;
 class PartitionList;
 class SQLService;
+class JobManager;
 
 struct ebb_request_parser;
 struct ebb_request;
@@ -291,6 +292,10 @@ public:
 
 	void traceStats(const util::StdAllocator<void, void> &alloc);
 
+	void setUpMonitoringTrace();
+
+	void applySqlMonitoringConfig(ConfigTable &config);
+
 	GlobalVariableSizeAllocator *getVariableSizeAllocator() {
 		return varSizeAlloc_;
 	}
@@ -457,7 +462,9 @@ private:
 	*/
 	class SystemConfig : public ConfigTable::ParamHandler {
 	public:
-		explicit SystemConfig(ConfigTable &configTable);
+		explicit SystemConfig(ConfigTable &config);
+
+		void setService(SystemService &svc);
 
 		int32_t getOutputStatsInterval() const {
 			return sysStatsInterval_;
@@ -467,14 +474,42 @@ private:
 			return traceMode_;
 		}
 
-	private:
-		void setUpConfigHandler(ConfigTable &configTable);
+		static uint32_t fileLimitSizeToBytes(int32_t megas);
 
+		void setUpMonitoringLogsFile();
+		void setUpMonitoringPlansFile();
+
+		static void applySqlMonitoringConfigInternal(
+				SystemService &svc, ConfigTable &config);
+
+	private:
 		virtual void operator()(
-			ConfigTable::ParamId id, const ParamValue &value);
+				ConfigTable::ParamId id, const ParamValue &value);
+
+		void setUpConfigHandler(ConfigTable &config);
+
+		static const char8_t* checkPathPattern(const char8_t *path);
+
+		JobManager* getJobManager();
+
+		util::Mutex lock_;
+
+		SystemService *svc_;
+		util::TraceManager &manager_;
 
 		int32_t sysStatsInterval_;
 		TraceMode traceMode_;
+
+		int32_t traceFileCount_;
+		u8string eventLogPath_;
+
+		bool monitoringFileSeparated_;
+		bool monitoringPlanEnabled_;
+		int32_t monitoringFileCount_;
+		int32_t monitoringFileLimit_;
+		u8string monitoringLogsPath_;
+		u8string monitoringPlansPath_;
+		int32_t monitoringPlanFileCount_;
 	};
 
 
@@ -506,6 +541,22 @@ private:
 	public:
 		SystemService *service_;
 	} statUpdator_;
+
+	class PlainTraceFormatter : public util::TraceFormatter {
+	public:
+		virtual ~PlainTraceFormatter();
+
+		virtual void format(std::ostream &stream, util::TraceRecord &record);
+		virtual void handleTraceFailure(const char8_t *formattingString);
+
+		virtual void escapeControlChars(util::NormalOStringStream &oss);
+		virtual void appendRecordSeparator(util::NormalOStringStream &oss);
+
+		static PlainTraceFormatter& getInstance();
+
+	private:
+		static PlainTraceFormatter instance_;
+	};
 
 	EventEngine ee_;
 

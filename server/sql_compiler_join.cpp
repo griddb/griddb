@@ -1127,10 +1127,10 @@ void SQLCompiler::ReorderJoin::TreeSet::mergeCost(
 		Iterator it, const Cost &cost) {
 	util::StackAllocator &alloc = getAllocator();
 
-	Iterator basePos = erase(it);
 	Tree *tree = ALLOC_NEW(alloc) Tree(alloc, cost);
 	tree->merge(it->get());
 
+	Iterator basePos = erase(it);
 	Iterator pos = baseList_.insert(basePos, Entry(tree));
 	addNodes(*tree, pos);
 }

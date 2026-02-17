@@ -38,9 +38,8 @@ ResultProcessor::ResultProcessor(
 	columnInfoList_(NULL),
 	columnSize_(0),
 	isFirst_(true),
-	isExplainAnalyze_(
-		cxt.getTask()->getJob()->isExplainAnalyze()),
-	isSQL_(cxt.getTask()->getJob()->isSQL()),
+	isExplainAnalyze_(cxt.isProfiling()),
+	isSQL_(cxt.isForResultSet()),
 	executionManager_(cxt.getExecutionManager()),
 	profs_(globalVarAlloc_,
 		cxt.getExecutionManager()->
@@ -137,18 +136,11 @@ bool ResultProcessor::pipe(
 					return false;
 				}
 			}
-			Job* job = cxt.getTask()->getJob();
-			if (!job->isEnableFetch()) {
-				return false;
-			}
-			SQLFetchContext fetchContext(reader_, columnInfoList_,
-				columnSize_, cxt.getTask()->isResultCompleted());
-			if (execution->fetch(*cxt.getEventContext(),
-				fetchContext, cxt.getExecId(), cxt.getVersionId())) {
+			if (cxt.fetch(
+					execution, reader_, columnInfoList_, columnSize_,
+					cxt.getExecId(), cxt.getVersionId())) {
 				cxt.setFetchComplete();
 			}
-		}
-		else {
 		}
 	}
 	catch (std::exception& e) {
@@ -162,23 +154,21 @@ bool ResultProcessor::finish(Context& cxt, InputId inputId) {
 	UNUSED_VARIABLE(inputId);
 
 	try {
-		cxt.getTask()->setResultCompleted();
+		cxt.setResultCompleted();
 		if (isExplainAnalyze_) {
 			cxt.setFetchComplete();
 			return false;
 		}
 
-		Job* job = cxt.getTask()->getJob();
-		if (!job->checkAndSetPending()) {
+		if (!cxt.checkAndSetPending()) {
 			return false;
 		}
 		SQLExecutionManager::Latch latch(clientId_, executionManager_);
 		SQLExecution* execution = latch.get();
 		if (execution) {
-			SQLFetchContext fetchContext(reader_, columnInfoList_,
-				columnSize_, true);
-			if (execution->fetch(*cxt.getEventContext(),
-				fetchContext, cxt.getExecId(), cxt.getVersionId())) {
+			if (cxt.fetch(
+					execution, reader_, columnInfoList_, columnSize_,
+					cxt.getExecId(), cxt.getVersionId())) {
 				profs_.complete();
 				cxt.setFetchComplete();
 				execution->getContext().setEndTime(util::DateTime::now(false).getUnixTime());

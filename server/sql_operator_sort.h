@@ -18,6 +18,8 @@
 #ifndef SQL_OPERATOR_SORT_H_
 #define SQL_OPERATOR_SORT_H_
 
+#include "sql_operator_sort.h"
+
 #include "sql_operator.h"
 
 #include "sql_operator_utils.h"
@@ -89,6 +91,7 @@ struct SQLSortOps {
 	class WindowRankPartition;
 	class WindowFramePartition;
 	class WindowMerge;
+	class WindowMatch;
 };
 
 class SQLSortOps::Registrar : public SQLOps::OpProjectionRegistrar {
@@ -1227,6 +1230,752 @@ private:
 	static bool getDesiredPosition(const MergeContext &mergeCxt, int64_t &pos);
 	static bool isPositionInRange(const MergeContext &mergeCxt, int64_t pos);
 	static int64_t getCurrentPosition(const MergeContext &mergeCxt);
+};
+
+class SQLSortOps::WindowMatch : public SQLOps::Operator {
+public:
+	virtual void compile(OpContext &cxt) const;
+	virtual void execute(OpContext &cxt) const;
+
+	static bool tryMakeWindowSubPlan(OpContext &cxt, const OpCode &code);
+
+private:
+	enum {
+		IN_KEY = 0,
+		IN_PREDICATE = 1,
+		IN_NAVIGATION_START = 2
+	};
+
+	enum NavigationType {
+		NAV_NONE,
+		NAV_MATCHING,
+		NAV_PROJECTION_PIPE_ONCE,
+		NAV_PROJECTION_PIPE_EACH,
+		NAV_PROJECTION_FINISH,
+		NAV_CLASSIFIER
+	};
+
+	class MicroCompiler;
+
+	struct VariablePredicateInfo;
+	struct NavigationInfo;
+
+	struct VariableGroupEntry;
+	struct MatchEntry;
+	struct MatchStackElement;
+	struct VariableHistoryElement;
+	struct MatchState;
+	struct ProjectionState;
+
+	class PatternGraph;
+	struct PatternCode;
+	struct PatternNode;
+
+	class VariableTable;
+
+	class NavigationReaderEntry;
+	class NavigationReaderSet;
+	class ColumnNavigator;
+
+	struct MatchContext;
+
+	typedef util::Vector<int64_t> VariableIdList;
+	typedef util::AllocVector<int64_t> AllocVariableIdList;
+
+	typedef util::Map<int64_t, VariablePredicateInfo> VariablePredicateMap;
+	typedef util::Set<int64_t> VariableIdSet;
+	typedef util::Vector<VariableIdSet> VariableIdsList;
+
+	typedef std::pair<NavigationType, int64_t> NavigationKey;
+
+	typedef std::pair<int64_t, uint32_t> PlanColumnKey;
+	typedef std::pair<PlanColumnKey, SQLType::Id> PlanNavigationColumnKey;
+	typedef std::pair<NavigationKey, PlanNavigationColumnKey> PlanNavigationKey;
+
+	typedef std::pair<const SQLExprs::Expression*, uint32_t> PlanNavigationValue;
+	typedef std::pair<Projection*, SQLOpUtils::ProjectionPair> NavigationProjection;
+	typedef std::pair<const Projection*, SQLOpUtils::ProjectionRefPair> NavigationProjectionRef;
+
+	typedef util::Map<TupleColumnType, uint32_t> PlanTypedCountMap;
+	typedef util::Map<PlanNavigationKey, const SQLExprs::Expression*> PlanNavigationExprMap;
+	typedef util::Map<PlanNavigationKey, PlanNavigationValue> PlanNavigationMap;
+	typedef util::Map<uint32_t, const SQLExprs::Expression*> BaseExprMap;
+
+	typedef util::Map<int64_t, const SQLExprs::Expression*> VariableExprMap;
+	typedef util::Vector<VariableIdList> TotalVariableIdList;
+
+	typedef util::MultiMap<NavigationKey, NavigationInfo> NavigationMap;
+	typedef std::pair<uint64_t, bool> NavigationPosition;
+	typedef std::pair<NavigationPosition, const NavigationInfo*> LocatedNavigationInfo;
+	typedef util::AllocVector<LocatedNavigationInfo> LocatedNavigationList;
+
+	typedef util::AllocVector<MatchStackElement> MatchStack;
+	typedef util::AllocVector<VariableHistoryElement> VariableHistory;
+
+	typedef util::AllocVector<VariableGroupEntry> VariableGroupList;
+	typedef util::AllocMap<int64_t, VariableGroupEntry> VariableGroupMap;
+
+	typedef std::pair<uint32_t, VariableGroupList> LocatedVariableGroupList;
+	typedef util::AllocMap<int64_t, LocatedVariableGroupList> LocatedVariableGroupMap;
+
+	typedef util::AllocMap<uint64_t, MatchEntry> MatchEntryMap;
+	typedef MatchEntryMap::iterator MatchEntryIterator;
+
+	typedef std::pair<uint32_t, uint64_t> MatchHashKey;
+
+	typedef util::AllocMap<uint64_t, MatchEntryIterator> OrderedMatchKeyMap;
+	typedef util::AllocMap<MatchHashKey, MatchEntryIterator> UnorderedMatchKeyMap;
+
+	typedef util::AllocVector<uint32_t> PatternStackPath;
+	typedef util::AllocMap<
+			PatternStackPath, MatchEntryIterator> PatternStackPathMap;
+
+	typedef util::Vector<NavigationReaderEntry> NavigationReaderList;
+
+	typedef NavigationReaderList::iterator NavigationReaderIterator;
+
+	typedef std::pair<uint64_t, NavigationReaderIterator> LocatedNavigationReader;
+	typedef util::AllocSet<LocatedNavigationReader> LocatedNavigationReaderSet;
+	typedef util::AllocSet<NavigationReaderIterator> NavigationReaderRefSet;
+
+	typedef util::Vector<const SQLExprs::Expression*> NavigationExprList;
+	typedef util::AllocMap<NavigationKey, NavigationExprList> NavigationExprMap;
+
+	typedef WindowPartition::TupleEq TupleEq;
+
+	static bool matchRow(
+			OpContext &cxt, MatchContext &matchCxt, bool partTail);
+	static bool projectMatchedRows(
+			OpContext &cxt, MatchContext &matchCxt);
+
+	static bool preparePredicateReaders(
+			OpContext &cxt, MatchContext &matchCxt, TupleListReader *&predReader,
+			TupleListReader *&keyReader);
+	static bool nextPrediateRow(
+			OpContext &cxt, MatchContext &matchCxt, TupleListReader &predReader,
+			TupleListReader &keyReader, bool partTail);
+
+	static bool isPartitionTail(
+			MatchContext &matchCxt, TupleListReader &predReader,
+			TupleListReader &keyReader);
+
+	static void checkMemoryLimit(OpContext &cxt, MatchContext &matchCxt);
+
+	MatchContext& prepareMatchContext(OpContext &cxt) const;
+};
+
+class SQLSortOps::WindowMatch::MicroCompiler {
+public:
+	explicit MicroCompiler(util::StackAllocator &alloc);
+
+	static bool isAcceptableWindowPlan(const OpCode &code);
+	void makeWindowSubPlan(OpContext &cxt, const OpCode &code);
+
+	static const SQLExprs::Expression& predicateToPatternExpr(
+			const SQLExprs::Expression *pred);
+
+	VariablePredicateMap makeVariablePredicateMap(
+			const SQLExprs::Expression *pred, const Projection *proj);
+	NavigationMap makeNavigationMap(
+			const SQLExprs::Expression *pred, const Projection *proj);
+
+	static NavigationProjectionRef getNavigableProjections(const Projection *proj);
+	static bool isAllRowsPerMatch(const SQLExprs::Expression *pred);
+
+	static uint32_t getNavigationReaderCount(
+			OpContext &cxt, const OpCode &code);
+	static uint64_t getPatternMatchMemoryLimit(const OpCode &code);
+
+	static const Projection* getProjectionElement(
+			const NavigationProjectionRef &base, size_t ordinal);
+	static const Projection*& getProjectionElement(
+			NavigationProjectionRef &base, size_t ordinal);
+	static Projection*& getProjectionElement(
+			NavigationProjection &base, size_t ordinal);
+
+private:
+	NavigationProjectionRef makeBaseProjection(
+			OpCodeBuilder &builder, const OpCode &code);
+
+	void setUpBaseProjectionExtra(
+			OpCodeBuilder &builder, Projection &proj, bool pre, bool forPipe);
+	Projection& toGroupedBaseProjection(
+			OpCodeBuilder &builder, const Projection &src);
+	SQLOpUtils::ProjectionPair pullUpBaseProjections(
+			OpCodeBuilder &builder, const SQLOpUtils::ProjectionPair &src);
+	Projection& splitBasePipeProjection(
+			OpCodeBuilder &builder, const Projection &src, bool once);
+
+	static void arrangeForGroupedBaseExpr(
+			SQLExprs::ExprFactoryContext &factoryCxt,
+			SQLExprs::Expression &expr);
+	static void makePullUpTargetMap(
+			const SQLExprs::Expression &expr, BaseExprMap &map);
+	static void arrangeForPulledUpBaseExpr(
+			OpCodeBuilder &builder, SQLExprs::Expression &expr, bool forPipe,
+			const BaseExprMap &map);
+	static void arrangeForSplittedBaseExpr(
+			SQLExprs::Expression &expr, bool once);
+
+	static bool isEachNavigationExpr(const SQLExprs::Expression *expr);
+	static bool isPipeOnceBaseExpr(const SQLExprs::Expression &expr);
+
+	Projection& makeSubPlanProjection(
+			OpCodeBuilder &builder, const NavigationProjectionRef &baseProj,
+			const SQLExprs::Expression &basePred,
+			const SQLValues::TupleColumnList &inColumnList);
+
+	Projection& makeTotalPipeProjection(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const NavigationProjectionRef &baseProj,
+			const SQLExprs::Expression &basePred);
+	Projection& makeRefProjection(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const NavigationProjectionRef &baseProj, bool forPipe, bool once);
+	Projection& makeMatchingProjection(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const NavigationProjectionRef &baseProj,
+			const VariableExprMap &varMap);
+	Projection& makeNavigationProjection(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const NavigationProjectionRef &baseProj,
+			const VariableExprMap &varMap);
+	Projection& makeNavigationProjectionSub(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const SQLOps::ProjectionCode &baseProjCode,
+			const VariableExprMap &varMap, bool original, bool empty);
+	Projection& makeNavigationProjectionSubByKey(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const SQLOps::ProjectionCode &baseProjCode, bool original,
+			bool empty, const NavigationKey &navKey);
+
+	void setUpArrangedNavigationExpr(
+			OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+			const NavigationKey &navKey, SQLExprs::Expression &expr);
+	VariableExprMap makeVariableExprMap(
+			OpCodeBuilder &builder, const SQLExprs::Expression &basePred);
+
+	PlanNavigationMap makePlanNavigationMap(
+			const NavigationProjectionRef &baseProj,
+			const SQLExprs::Expression &basePred,
+			const SQLValues::TupleColumnList &inColumnList,
+			const util::Vector<TupleColumnType> *&aggrTypeList);
+	PlanNavigationExprMap makePlanNavigationExprMap(
+			const NavigationProjectionRef &baseProj,
+			const SQLExprs::Expression &basePred);
+	void setUpPlanNavigationExprMap(
+			const NavigationKey &navKey, const SQLExprs::Expression &expr,
+			PlanNavigationExprMap &navExprMap);
+
+	PlanTypedCountMap makePlanNavigationTypeCounts(
+			const PlanNavigationExprMap &navExprMap,
+			const SQLValues::TupleColumnList &inColumnList);
+	PlanNavigationMap makePlanNavigationMapByCounts(
+			const PlanNavigationExprMap &navExprMap,
+			const PlanTypedCountMap &typeCounts,
+			const util::Vector<TupleColumnType> &baseAggrTypeList,
+			const SQLValues::TupleColumnList &inColumnList);
+	static TupleColumnType getNavigationBaseColumnType(
+			const SQLValues::TupleColumnList &inColumnList,
+			const PlanNavigationKey &key);
+
+	util::Vector<TupleColumnType> makeAggregationTypeList(
+			const util::Vector<TupleColumnType> &baseAggrTypeList,
+			const PlanTypedCountMap &typeCounts);
+	NavigationProjectionRef makeNavigableBaseProjection(
+			OpCodeBuilder &builder, const NavigationProjectionRef &src,
+			const util::Vector<TupleColumnType> *aggrTypeList);
+
+	static PlanNavigationColumnKey navigationColumnTopKey();
+
+	static void setUpNavigationMapForClassifier(
+			const SQLExprs::Expression &basePred,
+			const NavigationProjectionRef &navProjs, NavigationMap &navMap);
+	static bool findClassifier(const NavigationProjectionRef &navProjs);
+	static bool findClassifierSub(const SQLExprs::Expression *expr);
+
+	static NavigationInfo resolveNavigationInfo(
+			const SQLExprs::Expression &descExpr,
+			const SQLExprs::Expression &assignExpr,
+			const SQLExprs::Expression &emptyExpr, uint32_t navIndex,
+			NavigationType type);
+
+	static NavigationProjectionRef firstNavigationProjections(
+			const Projection *proj);
+	static bool nextNavigationProjections(
+			uint32_t ordinal, NavigationKey &key, NavigationProjectionRef &cur,
+			NavigationProjectionRef &next);
+	static const Projection* nextMatchingProjection(
+			const Projection *&next, bool top);
+	static void checkNavigationProjection(const Projection *proj);
+
+	static const Projection& resolveMultiStageElement(
+			const Projection *proj, size_t ordinal);
+	static const Projection& resolveMultiStageSubElement(
+			const Projection *proj, size_t ordinal1, size_t ordinal2);
+	static const Projection& resolveMultiStageSubSubElement(
+			const Projection *proj, size_t ordinal1, size_t ordinal2,
+			size_t ordinal3);
+
+	static const Projection* filterEmptyProjection(const Projection *proj);
+	static void arrangeForEmptyProjection(
+			SQLExprs::ExprFactoryContext &factoryCxt, Projection &proj);
+
+	static NavigationProjectionRef makeProjectionRefElements(
+			const Projection *proj1, const Projection *proj2,
+			const Projection *proj3);
+
+	static bool isMultiStageProjection(const Projection *proj);
+	static bool findNagvigableColumnKey(
+			const SQLExprs::Expression &expr,
+			PlanNavigationColumnKey &columnKey);
+	static const SQLExprs::Expression& predicateToVariableListExpr(
+			const SQLExprs::Expression *base);
+	static const SQLExprs::Expression& variableToElementExprs(
+			const SQLExprs::Expression &base, const TupleValue **name);
+
+	static void optionToElementExprs(
+			const SQLExprs::Expression &base,
+			const SQLExprs::Expression *&patternExpr,
+			const SQLExprs::Expression *&varListExpr,
+			const SQLExprs::Expression *&modeExpr);
+
+	static const SQLExprs::Expression& resolvePatternOptionExpr(
+			const SQLExprs::Expression *base);
+	static const SQLExprs::Expression* findPatternOptionExpr(
+			const SQLExprs::Expression *base);
+
+	static int32_t getNavigationDirection(SQLType::Id exprType);
+	static bool isNavigationByMatch(SQLType::Id exprType);
+	static bool isNavigationColumn(SQLType::Id exprType);
+
+	util::StackAllocator &alloc_;
+};
+
+struct SQLSortOps::WindowMatch::VariablePredicateInfo {
+	VariablePredicateInfo();
+
+	uint32_t predicateIndex_;
+	const TupleValue *name_;
+	const SQLExprs::Expression *expr_;
+};
+
+struct SQLSortOps::WindowMatch::NavigationInfo {
+	NavigationInfo();
+
+	uint32_t navigationIndex_;
+	int64_t variableId_;
+	int32_t direction_;
+	bool byMatch_;
+
+	const SQLExprs::Expression *assignmentExpr_;
+	const SQLExprs::Expression *emptyExpr_;
+};
+
+struct SQLSortOps::WindowMatch::VariableGroupEntry {
+	VariableGroupEntry();
+
+	uint64_t beginPos_;
+	uint64_t endPos_;
+};
+
+struct SQLSortOps::WindowMatch::MatchEntry {
+	explicit MatchEntry(SQLValues::VarAllocator &varAlloc);
+
+	MatchStack stack_;
+	VariableHistory history_;
+	VariableGroupMap groupMap_;
+	VariableGroupEntry searchRange_;
+	uint64_t firstPos_;
+	int64_t matchingVariableId_;
+};
+
+struct SQLSortOps::WindowMatch::MatchStackElement {
+	MatchStackElement(uint32_t patternId, bool withTailAnchor);
+
+	uint32_t hash_;
+	uint32_t patternId_;
+	uint64_t repeat_;
+	bool withTailAnchor_;
+};
+
+struct SQLSortOps::WindowMatch::VariableHistoryElement {
+	VariableHistoryElement();
+
+	int64_t variableId_;
+	uint64_t beginPos_;
+	uint64_t endPos_;
+};
+
+struct SQLSortOps::WindowMatch::MatchState {
+public:
+	explicit MatchState(SQLValues::VarAllocator &varAlloc);
+
+	MatchEntryMap map_;
+	UnorderedMatchKeyMap keyMap_;
+	OrderedMatchKeyMap workingKeys_;
+
+	MatchEntryIterator prevMatchIt_;
+	MatchEntryIterator curMatchIt_;
+
+	bool curStarted_;
+	bool curFinished_;
+
+	bool varMatching_;
+
+	bool prevMatched_;
+	bool curMatched_;
+
+	uint64_t nextKey_;
+
+	VariableGroupEntry searchRange_;
+	bool partitionTail_;
+	uint64_t matchCount_;
+
+private:
+	MatchState(const MatchState&);
+	MatchState& operator=(const MatchState&);
+};
+
+struct SQLSortOps::WindowMatch::ProjectionState {
+	explicit ProjectionState(SQLValues::VarAllocator &varAlloc);
+
+	uint32_t matchOrdinal_;
+	NavigationType type_;
+
+	size_t historyIndex_;
+	uint64_t nextPos_;
+
+	VariableHistory history_;
+	LocatedVariableGroupMap groupMap_;
+	VariableGroupEntry searchRange_;
+	uint64_t firstPos_;
+};
+
+class SQLSortOps::WindowMatch::PatternGraph {
+public:
+	PatternGraph(OpContext &cxt, const SQLExprs::Expression &expr);
+
+	bool findSub(
+			uint32_t id, bool forChild, uint32_t ordinal,
+			uint32_t &subId) const;
+	uint32_t getDepth(uint32_t id) const;
+
+	bool findVariable(uint32_t id, int64_t &varId) const;
+
+	uint64_t getMinRepeat(uint32_t id) const;
+	bool findMaxRepeat(uint32_t id, uint64_t &repeat) const;
+
+	bool getTopAnchor(uint32_t id) const;
+	bool getTailAnchor(uint32_t id) const;
+
+private:
+	typedef util::Vector<PatternNode> NodeList;
+
+	const PatternCode& getCode(uint32_t id) const;
+	const PatternNode& getNode(uint32_t id) const;
+
+	static void build(const SQLExprs::Expression &expr, NodeList &nodeList);
+
+	static void buildSub(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList);
+	static void buildVariable(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList);
+	static void buildRepeat(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList);
+	static void buildAnchor(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList);
+	static void buildConcat(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList);
+	static void buildOr(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList);
+
+	static uint32_t prepareStack(
+			const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList,
+			bool onlyForMultiElements);
+	static bool isNewStackRequired(
+			const SQLExprs::Expression &expr,
+			const PatternNode &node, bool onlyForMultiElements);
+	static bool isQuantitySpecified(const PatternCode &code);
+
+	static uint32_t newStack(NodeList &nodeList, uint32_t baseId);
+	static uint32_t newNode(NodeList &nodeList, const uint32_t *baseId);
+
+	util::Vector<PatternNode> nodeList_;
+};
+
+struct SQLSortOps::WindowMatch::PatternCode {
+	PatternCode();
+
+	uint32_t depth_;
+	int64_t variableId_;
+	int64_t minRepeat_;
+	int64_t maxRepeat_;
+	bool top_;
+	bool tail_;
+};
+
+struct SQLSortOps::WindowMatch::PatternNode {
+	explicit PatternNode(util::StackAllocator &alloc);
+
+	util::Vector<uint32_t> following_;
+	util::Vector<uint32_t> child_;
+
+	PatternCode code_;
+};
+
+class SQLSortOps::WindowMatch::VariableTable {
+public:
+	VariableTable(
+			OpContext &cxt, const PatternGraph *patternGraph,
+			const VariablePredicateMap *predMap, const NavigationMap *navMap);
+
+	void nextMatchingPosition(uint64_t pos);
+	bool prepareProjection(
+			bool forAllRows, NavigationType &type, bool &matchTail);
+	void setPartitionTail();
+
+	bool findMatchingVariable(const VariablePredicateInfo *&predInfo);
+	void updateMatchingVariable(bool matched);
+
+	bool findNavigationColumn(
+			uint32_t ordinal, NavigationKey &key, uint32_t &navIndex,
+			NavigationPosition &pos);
+
+	SQLExprs::WindowState& getWindowState();
+	bool resolveMatch(uint64_t &effectiveStartPos);
+
+	void getStats(uint64_t &searchingRowCount, uint64_t &candidateCount);
+
+private:
+	void clearAll();
+	void prepareNextMatchingPosition();
+
+	static void setUpNextWorkingKeys(
+			SQLValues::VarAllocator &varAlloc, MatchEntryIterator prevMatchIt,
+			const PatternGraph *patternGraph, bool inheritable,
+			UnorderedMatchKeyMap &keyMap, OrderedMatchKeyMap &workingKeys);
+	static void setUpNextMatchEntries(
+			MatchEntryIterator prevMatchIt, bool partitionTail,
+			const OrderedMatchKeyMap &workingKeys, MatchEntryMap &map);
+
+	void addInitialMatchEntry();
+
+	void setUpProjectionVariableGroups(
+			const VariableHistory &history, LocatedVariableGroupMap &groupMap);
+
+	void applyWindowState();
+	uint64_t resolveMatchCount(uint64_t startPos);
+	const TupleValue* resolveVariableName(uint64_t pos);
+
+	const LocatedNavigationList& prepareNavigationList(NavigationKey &key);
+
+	NavigationKey resolveNavigationKey(
+			const MatchEntry *&matchEntry, uint64_t &curPos);
+	VariableGroupEntry resolveNavigationGroup(
+			const MatchEntry *matchEntry, const NavigationInfo &info,
+			int64_t refVarId, uint64_t curPos);
+	NavigationPosition resolveNavigationPosition(
+			const NavigationInfo &info, const VariableGroupEntry &group,
+			uint64_t curPos);
+
+	bool updateMatchingState();
+	void assignMatchResult();
+	bool isMatched();
+
+	bool checkNextPattern(
+			MatchEntryIterator entryIt, bool &currentAllowed,
+			bool &followingAllowed);
+	bool applyVariablePattern(
+			MatchEntryIterator entryIt, bool currentAllowed, bool followingAllowed,
+			bool &working);
+	void applyNextPattern(
+			MatchEntryIterator entryIt, bool currentAllowed, bool followingAllowed);
+
+	void completeMatchEntryWorking(MatchEntryIterator entryIt);
+
+	void repeatMatchStack(MatchEntryIterator entryIt);
+	void forwardMatchStack(
+			MatchEntryIterator entryIt, uint32_t patternId,
+			util::LocalUniquePtr<MatchEntry> &prevEntry);
+	void pushMatchStack(
+			MatchEntryIterator entryIt, uint32_t patternId,
+			util::LocalUniquePtr<MatchEntry> &prevEntry);
+	MatchEntryIterator popMatchStack(
+			MatchEntryIterator entryIt,
+			util::LocalUniquePtr<MatchEntry> &prevEntry);
+
+	MatchStackElement newMatchStackElement(uint32_t patternId);
+	MatchEntryIterator prepareMatchEntry(
+			MatchEntryIterator entryIt,
+			util::LocalUniquePtr<MatchEntry> *prevEntry);
+	MatchEntryIterator addMatchEntry(const MatchEntry &src);
+
+	MatchEntryIterator reduceMatchEntry(
+			MatchEntryIterator entryIt, bool &matchUpdatable);
+	void eraseMatchWorkingKey(MatchEntryIterator entryIt);
+
+	bool findSameMatchEntry(
+			uint32_t hash, const MatchEntry &entry, MatchEntryIterator &foundIt);
+	bool isSameStack(const MatchStack &stack1, const MatchStack &stack2);
+	bool isSameStackElement(
+			const MatchStackElement &elem1, const MatchStackElement &elem2);
+	uint32_t updateMatchStackHash(MatchStack &stack);
+
+	static PatternStackPath getStackPath(
+			SQLValues::VarAllocator &varAlloc, const MatchStack &stack);
+
+	static bool isPriorMatchEntry(
+			const MatchEntryIterator &it1, const MatchEntryIterator &it2);
+	static bool isReachedMatchEntry(
+			const PatternGraph *patternGraph, MatchEntryIterator entryIt);
+
+	LocatedVariableGroupList& resolveLocatedVariableGroupList(int64_t refVarId);
+	const VariablePredicateInfo& resolveVariablePredicateInfo(int64_t refVarId);
+
+	static VariableIdsList makeVariableIdsList(
+			util::StackAllocator &alloc, const NavigationMap &navMap);
+	static void makeVariableIdSet(
+			const NavigationMap &navMap, NavigationType type,
+			VariableIdSet &idSet);
+	static void makeVariableIdSetSub(
+			const NavigationMap &navMap, NavigationType baseType,
+			VariableIdSet &idSet);
+
+	SQLValues::VarAllocator &varAlloc_;
+
+	const PatternGraph *patternGraph_;
+	const VariablePredicateMap *predMap_;
+	const NavigationMap *navMap_;
+	VariableIdsList varIdsList_;
+
+	MatchState match_;
+	ProjectionState proj_;
+	LocatedNavigationList navList_;
+	SQLExprs::WindowState windowState_;
+};
+
+class SQLSortOps::WindowMatch::NavigationReaderEntry {
+public:
+	NavigationReaderEntry();
+
+	uint64_t position_;
+	uint32_t subIndex_;
+	bool navigated_;
+	bool preserved_;
+};
+
+class SQLSortOps::WindowMatch::NavigationReaderSet {
+public:
+	NavigationReaderSet(OpContext &cxt, uint32_t maxReaderCount);
+
+	void setBaseReader(OpContext &cxt, TupleListReader &baseReader);
+
+	bool navigateReader(OpContext &cxt, uint64_t pos, TupleListReader *&reader);
+	void prepareNextPositions();
+
+	void invalidatePrevPositionRange(OpContext &cxt, uint64_t nextPos);
+	void clearPositions(OpContext &cxt, TupleListReader &baseReader);
+
+private:
+	bool navigateFirstPosition(OpContext &cxt);
+	void clearPositionsDetail(
+			OpContext &cxt, uint64_t firstPos, TupleListReader *baseReader,
+			NavigationReaderIterator baseIt);
+
+	bool navigateReaderDetail(
+			OpContext &cxt, uint64_t pos, TupleListReader *&reader,
+			NavigationReaderIterator &it);
+
+	NavigationReaderIterator prepareNavigableEntry(
+			OpContext &cxt, uint64_t pos);
+	void applyNavigatedEntry(NavigationReaderIterator it, bool done);
+
+	NavigationReaderIterator popLeastUseEntry(
+			OpContext &cxt, NavigationReaderIterator baseIt);
+
+	void addDistanceEntry(NavigationReaderIterator it);
+	void removeDistanceEntry(NavigationReaderIterator it);
+
+	std::pair<bool, bool> findNearEntry(
+			NavigationReaderIterator baseIt, NavigationReaderIterator &preceding,
+			NavigationReaderIterator &following);
+
+	void inheritLocatedReader(
+			OpContext &cxt, NavigationReaderIterator src,
+			NavigationReaderIterator dest);
+	void applyLocatedReader(
+			OpContext &cxt, NavigationReaderIterator it, uint64_t pos,
+			TupleListReader &baseReader);
+
+	uint64_t distanceof(
+			NavigationReaderIterator preceding,
+			NavigationReaderIterator following);
+	void checkReaderIterator(NavigationReaderIterator it);
+
+	static NavigationReaderList makeReaderList(
+			util::StackAllocator &alloc, uint32_t count);
+
+	NavigationReaderList readerList_;
+	uint64_t firstNavigablePosition_;
+	bool firstPositionNavigated_;
+	uint32_t activeReaderCount_;
+
+	LocatedNavigationReaderSet posSet_;
+	LocatedNavigationReaderSet distanceSet_;
+	NavigationReaderRefSet prevOnlySet_;
+	NavigationReaderRefSet unusedSet_;
+};
+
+class SQLSortOps::WindowMatch::ColumnNavigator {
+public:
+	ColumnNavigator(
+			OpContext &cxt, const NavigationMap &navMap,
+			NavigationReaderSet &readerSet);
+
+	bool navigate(OpContext &cxt, VariableTable &variableTable);
+	void clear();
+
+private:
+	const SQLExprs::Expression& resolveExpression(
+			const NavigationKey &key, bool forAssignment, uint32_t navIndex);
+
+	static NavigationExprMap makeExpressionMap(
+			util::StackAllocator &alloc, const NavigationMap &navMap,
+			bool forAssignment);
+
+	NavigationReaderSet &readerSet_;
+
+	NavigationExprMap assignmentExprMap_;
+	NavigationExprMap emptyExprMap_;
+
+	NavigationType type_;
+	uint32_t ordinal_;
+};
+
+struct SQLSortOps::WindowMatch::MatchContext {
+	MatchContext(OpContext &cxt, const OpCode &code);
+
+	const Projection* findProjectionAt(NavigationType type);
+
+	MicroCompiler compiler_;
+	VariablePredicateMap predMap_;
+	NavigationMap navMap_;
+
+	PatternGraph patternGraph_;
+	VariableTable variableTable_;
+
+	NavigationReaderSet navReaderSet_;
+	ColumnNavigator navigator_;
+
+	NavigationProjectionRef proj_;
+	util::LocalUniquePtr<TupleEq> partEq_;
+
+	uint64_t memoryLimit_;
+	bool allRowsPerMatch_;
+
+	bool keyReaderStarted_;
+	uint64_t predPos_;
 };
 
 

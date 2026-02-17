@@ -1695,22 +1695,29 @@ std::ostream& operator<<(
 }
 
 
+struct ConfigTable::Data {
+	typedef util::AllocVector<Constraint*> ConstraintList;
+
+	explicit Data(const Allocator &alloc);
+	~Data();
+
+	Allocator alloc_;
+	ConstraintList constraintList_;
+};
+
 const int32_t ConfigTable::EXPORT_MODE_NO_UNIT =
 		(1 << (EXPORT_MODE_BASE_BITS + 0));
 
 ConfigTable::ConfigTable(const Allocator &alloc) :
-		ParamTable(alloc, &UTIL_TRACER_RESOLVE(MAIN)),
-		constraintPool_(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "configConstraint")),
-		constraintList_(alloc) {
+		ParamTable(alloc, &UTIL_TRACER_RESOLVE(MAIN)) {
+	Allocator localAlloc = alloc;
+	data_ = ALLOC_UNIQUE(localAlloc, Data, localAlloc);
+
 	setTraceEnabled(false);
 	SetUpHandler::setUpAll(*this);
 }
 
 ConfigTable::~ConfigTable() {
-	for (ConstraintList::iterator it = constraintList_.begin();
-			it != constraintList_.end(); ++it) {
-		UTIL_OBJECT_POOL_DELETE(constraintPool_, *it);
-	}
 }
 
 /*!
@@ -1725,17 +1732,11 @@ void ConfigTable::resolveGroup(ParamId groupId, ParamId id, const char8_t *name)
 */
 ConfigTable::Constraint& ConfigTable::addParam(
 		ParamId groupId, ParamId id, const char8_t *name) {
-
-	util::InsertionResetter resetter(constraintList_);
-	util::AllocUniquePtr<Constraint> constraint(
-			UTIL_OBJECT_POOL_NEW(constraintPool_) Constraint(
-					id, *this, getAllocator(), getValuePool()),
-			constraintPool_);
-
-	constraintList_.push_back(constraint.get());
+	util::AllocUniquePtr<Constraint> constraint(ALLOC_UNIQUE(
+			data_->alloc_, Constraint,
+			id, *this, getAllocator(), getValuePool()));
+	data_->constraintList_.push_back(constraint.get());
 	ParamTable::addParam(groupId, id, name, constraint.get(), false, true);
-
-	resetter.release();
 	return *constraint.release();
 }
 
@@ -3169,6 +3170,20 @@ std::ostream& operator<<(
 		const ConfigTable::Constraint::Formatter &formatter) {
 	formatter.format(stream);
 	return stream;
+}
+
+
+ConfigTable::Data::Data(const Allocator &alloc) :
+		alloc_(alloc),
+		constraintList_(alloc_) {
+}
+
+ConfigTable::Data::~Data() {
+	for (ConstraintList::iterator it = constraintList_.begin();
+			it != constraintList_.end(); ++it) {
+		util::AllocUniquePtr<Constraint> constraint(*it, alloc_);
+		constraint.reset();
+	}
 }
 
 

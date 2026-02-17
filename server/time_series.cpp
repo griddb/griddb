@@ -1452,7 +1452,7 @@ void TimeSeries::scanRowIdIndex(
 			}
 		}
 
-		if (inRange && isExclusive()) {
+		if (inRange && isExclusive() && !scanner.isInterruptionEnabled()) {
 			if (order != ORDER_DESCENDING) {
 				if (!scanner.scanRowArrayUnchecked(
 						txn, *this, &rowArray, &(*it), &(*it) + 1)) {
@@ -1484,6 +1484,7 @@ void TimeSeries::scanRowIdIndex(
 			if (!scanner.scanRowUnchecked(
 					txn, *this, NULL,
 					&mergedOIdList.front(), &mergedOIdList.back() + 1)) {
+				scanner.checkInterruption(sc, lastCheckRowId);
 				break;
 			}
 			mergedOIdList.clear();
@@ -1503,7 +1504,6 @@ void TimeSeries::scanRowIdIndex(
 		}
 
 		sc.setSuspendPoint(txn, &lastCheckRowId, sizeof(RowId), 0);
-
 	}
 }
 

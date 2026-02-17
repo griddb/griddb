@@ -230,9 +230,11 @@ public:
 	static const int32_t SQL_V5_5_MSG_VERSION;
 	static const int32_t SQL_V5_6_MSG_VERSION;
 	static const int32_t SQL_V5_8_MSG_VERSION;
+	static const int32_t SQL_V5_9_MSG_VERSION;
 	static const int32_t SQL_MSG_VERSION;
 	static const bool SQL_MSG_BACKWARD_COMPATIBLE;
 
+	static const int32_t MAX_RESOURCE_CONTROL_LEVEL;
 	static const int32_t DEFAULT_RESOURCE_CONTROL_LEVEL;
 
 	/*!
@@ -312,6 +314,13 @@ public:
 		return traceLimitQuerySize_;
 	};
 
+	LimitedQueryStringFormatter getTraceLimitQueryFormatter(
+			const char8_t *str) {
+		const size_t limit =
+				static_cast<size_t>(std::max(getTraceLimitQuerySize(), 0));
+		return LimitedQueryStringFormatter(str, limit);
+	}
+
 	void setSendPendingInterval(int32_t interval) {
 		sendPendingInterval_ = interval;
 	}
@@ -373,7 +382,15 @@ public:
 	}
 
 	int64_t getJobMemoryLimit() {
-		return jobMemoryLimit_;
+		return storeMemoryLimit_;
+	}
+
+	uint64_t getStoreMemoryLimit() {
+		return storeMemoryLimit_;
+	}
+
+	uint64_t getWorkMemoryLimit() {
+		return workMemoryLimit_;
 	}
 
 	void enableProfiler(bool isProfiler) {
@@ -543,6 +560,10 @@ public:
 		return eventMonitor_;
 	}
 
+	const EventEngine::Source& getEESource() {
+		return eeSource_;
+	}
+
 	util::AllocatorLimitter* getTotalMemoryLimitter() {
 		return totalMemoryLimitter_;
 	}
@@ -551,30 +572,47 @@ public:
 		return workMemoryLimitter_;
 	}
 
+	uint64_t getTotalMemoryLimit() {
+		return totalMemoryLimit_;
+	}
+
 	bool isFailOnTotalMemoryLimit() {
 		const int32_t level = resolveResourceControlLevel();
 		return failOnTotalMemoryLimit_ && isTotalMemoryLimittable(level);
 	}
 
-private:
 	int32_t resolveResourceControlLevel() {
 		return (resourceControlLevel_ == 0 ?
 				DEFAULT_RESOURCE_CONTROL_LEVEL : resourceControlLevel_);
 	}
 
+	void applyMonitoringConfig(ConfigTable &config);
+
+	void handleLegacyJobContol(EventContext &ec, Event &ev);
+
+private:
 	static bool isTotalMemoryLimittable(int32_t resourceControlLevel) {
 		return resourceControlLevel > 1;
 	}
+
+	void setStoreMemoryLimit(uint64_t limit);
+	void setJobEssentialMemoryLimit(uint64_t limit);
+	void setJobNodeTimeout(int32_t timeoutSeconds);
+
+	void setIndexScanCostRate(double rate);
+	void setRangeScanCostRate(double rate);
+	void setBlockScanCountRate(double rate);
+	void setPatternMatchMemoryLimitRate(double rate);
 
 	void setTotalMemoryLimit(uint64_t limit);
 	void setWorkMemoryLimitRate(double rate);
 	void setFailOnTotalMemoryLimit(bool enabled);
 	void setResourceControlLevel(int32_t level);
 
-	void setUpMemoryLimits();
+	void setUpInitialMemoryLimits();
 
-	void applyTotalMemoryLimit();
-	void applyFailOnTotalMemoryLimit();
+	void applyTotalMemoryLimit(bool monitoring);
+	void applyFailOnTotalMemoryLimit(bool monitoring);
 
 	size_t resolveTotalMemoryLimit();
 
@@ -660,7 +698,7 @@ private:
 
 	int64_t jobMemoryLimit_;
 
-	uint64_t storeMemoryLimit_;
+	util::Atomic<uint64_t> storeMemoryLimit_;
 	uint64_t workMemoryLimit_;
 
 	util::Atomic<uint64_t> totalMemoryLimit_;

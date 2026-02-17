@@ -22,35 +22,18 @@
 #include "uuid_utils.h"
 
 std::ostream &operator<<(std::ostream &stream, const ClientId &id) {
-	stream << std::hex << static_cast<uint32_t>(id.uuid_[0])
-		   << static_cast<uint32_t>(id.uuid_[1])
-		   << static_cast<uint32_t>(id.uuid_[2])
-		   << static_cast<uint32_t>(id.uuid_[3]) << "-"
-		   << static_cast<uint32_t>(id.uuid_[4])
-		   << static_cast<uint32_t>(id.uuid_[5]) << "-"
-		   << static_cast<uint32_t>(id.uuid_[6])
-		   << static_cast<uint32_t>(id.uuid_[7]) << "-"
-		   << static_cast<uint32_t>(id.uuid_[8])
-		   << static_cast<uint32_t>(id.uuid_[9]) << "-"
-		   << static_cast<uint32_t>(id.uuid_[10])
-		   << static_cast<uint32_t>(id.uuid_[11])
-		   << static_cast<uint32_t>(id.uuid_[12])
-		   << static_cast<uint32_t>(id.uuid_[13])
-		   << static_cast<uint32_t>(id.uuid_[14])
-		   << static_cast<uint32_t>(id.uuid_[15]) << std::dec << ":"
-		   << id.sessionId_;
+	char8_t tmpBuffer[UUID_STRING_SIZE];
+	UUIDUtils::unparse(id.uuid_, tmpBuffer);
+	stream.write(tmpBuffer, sizeof(tmpBuffer) - 1);
+	stream << ":" << id.sessionId_;
 	return stream;
 }
 
 std::string ClientId::dump(util::StackAllocator &alloc) {
+	static_cast<void>(alloc);
 
 	util::NormalOStringStream strstrm;
-	char tmpBuffer[UUID_STRING_SIZE];
-	UUIDUtils::unparse(uuid_, tmpBuffer);
-	util::String tmpUUIDStr(tmpBuffer, 36, alloc);	
-	strstrm << tmpUUIDStr.c_str();
-	strstrm << ":" << sessionId_;
-
+	strstrm << *this;
 	return strstrm.str().c_str();
 }
 

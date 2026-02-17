@@ -170,6 +170,66 @@ const char8_t* JsonUtils::typeToString(const picojson::value &value) {
 	}
 }
 
+picojson::value JsonUtils::limitedValueForSerialize(
+		const picojson::value &value, size_t limit,
+		const picojson::value *limitMessage,
+		const char8_t *const *retainedKeys) {
+	if (limitMessage == NULL) {
+		const picojson::value localMessage(u8string("(omitted)"));
+		return limitedValueForSerialize(
+				value, limit, &localMessage, retainedKeys);
+	}
+
+	if (!value.is<Object>()) {
+		return *limitMessage;
+	}
+	const Object &objValue = value.get<Object>();
+
+	typedef std::set<u8string> KeySet;
+	typedef std::vector<u8string> KeyList;
+	KeySet keySet;
+	KeyList keyList;
+	for (const char8_t *const *it = retainedKeys; *it != NULL; ++it) {
+		const std::pair<KeySet::iterator, bool> &ret = keySet.insert(*it);
+		if (ret.second) {
+			keyList.push_back(*ret.first);
+		}
+	}
+
+	typedef std::set<std::pair<size_t, u8string>> OtherKeySet;
+	OtherKeySet otherKeySet;
+	for (Object::const_iterator it = objValue.begin();
+			it != objValue.end(); ++it) {
+		if (keySet.find(it->first) != keySet.end()) {
+			continue;
+		}
+		otherKeySet.insert(
+				std::make_pair(it->second.serialize().size(), it->first));
+	}
+
+	for (OtherKeySet::const_iterator it = otherKeySet.begin();
+			it != otherKeySet.end(); ++it) {
+		keyList.push_back(it->second);
+	}
+
+	picojson::value limitedValue = value;
+	Object &limitedObj = limitedValue.get<Object>();
+
+	while (!keyList.empty()) {
+		Object::iterator it = limitedObj.find(keyList.back());
+		if (it != limitedObj.end()) {
+			it->second = *limitMessage;
+		}
+
+		if (limitedValue.serialize().size() <= limit) {
+			break;
+		}
+		keyList.pop_back();
+	}
+
+	return limitedValue;
+}
+
 template<typename V, typename S>
 V& JsonUtils::asValue(S &src, const u8string &key, Path *path) {
 	typedef typename ConstTraits<V, picojson::object>::Type Obj;

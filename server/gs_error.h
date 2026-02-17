@@ -245,6 +245,8 @@ inline bool InterruptionChecker::check() {
 
 #define GS_THROW_CUSTOM_ERROR(type, errorCode, message) \
 	throw GS_EXCEPTION_CREATE_DETAIL(type, errorCode, NULL, message)
+#define GS_THROW_CUSTOM_ERROR_TRACE(type, errorCode, message) \
+	throw GS_EXCEPTION_CREATE_DETAIL_TRACE(type, errorCode, NULL, message)
 #define GS_RETHROW_CUSTOM_ERROR(type, defaultCode, cause, message) \
 	throw GS_EXCEPTION_CONVERT_CUSTOM(type, defaultCode, cause, message)
 #define GS_RETHROW_CUSTOM_OR_SYSTEM(type, defaultCode, cause, message) \
@@ -255,6 +257,8 @@ inline bool InterruptionChecker::check() {
 
 #define GS_THROW_USER_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(UserException, errorCode, message)
+#define GS_THROW_USER_ERROR_TRACE(errorCode, message) \
+	GS_THROW_CUSTOM_ERROR_TRACE(UserException, errorCode, message)
 #define GS_THROW_SYSTEM_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(SystemException, errorCode, message)
 

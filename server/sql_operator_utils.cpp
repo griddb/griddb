@@ -1304,6 +1304,28 @@ bool SQLOps::OpCodeBuilder::isAggregationArrangementRequired(
 					SQLExprs::ExprCode::ATTR_GROUPING)) != 0);
 }
 
+bool SQLOps::OpCodeBuilder::isLargeOutputPossible(const Projection &proj) {
+	const Projection *aggrProj = findAggregationProjection(proj, NULL);
+	if (aggrProj != NULL) {
+		return false;
+	}
+
+	for (uint32_t outIndex = 0;; outIndex++) {
+		const Projection *outProj = findOutputProjection(proj, &outIndex);
+		if (outProj == NULL) {
+			return false;
+		}
+
+		for (SQLExprs::Expression::Iterator it(*outProj); it.exists(); it.next()) {
+			const TupleColumnType type = it.get().getCode().getColumnType();
+			if (!SQLValues::TypeUtils::isSomeFixed(type) &&
+					!SQLValues::TypeUtils::isAny(type)) {
+				return true;
+			}
+		}
+	}
+}
+
 void SQLOps::OpCodeBuilder::resolveColumnTypeList(
 		const OpCode &code, ColumnTypeList &typeList,
 		const uint32_t *outIndex) {
@@ -2351,6 +2373,7 @@ void SQLOps::OpProfiler::addOperatorProfile(
 	ref.actualNanoTime_ += info.actualNanoTime_;
 
 	addOptimizationProfile(info.optimization_, dest.optimization_);
+	addCriterionProfile(info, dest);
 
 	if (info.index_ != NULL) {
 		for (util::AllocVector<AnalysisIndexInfo>::iterator it =
@@ -2383,6 +2406,17 @@ void SQLOps::OpProfiler::addOptimizationProfile(
 	}
 }
 
+void SQLOps::OpProfiler::addCriterionProfile(
+		const AnalysisInfo &src, LocalInfo &dest) {
+	if (src.criterion_ != NULL) {
+		for (NameRefList::iterator it = src.criterion_->begin();
+				it != src.criterion_->end(); ++it) {
+			const util::AllocString baseStr((*it)->c_str(), alloc_);
+			dest.criterion_.insert(std::make_pair(baseStr, baseStr));
+		}
+	}
+}
+
 void SQLOps::OpProfiler::addIndexProfile(
 		const OpProfilerId &id, const AnalysisIndexInfo &info) {
 	LocalInfo &opDest = infoList_[id.id_.getIndex(idManager_)];
@@ -2405,8 +2439,8 @@ void SQLOps::OpProfiler::addIndexProfile(
 	if (info.conditionList_ != NULL) {
 		for (IndexCondList::iterator it = info.conditionList_->begin();
 				it != info.conditionList_->end(); ++it) {
-			dest.conditionColumnList_.push_back(
-					util::AllocString(it->column_->c_str(), alloc_));
+			dest.conditionColumnList_.push_back(util::AllocString(
+					(it->column_ == NULL ? "" : it->column_->c_str()), alloc_));
 
 			dest.conditionListRef_.push_back(AnalysisIndexCondition());
 			dest.conditionListRef_.back().condition_ = it->condition_;
@@ -2423,6 +2457,8 @@ void SQLOps::OpProfiler::addIndexProfile(
 	ref.bulk_ = info.bulk_;
 	ref.hit_ = info.hit_;
 	ref.mvccHit_ = info.mvccHit_;
+	ref.cost_ = info.cost_;
+	ref.estimationCount_ = info.estimationCount_;
 }
 
 SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
@@ -2447,6 +2483,7 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
 	AnalysisInfo &ref = src.ref_.front();
 
 	ref.optimization_ = getOptimizations(src);
+	ref.criterion_ = getCriterions(src);
 
 	ref.index_ = NULL;
 	LocalIndexInfoList &indexList = src.index_;
@@ -2514,6 +2551,22 @@ SQLOps::OpProfiler::OptimizationList* SQLOps::OpProfiler::getOptimizations(
 	return &destList;
 }
 
+SQLOps::OpProfiler::NameRefList*
+SQLOps::OpProfiler::getCriterions(LocalInfo &src) {
+	if (src.criterion_.empty()) {
+		return NULL;
+	}
+
+	src.criterionRef_.clear();
+
+	for (NameMap::iterator it = src.criterion_.begin();
+			it != src.criterion_.end(); ++it) {
+		src.criterionRef_.push_back(&it->second);
+	}
+
+	return &src.criterionRef_;
+}
+
 bool SQLOps::OpProfiler::findAnalysisIndexInfo(
 		LocalIndexInfo &src, AnalysisIndexInfo &dest) {
 	if (src.ref_.empty()) {
@@ -2540,9 +2593,13 @@ bool SQLOps::OpProfiler::findAnalysisIndexInfo(
 	dest.conditionList_ = NULL;
 	IndexCondList &condList = src.conditionListRef_;
 	if (!condList.empty()) {
+		NameList &condColumnList = src.conditionColumnList_;
 		for (IndexCondList::iterator it = condList.begin();
 				it != condList.end(); ++it) {
-			it->column_ = &src.columnNameList_[it - condList.begin()];
+			const size_t pos = it - condList.begin();
+			util::AllocString *name =
+					(pos < condColumnList.size() ? &condColumnList[pos] : NULL);
+			it->column_ = (name != NULL && !name->empty() ? name : NULL);
 		}
 		dest.conditionList_ = &src.conditionListRef_;
 	}
@@ -2622,6 +2679,8 @@ SQLOps::OpProfiler::LocalInfo::LocalInfo(
 		optimization_(alloc),
 		index_(alloc),
 		sub_(alloc),
+		criterion_(alloc),
+		criterionRef_(alloc),
 		optRef_(alloc),
 		indexRef_(alloc),
 		subRef_(alloc),
@@ -2748,6 +2807,25 @@ SQLOps::OpProfilerIndexEntry& SQLOps::OpProfilerEntry::getIndexEntry(
 	return *index_;
 }
 
+void SQLOps::OpProfilerEntry::addCriterion(
+		SQLOpTypes::PlannigCriterion criterion) {
+	const util::AllocString str(Coders::CRITERION_CODER(criterion, ""), alloc_);
+	localInfo_.criterion_.insert(std::make_pair(str, str));
+}
+
+
+const util::NameCoderEntry<SQLOpTypes::PlannigCriterion>
+		SQLOps::OpProfilerEntry::Coders::CRITERION_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::CRITERION_SYNTAX),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::CRITERION_INDEX_NONE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::CRITERION_INDEX_HIT),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::CRITERION_INDEX_COST_SMALL),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::CRITERION_INDEX_COST_LARGE)
+};
+
+const util::NameCoder<
+		SQLOpTypes::PlannigCriterion, SQLOpTypes::END_CRITERION>
+		SQLOps::OpProfilerEntry::Coders::CRITERION_CODER(CRITERION_LIST, 1);
 
 
 const util::NameCoderEntry<SQLOps::OpProfilerIndexEntry::ModificationType>
@@ -2798,7 +2876,9 @@ SQLOps::OpProfilerIndexEntry::OpProfilerIndexEntry(
 		modification_(END_MOD),
 		bulk_(0),
 		hit_(0),
-		mvccHit_(0) {
+		mvccHit_(0),
+		cost_(0),
+		estimationCount_(0) {
 }
 
 bool SQLOps::OpProfilerIndexEntry::isEmpty() {
@@ -2889,6 +2969,30 @@ void SQLOps::OpProfilerIndexEntry::addCondition(
 	}
 }
 
+void SQLOps::OpProfilerIndexEntry::addNoIndexCondition() {
+	AnalysisIndexCondition destCond;
+	destCond.condition_ = AnalysisIndexCondition::CONDITION_FULL;
+
+	OpProfiler::IndexCondList &condList = getLocalInfo().conditionListRef_;
+
+	const size_t condIndex = condList.size();
+	condList.push_back(destCond);
+
+	OpProfiler::NameList &nameList = getLocalInfo().conditionColumnList_;
+	if (condIndex >= nameList.size()) {
+		nameList.resize(condIndex + 1, util::AllocString(alloc_));
+	}
+
+	searchWatch_.reset();
+	executionCount_ = 0;
+	modification_ = END_MOD;
+	bulk_ = 0;
+	hit_ = 0;
+	mvccHit_ = 0;
+	cost_ = 0;
+	estimationCount_ = 0;
+}
+
 void SQLOps::OpProfilerIndexEntry::startSearch() {
 	searchWatch_.start();
 }
@@ -2900,6 +3004,11 @@ void SQLOps::OpProfilerIndexEntry::finishSearch() {
 
 void SQLOps::OpProfilerIndexEntry::addHitCount(int64_t count, bool onMvcc) {
 	(onMvcc ? mvccHit_ : hit_) += count;
+}
+
+void SQLOps::OpProfilerIndexEntry::addCost(int64_t cost) {
+	cost_ += cost;
+	estimationCount_++;
 }
 
 void SQLOps::OpProfilerIndexEntry::updateOrdinal(uint32_t ordinal) {
@@ -2929,6 +3038,8 @@ void SQLOps::OpProfilerIndexEntry::update() {
 	ref.bulk_ = bulk_;
 	ref.hit_ = hit_;
 	ref.mvccHit_ = mvccHit_;
+	ref.cost_ = cost_;
+	ref.estimationCount_ = estimationCount_;
 }
 
 SQLOps::OpProfiler::LocalIndexInfo&
@@ -2963,6 +3074,7 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_RANK_PARTITION),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_FRAME_PARTITION),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_MERGE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_MATCH),
 
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_OUTER),
@@ -3007,6 +3119,7 @@ SQLOpUtils::AnalysisInfo::AnalysisInfo() :
 		optimization_(NULL),
 		index_(NULL),
 		op_(NULL),
+		criterion_(NULL),
 		partial_(NULL),
 		actualNanoTime_(0) {
 }
@@ -3047,6 +3160,7 @@ SQLOpUtils::AnalysisOptimizationInfo::AnalysisOptimizationInfo() :
 
 const util::NameCoderEntry<SQLOpUtils::AnalysisIndexCondition::ConditionType>
 		SQLOpUtils::AnalysisIndexCondition::CONDITION_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(CONDITION_FULL),
 	UTIL_NAME_CODER_ENTRY(CONDITION_RANGE),
 	UTIL_NAME_CODER_ENTRY(CONDITION_RANGE_FIRST),
 	UTIL_NAME_CODER_ENTRY(CONDITION_RANGE_LAST),
@@ -3073,7 +3187,9 @@ SQLOpUtils::AnalysisIndexInfo::AnalysisIndexInfo() :
 		executionCount_(0),
 		actualTime_(0),
 		hit_(0),
-		mvccHit_(0) {
+		mvccHit_(0),
+		cost_(0),
+		estimationCount_(0) {
 }
 
 
@@ -3221,7 +3337,7 @@ void SQLOpUtils::ExpressionWriter::initialize(
 			SQLValues::TypeUtils::isNullable(
 					inSummaryColumn_->getTupleColumn().getType()) &&
 			!SQLValues::TypeUtils::isNullable(inColumnType)) {
-		inColumnType = SQLValues::TypeUtils::toNullable(inColumnType);
+		srcType_ = SQLExprs::ExprCode::END_INPUT;
 	}
 
 	func_ = resolveFunc<const ExpressionWriter>(
@@ -3389,8 +3505,13 @@ inline void SQLOpUtils::ExpressionWriter::ByGeneral<T, G>::operator()() const {
 	const TupleValue &value =
 			base_.expr_->eval(base_.cxtRef_->cxt_->getExprContext());
 
-	if (T::NullableType::VALUE && ValueUtils::isNull(value)) {
-		ValueUtils::writeNull(*base_.outTuple_, base_.outColumn_);
+	if (!T::AnyType::VALUE && ValueUtils::isNull(value)) {
+		if (T::NullableType::VALUE) {
+			ValueUtils::writeNull(*base_.outTuple_, base_.outColumn_);
+		}
+		else {
+			SQLValues::TypeUtils::errorNonNull(base_.outColumn_.type_);
+		}
 		return;
 	}
 

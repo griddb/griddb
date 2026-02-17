@@ -1158,7 +1158,6 @@ bool SQLGroupOps::GroupRangeMerge::finishPendingGroups(
 	return true;
 }
 
-#include <iostream>
 bool SQLGroupOps::GroupRangeMerge::checkGroupRow(
 		OpContext &cxt, MergeContext &mergeCxt, TupleListReader &pipeReader,
 		TupleListReader &keyReader, Directions &directions) {

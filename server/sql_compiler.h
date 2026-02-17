@@ -28,7 +28,6 @@ class TransactionContext;
 class FullContainerKey;
 class DataStoreV4;
 
-
 struct SQLHint {
 	class Coder;
 
@@ -53,6 +52,8 @@ struct SQLHint {
 		TASK_ASSIGNMENT, 
 
 		LEGACY_PLAN,
+		COST_BASED_INDEX_SCAN,
+		NO_COST_BASED_INDEX_SCAN,
 		COST_BASED_JOIN,
 		NO_COST_BASED_JOIN,
 		COST_BASED_JOIN_DRIVING,
@@ -380,6 +381,7 @@ public:
 		static const CommandOptionFlag CMD_OPT_GROUP_RANGE;
 		static const CommandOptionFlag CMD_OPT_JOIN_DRIVING_NONE_LEFT;
 		static const CommandOptionFlag CMD_OPT_JOIN_DRIVING_SOME;
+		static const CommandOptionFlag CMD_OPT_SCAN_NO_COST_BASED;
 	};
 
 	explicit Node(util::StackAllocator &alloc);
@@ -968,6 +970,7 @@ public:
 
 	class GenRAContext;
 	class GenOverContext;
+	class GenPatternContext;
 
 	class ReorderJoin;
 	class SelectJoinDriving;
@@ -1137,6 +1140,9 @@ private:
 
 	typedef util::Vector<ExprRef> ExprRefList;
 
+	typedef std::pair<uint32_t, util::String> PatternVarIdEntry;
+	typedef util::Map<util::String, PatternVarIdEntry> PatternVarIdMap;
+
 	enum Mode {
 		MODE_DEFAULT = 0,
 		MODE_NORMAL_SELECT,
@@ -1149,7 +1155,9 @@ private:
 		MODE_HAVING,
 		MODE_ORDERBY,
 		MODE_LIMIT,
-		MODE_OFFSET
+		MODE_OFFSET,
+		MODE_PATTERN_MEASURES,		
+		MODE_PATTERN_VARIABLE		
 	};
 
 	enum {
@@ -1388,6 +1396,77 @@ private:
 	void genPseudoWindowResult(
 			GenRAContext &cxt, GenOverContext &overCxt, Plan &plan);
 
+	void genPatternRecognition(GenPatternContext &cxt, Plan &plan);
+	void genPatternSortNode(GenPatternContext &cxt, Plan &plan);
+	void genPatternMatchNode(GenPatternContext &cxt, Plan &plan);
+
+	void genPatternMatchMeasures(
+			Plan& plan, GenPatternContext &cxt, PlanExprList &exprList,
+			const PatternVarIdMap &varIdMap);
+	void genPatternMatchPredicate(
+			Plan& plan, GenPatternContext &cxt, PlanExprList &exprList,
+			PatternVarIdMap &varIdMap);
+	Expr genPatternMatchOption(
+			Plan& plan, GenPatternContext &cxt,
+			PatternVarIdMap &varIdMap);
+
+	Expr genPatternDescription(
+			Plan& plan, GenPatternContext &cxt, ExprList& varListArgs);
+	Expr genPatternTree(
+			Plan &plan, GenPatternContext &cxt,
+			const SyntaxTree::RegexNode &regexNode, ExprList& varListArgs);
+	ExprList& genPatternVariableListArgs(Plan& plan, GenPatternContext &cxt);
+	PatternVarIdMap getPatternVariableIdMap(const ExprList &varListArgs);
+	Expr genPatternVariableList(
+			Plan& plan, ExprList &varListArgs, PatternVarIdMap &varIdMap);
+
+	Expr genPatternVariable(
+			Plan &plan, const QualifiedName &qName, Expr &srcPredExpr);
+	Expr genPatternMatchMode(const Plan& plan, GenPatternContext &cxt);
+
+	Expr genPatternMeasuresExpr(
+			Plan& plan, const Expr &expr, const PatternVarIdMap &varIdMap);
+	PlanExprList genPatternMeasuresDefaultExprList(
+			Plan& plan, const PatternVarIdMap &varIdMap);
+
+	Expr genPatternExpr(
+			const Plan &plan, const Expr &baseExpr, Mode mode,
+			const PatternVarIdMap &varIdMap, bool withVarName);
+	Expr resolveNavigationExpr(
+			const Plan &plan, const Expr &baseExpr, Mode mode,
+			const PatternVarIdMap &varIdMap, bool withVarName,
+			bool implicitlyNavigable, Type rewritableExprType);
+
+	const QualifiedName& checkPatternVariableName(
+			const QualifiedName *qName, const Expr *baseExpr);
+	const QualifiedName* findPatternVariableName(const QualifiedName *qName);
+
+	bool findPatternVariableIdEntry(
+			const PatternVarIdMap &map, const char8_t *name, bool caseSensitive);
+	bool findPatternVariableIdEntry(
+			const PatternVarIdMap &map, const char8_t *name, bool caseSensitive,
+			const PatternVarIdEntry *&entry);
+
+	int64_t addPatternVariableIdEntry(
+			PatternVarIdMap &map, int64_t &varIdCount, const char8_t *name);
+
+
+	void validatePatternSortKeysSyntax(const ExprList &exprList);
+
+	void validatePatternRecognition(const Expr &expr);
+	void validatePatternSortNode(const Plan &plan);
+	void validatePatternMatchNode(const Plan &plan);
+	void validatePatternMatchTable(const Expr &expr);
+	void validatePatternMatchMeasures(const PlanExprList &exprList);
+	void validatePatternMatchPredicate(const PlanExprList& exprlist);
+	void validatePatternMatchOption(const PlanExprList& exprlist);
+	void validatePatternTree(const Expr& inExpr);
+	void validatePatternVariableList(const PlanExprList& exprlist);
+	void validatePatternVariable(const Expr& inExpr);
+
+
+	void validatePatternMatchFunction(const Expr& inExpr, Mode mode);
+
 	void genSelectList(
 			const Select &select, Plan &plan, PlanExprList &selectList,
 			Mode mode, const PlanNodeId *productedNodeId);
@@ -1468,6 +1547,9 @@ private:
 			Mode mode, AggregationPhase phase);
 	static void setUpColumnExprAttributes(Expr &outExpr, bool aggregated);
 
+	void genColumnExprBySyntaxTree(
+			const Expr &inExpr, const Plan &plan, Mode mode, bool aggregated,
+			const PlanNodeId *productedNodeId, Expr &outExpr);
 	PlanExprList genAllColumnExpr(
 			const Plan &plan, Mode mode, const QualifiedName *name);
 	Expr genColumnExpr(const Plan &plan, uint32_t inputId, ColumnId columnId);
@@ -1516,6 +1598,9 @@ private:
 
 	void splitAggrWindowExprList(GenRAContext &cxt, const ExprList &inExprList, const Plan &plan);
 	Expr genReplacedAggrExpr(const Plan &plan, const Expr *inExpr);
+	void pullUpAggrWindowExprList(
+			GenRAContext &cxt, const ExprList &inExprList, const Plan &plan,
+			bool aggrModeFound);
 
 	bool splitSubqueryCond(
 			const Expr &inExpr, Expr *&scalarExpr, Expr *&subExpr);
@@ -1594,6 +1679,8 @@ private:
 			const Plan &plan, bool insertOrUpdateFound);
 	static bool isForInsertOrUpdate(const PlanNode &node);
 
+	bool checkUnboundParameters(const Plan &plan);
+
 	void finalizeScanCostHints(Plan &plan, bool tableCostAffected);
 
 	void applyPlanningOption(Plan &plan);
@@ -1622,8 +1709,10 @@ private:
 			Plan *plan, PlanNode *node);
 	SQLPreparedPlan::ProfileKey prepareProfileKey(PlanNode &node);
 
+	bool isOptimizationDisabled(const Plan &plan);
 	void checkOptimizationUnitSupport(OptimizationUnitType type);
-	bool isOptimizationUnitEnabled(OptimizationUnitType type);
+	bool isOptimizationUnitEnabled(
+			OptimizationUnitType type, bool disabledAll);
 	bool isOptimizationUnitCheckOnly(OptimizationUnitType type);
 
 	static OptimizationFlags getDefaultOptimizationFlags();
@@ -1792,6 +1881,7 @@ private:
 	uint64_t getMaxExpansionCount(const Plan &plan);
 	int64_t getMaxGeneratedRows(const Plan &plan);
 
+	bool isLegacyIndexScan(const Plan &plan);
 	bool isLegacyJoinReordering(const Plan &plan);
 	bool isLegacyJoinDriving(const Plan &plan);
 	static bool isLegacyPlanning(
@@ -2821,8 +2911,9 @@ public:
 	  selectList_(alloc), selectExprRefList_(alloc),
 	  selectTopColumnId_(UNDEF_COLUMNID),
 	  productedNodeId_(UNDEF_PLAN_NODEID), whereExpr_(NULL),
-	  outExprList_(alloc), aggrExprList_(alloc), aggrExprCount_(0),
-	  windowExprList_(alloc), genuineWindowExprCount_(0), pseudoWindowExprCount_(0),
+	  outExprList_(alloc), aggrExprList_(alloc), aggrModeList_(alloc),
+	  aggrExprCount_(0), windowExprList_(alloc),
+	  genuineWindowExprCount_(0), pseudoWindowExprCount_(0),
 	  otherTopPos_(-1), otherColumnCount_(0),
 	  inSubQuery_(false)
 	{};
@@ -2839,6 +2930,7 @@ public:
 	ExprRef innerIdExprRef_;
 	ExprList outExprList_;
 	ExprList aggrExprList_;
+	util::Vector<bool> aggrModeList_;
 	size_t aggrExprCount_;
 	ExprList windowExprList_;
 	size_t genuineWindowExprCount_;
@@ -2876,6 +2968,40 @@ public:
 	size_t orderByStartPos_;
 };
 
+class SQLCompiler::GenPatternContext {
+public:
+	typedef util::Set<int64_t> CheckVarIdSet;
+
+	explicit GenPatternContext(util::StackAllocator &alloc)
+	: patternOption_(NULL)
+	  , patternPartitionByList_(alloc)
+	  , patternOrderByList_(alloc)
+	  , varIdMap_(alloc), checkVarIdSet_(alloc)
+	  , varIdCount_(0), definedVarCount_(0)
+	{};
+
+	GenPatternContext(
+			util::StackAllocator &alloc,
+			const SyntaxTree::PatternRecognizeOption* patternOption)
+	: patternOption_(patternOption)
+	  , patternPartitionByList_(alloc)
+	  , patternOrderByList_(alloc)
+	  , varIdMap_(alloc), checkVarIdSet_(alloc)
+	  , varIdCount_(0), definedVarCount_(0)
+	{};
+
+	const SyntaxTree::PatternRecognizeOption* patternOption_;
+	PlanExprList patternPartitionByList_;
+	PlanExprList patternOrderByList_;
+	PatternVarIdMap varIdMap_;
+	CheckVarIdSet checkVarIdSet_;
+	int64_t varIdCount_;
+	int64_t definedVarCount_; 
+
+private:
+	GenPatternContext(const GenPatternContext&);
+	GenPatternContext& operator=(const GenPatternContext&);
+};
 
 class SQLCompiler::ExprHint {
 public:
@@ -3193,9 +3319,13 @@ public:
 	SQLCompiler& getCompiler();
 	Plan& getPlan();
 
+	bool isDisabledAll();
+	bool isUnitEnabled(OptimizationUnitType type);
+
 private:
 	SQLCompiler &compiler_;
 	Plan &plan_;
+	bool disabledAll_;
 };
 
 class SQLCompiler::OptimizationUnit {
@@ -3254,6 +3384,9 @@ public:
 	void setPlanningVersion(const SQLPlanningVersion &version);
 	const SQLPlanningVersion& getPlanningVersion() const;
 
+	void setCostBasedIndexScan(bool value);
+	bool isCostBasedIndexScan() const;
+
 	void setCostBasedJoin(bool value);
 	bool isCostBasedJoin() const;
 
@@ -3274,6 +3407,7 @@ private:
 	util::TimeZone timeZone_;
 
 	SQLPlanningVersion planningVersion_;
+	bool costBasedIndexScan_;
 	bool costBasedJoin_;
 	bool costBasedJoinDriving_;
 
@@ -3401,6 +3535,10 @@ public:
 	static Type swapCompOp(Type type);
 	static Type negateCompOp(Type type);
 	static Type getLogicalOp(Type type, bool negative);
+
+	static bool getPatternMatchExprInfo(
+			Type type, bool onPatternMatch, bool &measuresOnly,
+			bool &implicitlyNavigable, Type &rewritableExprType);
 };
 
 class SQLCompiler::Profiler {

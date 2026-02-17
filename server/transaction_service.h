@@ -4746,18 +4746,21 @@ public:
 			watch_.start();
 		}
 
-		bool checkCounter() {
-			counter_++;
-			if (counter_ % checkInterval_ == 0) {
-				status_ = EXECUTE;
-				return true;
-			}
-			else {
-				return false;
-			}
-		}
+		bool checkCounter();
 
 		bool next(int64_t size);
+
+		int64_t startScan() {
+			return totalWatch_.elapsedMillis();
+		}
+
+		void endScan(int64_t prevTime, size_t size) {
+			int64_t currentTime = totalWatch_.elapsedMillis();
+			if (currentTime > prevTime) {
+				actualTime_ += currentTime - prevTime;
+			}
+			totalSize_ += size;
+		}
 
 		util::Stopwatch watch_;
 		Status status_;
@@ -4770,6 +4773,10 @@ public:
 		int32_t limitCount_;
 		int32_t interruptionInterval_;
 		int64_t counter_;
+		util::Stopwatch totalWatch_;
+		int64_t execCounter_;
+		int64_t actualTime_;
+		int64_t totalSize_;
 	};
 
 	ExpiredContainerContext& getContext(PartitionGroupId pgId) {
@@ -5258,6 +5265,13 @@ public:
 		totalExternalConnectionCount_++;
 	}
 
+	void setExpiredContainerCount(size_t count) {
+		expiredContainerCount_ += static_cast<int64_t>(count);
+	}
+
+	int64_t getExpiredCountainerCount() {
+		return expiredContainerCount_;
+	}
 
 	util::StackAllocator* getTxnLogAlloc(PartitionGroupId pgId);
 
@@ -5273,6 +5287,10 @@ public:
 
 	UserCache *userCache_;
 	OpenLDAPFactory* olFactory_;
+
+	SyncManager& getSyncManager() {
+		return *syncManager_;
+	}
 
 private:
 	static class StatSetUpHandler : public StatTable::SetUpHandler {
@@ -5323,6 +5341,8 @@ private:
 
 	int64_t totalInternalConnectionCount_;
 	int64_t totalExternalConnectionCount_;
+
+	util::Atomic<int64_t> expiredContainerCount_;
 
 	std::vector<bool> onBackgroundTask_; 
 	std::vector<util::StackAllocator *> txnLogAlloc_; 

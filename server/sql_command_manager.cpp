@@ -2969,6 +2969,9 @@ void NoSQLStore::estimateIndexSearchSize(
 
 	PartitionId partitionId = 0;
 	for (;;) {
+		keyList.clear();
+		estimationList.clear();
+
 		partitionId = indexStats.getMissedKeys(
 				alloc, requester, partitionId, keyList);
 		if (keyList.empty()) {

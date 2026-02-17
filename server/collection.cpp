@@ -1482,7 +1482,8 @@ void Collection::scanRowIdIndex(
 
 		if (isExclusive() &&
 				startRowId <= rowArray.getRowId() &&
-				lastCheckRowId < endRowId) {
+				lastCheckRowId < endRowId &&
+				!scanner.isInterruptionEnabled()) {
 			if (!scanner.scanRowArrayUnchecked(
 					txn, *this, &rowArray, &(*it), &(*it) + 1)) {
 				limitReached = true;
@@ -1499,7 +1500,8 @@ void Collection::scanRowIdIndex(
 						txn, *this, &rowArray,
 						&checkedOIdList.front(),
 						&checkedOIdList.back() + 1)) {
-					limitReached = true;
+					limitReached =
+							!scanner.checkInterruption(sc, lastCheckRowId);
 					break;
 				}
 				checkedOIdList.clear();

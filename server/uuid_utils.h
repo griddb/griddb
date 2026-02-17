@@ -9,8 +9,8 @@ typedef uint8_t UUIDValue[UUID_BYTE_SIZE];
 
 struct UUIDUtils {
 	static void generate(UUIDValue &out);
-	static int parse(const char *uuidString, UUIDValue &out);
-	static void unparse(UUIDValue &out, char *uuidString);
+	static int parse(const char8_t *uuidString, UUIDValue &out);
+	static void unparse(const UUIDValue &in, char8_t *uuidString);
 };
 
 #endif

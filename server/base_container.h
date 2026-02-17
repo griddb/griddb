@@ -1945,7 +1945,7 @@ public:
 
 	ContainerRowScanner(
 			const HandlerSet &handlerSet, RowArray &rowArray,
-			VirtualValueList *virtualValueList);
+			VirtualValueList *virtualValueList, bool interruptionEnabled);
 
 	bool scanRowUnchecked(
 			TransactionContext &txn, BaseContainer &container,
@@ -1960,6 +1960,12 @@ public:
 
 	template<typename Handler>
 	static HandlerEntry createHandlerEntry(Handler &handler);
+
+	bool isInterruptionEnabled();
+	void interrupt();
+
+	bool checkInterruption(BaseIndex::SearchContext &sc, RowId &lastCheckRowId);
+	void clearInterruption();
 
 private:
 	ContainerRowScanner(const ContainerRowScanner&);
@@ -1984,6 +1990,10 @@ private:
 	HandlerSet handlerSet_;
 	RowArray &rowArray_;
 	VirtualValueList *virtualValueList_;
+
+	RowId interruptedRowId_;
+	bool interruptionEnabled_;
+	bool interrupted_;
 };
 
 template<typename C>
@@ -2022,8 +2032,9 @@ bool ContainerRowScanner::scanUnchecked(
 		TransactionContext &txn, BaseContainer &container,
 		RowArray *loadedRowArray, const OId *begin, const OId *end) {
 	assert(loadedRowArray == NULL || loadedRowArray == &rowArray_);
+	interruptedRowId_ = UNDEF_ROWID;
 
-	if (loadedRowArray == NULL) {
+	if (loadedRowArray == NULL || interruptionEnabled_) {
 		for (const OId *it = begin; it != end; ++it) {
 			rowArray_.load(txn, *it, &container, OBJECT_READ_ONLY);
 
@@ -2033,6 +2044,10 @@ bool ContainerRowScanner::scanUnchecked(
 			if (!entry.getHandler<ForRowArray>()(
 					txn, container, rowArray_, it, it + 1,
 					entry.handlerValue_)) {
+				return false;
+			}
+			else if (interrupted_ && it + 1 != end) {
+				interruptedRowId_ = rowArray_.getCurrentRowId();
 				return false;
 			}
 		}
@@ -2071,6 +2086,10 @@ ContainerRowScanner::HandlerEntry ContainerRowScanner::createHandlerEntry(
 	entry.rowArrayHandler_ = &scanRowArraySpecific<Handler, rowArrayType>;
 	entry.handlerValue_ = &handler;
 	return entry;
+}
+
+inline bool ContainerRowScanner::isInterruptionEnabled() {
+	return interruptionEnabled_;
 }
 
 template<typename Handler, RowArrayType T>

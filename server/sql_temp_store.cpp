@@ -35,6 +35,7 @@
 #include <unistd.h>
 #endif
 
+
 UTIL_TRACER_DECLARE(IO_MONITOR);  
 
 
@@ -185,6 +186,12 @@ void LocalTempStore::setStableMemoryLimit(uint64_t size) {
 	bufferManager_->setStableMemoryLimit(size);
 }
 
+/*!
+	@brief ストアブロックに関するキャッシュ全体をリセットする
+*/
+void LocalTempStore::resetCache() {
+	bufferManager_->resetCache();
+}
 
 /*!
 	@brief リソースグループIDの割当
@@ -316,7 +323,8 @@ bool LocalTempStore::BufferManager::allocateMemory(BlockId id, BlockInfo* &block
 		addCurrentMemory();
 	}
 	else {
-		BlockInfo* swapOutTarget = blockInfoTable_.getNextTarget();
+		const bool withSwapped = true;
+		BlockInfo* swapOutTarget = blockInfoTable_.getNextTarget(withSwapped);
 		if (swapOutTarget) {
 			blockInfo = swapOutTarget;
 #ifndef NDEBUG
@@ -379,8 +387,7 @@ void LocalTempStore::BufferManager::allocate(
 	}
 	catch(std::exception &e) {
 		GS_RETHROW_USER_ERROR(
-				e, GS_EXCEPTION_MERGE_MESSAGE(e,
-				"Failed to create block."));
+				e, GS_EXCEPTION_MESSAGE_ON(e, "creating store block"));
 	}
 }
 
@@ -476,6 +483,42 @@ void LocalTempStore::BufferManager::release(BlockInfo &blockInfo, uint64_t affin
 	decrementActiveBlockCount();
 }
 
+bool LocalTempStore::BufferManager::reserveMemory(
+		uint64_t minSize, uint32_t maxRepeat, bool withSync) {
+	for (uint32_t i = 0; i < maxRepeat; i++) {
+		{
+			LockGuardVariant<util::Mutex> guard(mutex_);
+
+			uint64_t threshold =
+					blockInfoTable_.getSwappedBlockCount() * blockSize_;
+			threshold += std::min<uint64_t>(
+					stableMemoryLimit_,
+					std::numeric_limits<uint64_t>::max() - threshold);
+
+			if (getAllocatedMemory() + minSize <= threshold) {
+				return true;
+			}
+
+			const bool withSwapped = false;
+			BlockInfo *swapOutTarget =
+					blockInfoTable_.getNextTarget(withSwapped);
+
+			if (!swapOutTarget) {
+				return false;
+			}
+
+			swapOut(*swapOutTarget);
+			blockInfoTable_.setSwapped(swapOutTarget->getBlockId());
+		}
+
+		if (withSync) {
+			file_->flush();
+		}
+	}
+
+	return false;
+}
+
 void LocalTempStore::BufferManager::decrementActiveBlockCount() {
 	assert(activeBlockCount_ > 0);
 	--activeBlockCount_;
@@ -507,6 +550,10 @@ void LocalTempStore::BufferManager::setStableMemoryLimit(uint64_t size) {
 			util::AllocatorStats::STAT_STABLE_LIMIT, static_cast<size_t>(size));
 }
 
+uint64_t LocalTempStore::BufferManager::getStableMemoryLimit() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	return stableMemoryLimit_;
+}
 
 /*!
 	@brief 使用中メモリサイズの取得
@@ -515,6 +562,19 @@ size_t LocalTempStore::BufferManager::getAllocatedMemory() {
 	return blockInfoTable_.fixedAlloc_->getElementSize()
 	  * (blockInfoTable_.fixedAlloc_->getTotalElementCount()
 		 - blockInfoTable_.fixedAlloc_->getFreeElementCount());
+}
+
+/*!
+	@brief ストアブロックに関するキャッシュ全体をリセットする
+*/
+void LocalTempStore::BufferManager::resetCache() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	const size_t limitForReset = 0;
+	blockInfoTable_.fixedAlloc_->setLimit(
+			util::AllocatorStats::STAT_STABLE_LIMIT, limitForReset);
+	blockInfoTable_.fixedAlloc_->setLimit(
+			util::AllocatorStats::STAT_STABLE_LIMIT, stableMemoryLimit_);
 }
 
 /*!
@@ -643,8 +703,12 @@ blockInfoMap_(BlockInfoMap::key_compare(), varAlloc),
 #endif
 freeBlockIdSet_(BlockIdSet::key_compare(), varAlloc),
 baseBlockInfoArray_(varAlloc),
+swappedEnd_(blockInfoList_.end()),
+swappedBlockIdSet_(varAlloc),
 blockExpSize_(blockExpSize), stableMemoryLimit_(stableMemoryLimit)
-, blockIdMaxLimit_(0)
+,
+blockIdMaxLimit_(0),
+swapFileSizeLimit_(swapFileSizeLimit)
 {
 	blockInfoPool_ = ALLOC_VAR_SIZE_NEW(varAlloc_) util::ObjectPool<LocalTempStore::BlockInfo>(
 			util::AllocatorInfo(ALLOCATOR_GROUP_SQL_LTS, "blockInfoPool"));
@@ -675,6 +739,30 @@ LocalTempStore::BlockInfoTable::~BlockInfoTable() {
 	fixedAlloc_ = NULL;
 	ALLOC_VAR_SIZE_DELETE(varAlloc_, blockInfoPool_);
 	blockInfoPool_ = NULL;
+}
+
+void LocalTempStore::BlockInfoTable::errorBlockAllocationLimit(
+		uint64_t current, uint64_t limit, const BlockId *blockId) {
+	const uint64_t fileSize = current * store_.getDefaultBlockSize();
+	if (blockId == NULL) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_LTS_LIMIT_EXCEEDED,
+				"Swap file size limit exceeded (" <<
+				"fileSize=" << fileSize << ", "
+				"fileSizeLimit=" << swapFileSizeLimit_ << ", "
+				"blockNth=" << current << ", "
+				"blockNthLimit=" << limit << ")");
+	}
+	else {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_LTS_LIMIT_EXCEEDED,
+				"Swap file size limit exceeded (" <<
+				"fileSize=" << fileSize << ", "
+				"fileSizeLimit=" << swapFileSizeLimit_ << ", "
+				"blockNth=" << current << ", "
+				"blockNthLimit=" << limit << ", "
+				"blockId=" << *blockId << ")");
+	}
 }
 
 
@@ -1114,7 +1202,7 @@ LocalTempStore::Block::Block(LocalTempStore::BlockInfo &blockInfo)
 
 }
 
-void LocalTempStore::Block::setGroupId(LocalTempStore::GroupId groupId) {
+void LocalTempStore::Block::setGroupId(LocalTempStore::GroupId groupId) const {
 	assert(blockInfo_);
 	assert(blockInfo_->baseBlockInfo_);
 	if (blockInfo_->baseBlockInfo_->groupId_ != groupId) {
@@ -1125,7 +1213,7 @@ void LocalTempStore::Block::setGroupId(LocalTempStore::GroupId groupId) {
 	blockInfo_->baseBlockInfo_->groupId_ = groupId;
 }
 
-LocalTempStore::GroupId LocalTempStore::Block::getGroupId() {
+LocalTempStore::GroupId LocalTempStore::Block::getGroupId() const {
 	assert(blockInfo_);
 	assert(blockInfo_->baseBlockInfo_);
 	return blockInfo_->baseBlockInfo_->groupId_;

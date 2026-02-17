@@ -77,10 +77,11 @@ public:
 	static bool isOnlyEqKeyFound(const SQLValues::CompColumnList *keyList);
 
 	static int32_t detectDrivingInput(
-			OpContext &cxt, const OpCode &code, bool *small, bool *empty);
+			OpContext &cxt, const OpCode &code, bool *small, bool *empty,
+			uint32_t &priorInput);
 	static int32_t detectDrivingInputDetail(
 			OpContext &cxt, const OpCode &code, bool *small, bool *empty,
-			bool exact);
+			bool exact, uint32_t &priorInput);
 
 	static uint64_t estimateHashMapSize(
 			OpContext &cxt, const SQLValues::CompColumnList *keyList,

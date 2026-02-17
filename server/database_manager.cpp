@@ -141,12 +141,12 @@ DatabaseManager::DatabaseManager(ConfigTable& configTable, GlobalVariableSizeAll
 	useRequestConstraint_(configTable.get<bool>(CONFIG_TABLE_TXN_USE_REQUEST_CONSTRAINT)),
 	checkInterval_(configTable.get<int32_t>(CONFIG_TABLE_TXN_CHECK_DATABASE_STATS_INTERVAL)),
 	limitDelayTime_(1000 * configTable.get<int32_t>(CONFIG_TABLE_TXN_LIMIT_DELAY_TIME)),
-	constraintMap_(varAlloc), requestCountMap_(varAlloc) {
+	constraintMap_(varAlloc), sqlRequestCountMap_(varAlloc), nosqlRequestCountMap_(varAlloc) {
 	for (PartitionId pId = 0; pId < groupConfig.getPartitionCount(); pId++) {
 		databaseList_.push_back(ALLOC_VAR_SIZE_NEW(varAlloc_) Database(varAlloc_, pId, this));
 	}
 	databaseCounterList_.assign(groupConfig.getPartitionCount(), 0);
-	directMaxDbId_ = TXN_DATABASE_NUM_MAX;
+	directMaxDbId_ = TXN_DATABASE_NUM_MAX * 2;
 	util::Atomic<int64_t> initValue;
 	initValue = 0;
 	nosqlDirectRequestCounter_.assign(directMaxDbId_, initValue);
@@ -196,6 +196,7 @@ void DatabaseManager::drop(DatabaseId dbId) {
 	for (size_t pId = 0; pId < databaseList_.size(); pId++) {
 		databaseList_[pId]->drop(dbId);
 	}
+	dropRequest(dbId);
 }
 
 void DatabaseManager::beginStats(PartitionId pId) {

@@ -587,6 +587,7 @@ struct SQLExprs::IndexCondition {
 
 	bool firstHitOnly_;
 	bool descending_;
+	bool dynamic_;
 };
 
 class SQLExprs::IndexSelector {
@@ -605,10 +606,11 @@ public:
 	void addIndex(uint32_t column, IndexFlags flags);
 	void addIndex(
 			const util::Vector<uint32_t> &columnList,
-			const util::Vector<IndexFlags> &flagsList);
+			const util::Vector<IndexFlags> &flagsList, bool unique);
 	void completeIndex();
 
 	void setMultiAndConditionEnabled(bool enabled);
+	void setDynamicSelectionEnabled(bool enabled);
 	void setBulkGrouping(bool enabled);
 
 	bool matchIndexList(const int32_t *indexList, size_t size) const;
@@ -626,6 +628,7 @@ public:
 
 	bool isSelected() const;
 	bool isComplex() const;
+	bool isUnique() const;
 
 	const ConditionList& getConditionList() const;
 	ConditionList& getConditionList();
@@ -657,6 +660,16 @@ public:
 			ConditionList::const_iterator endIt);
 
 private:
+	enum IndexFlagsType {
+		FLAGS_TYPE_SINGLE,
+		FLAGS_TYPE_SINGLE_UNIQUE,
+		FLAGS_TYPE_COMPOSITE_ALL,
+		FLAGS_TYPE_COMPOSITE_ALL_UNIQUE,
+		FLAGS_TYPE_COMPOSITE_TOP,
+		FLAGS_TYPE_COMPOSITE_TOP_UNIQUE,
+		END_FLAGS_TYPE
+	};
+
 	struct IndexFlagsEntry;
 	struct IndexMatch;
 
@@ -713,7 +726,7 @@ private:
 	void assignAndOrdinals(Range &totalRange, bool atAndTop);
 
 	size_t matchAndConditions(
-			Range &totalRange, size_t acceptedCondCount);
+			Range &totalRange, size_t acceptedCondCount, bool &unique);
 	size_t arrangeMatchedAndConditions(
 			Range &totalRange, size_t acceptedCondCount,
 			ConditionOrdinalList &ordinalList, IndexSpecId specId);
@@ -767,7 +780,12 @@ private:
 			ConditionList::const_iterator condBegin,
 			ConditionList::const_iterator condEnd,
 			size_t acceptedCondCount, size_t &condOrdinal,
-			IndexSpecId &specId);
+			IndexSpecId &specId, bool &unique);
+	bool selectClosestIndexDetail(
+			ConditionList::const_iterator condBegin,
+			ConditionList::const_iterator condEnd,
+			size_t acceptedCondCount, size_t &condOrdinal,
+			IndexSpecId &specId, bool uniqueOnly);
 	bool reduceIndexMatch(
 			ConditionList::const_iterator condBegin,
 			ConditionList::const_iterator condEnd,
@@ -785,7 +803,8 @@ private:
 	bool getAvailableIndex(
 			const Condition &cond, bool withSpec, SQLType::IndexType *indexType,
 			IndexSpecId *specId, IndexMatchList *matchList,
-			bool topColumnOnly = false, bool treeIndexExtended = false) const;
+			bool topColumnOnly = false, bool treeIndexExtended = false,
+			bool uniqueOnly = false) const;
 
 	bool findColumn(
 			const Expression &expr, uint32_t &column, bool forScan) const;
@@ -794,6 +813,8 @@ private:
 	static bool isTrueValue(
 			const TupleValue &value, bool negative, bool &nullFound);
 
+	static IndexFlagsType getIndexFlagsType(
+			bool composite, bool top, bool unique);
 	IndexSpec createIndexSpec(const util::Vector<uint32_t> &columnList);
 	void clearIndexColumns();
 
@@ -823,24 +844,21 @@ private:
 	bool indexAvailable_;
 	bool placeholderAffected_;
 	bool multiAndConditionEnabled_;
+	bool dynamicSelectionEnabled_;
 	bool bulkGrouping_;
 	bool complexReordering_;
 
 	bool completed_;
 	bool cleared_;
 
+	size_t uniqueMatchCount_;
+	size_t nonUniqueMatchCount_;
+
 	const ExprFactory *exprFactory_;
 };
 
 struct SQLExprs::IndexSelector::IndexFlagsEntry {
 public:
-	enum IndexFlagsType {
-		FLAGS_TYPE_SINGLE,
-		FLAGS_TYPE_COMPOSITE_ALL,
-		FLAGS_TYPE_COMPOSITE_TOP,
-		END_FLAGS_TYPE
-	};
-
 	IndexFlagsEntry();
 
 	IndexFlags get(IndexFlagsType type) const;
@@ -1002,6 +1020,9 @@ struct SQLExprs::ExprTypeUtils {
 
 	static bool isVarNonGenerative(
 			ExprType type, bool forLob, bool forLargeFixed);
+	static bool getPatternMatchExprInfo(
+			ExprType type, bool onPatternMatch, bool &measuresOnly,
+			bool &implicitlyNavigable, ExprType &rewritableExprType);
 };
 
 struct SQLExprs::PlanPartitioningInfo {

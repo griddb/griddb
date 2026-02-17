@@ -166,13 +166,19 @@ public:
 		return s.str();
 	}
 
-	static inline std::string getTimeStr(int64_t timeval, bool trim = false) {
-		if (timeval == -1) timeval = 0;
-		util::NormalOStringStream oss;
-		oss.clear();
-		util::DateTime dtime(timeval);
-		dtime.format(oss, trim);
-		return oss.str();
+	static std::string getTimeStr(int64_t timeval, bool trim = false) {
+		std::string str;
+		writeTimeStr(util::DateTime(timeval), str, trim);
+		return str;
+	}
+
+	template<typename W>
+	static void writeTimeStr(
+			const util::DateTime &dt, W &writer, bool trim = false) {
+		const util::DateTime::ZonedOption &option =
+				util::DateTime::ZonedOption::create(
+						trim, util::TimeZone::getLocalTimeZone());
+		dt.writeTo(writer, option, util::DateTime::SilentErrorHandler());
 	}
 
 	static const int32_t secLimit = INT32_MAX / 1000;
@@ -320,6 +326,19 @@ UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 #define GS_TRACE_CLUSTER_INFO(s) \
 	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
+
+#define GS_TRACE_CLUSTER_INFO_AND_DIRECT(s, LEVEL, DUMP_LEVEL) \
+	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
+	GS_OUTPUT_DIRECT(LEVEL, DUMP_LEVEL, s);
+
+namespace dump {
+	extern util::Mutex dumpLock;
+	extern std::string hostName;
+}
+
+
+
+#define GS_OUTPUT_DIRECT(LEVEL, CURRENT_LEVEL, s)
 
 typedef std::pair<int32_t, bool> ServiceTypeInfo;
 

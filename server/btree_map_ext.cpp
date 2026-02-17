@@ -731,7 +731,7 @@ uint64_t BtreeMap::estimateAt(
 					txn, startKeyVal, startCond->isIncluded(), false, setting,
 					beginPath);
 			findLocationPath<P, K, V, C>(
-					txn, endKeyVal, endCond->isIncluded(), true, setting,
+					txn, endKeyVal, startCond->isIncluded(), true, setting,
 					endPath);
 		}
 		else {

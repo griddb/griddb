@@ -195,6 +195,22 @@ inline int32_t SQLLexer::_gsGetToken(
 			*tokenType = TK_SEMI;
 			return 1;
 		}
+		case '{': { 
+			*tokenType = TK_LBRACE;
+			return 1;
+		}
+		case '}': { 
+			*tokenType = TK_RBRACE;
+			return 1;
+		}
+		case '^': { 
+			*tokenType = TK_CARET;
+			return 1;
+		}
+		case '$': { 
+			*tokenType = TK_DOLLAR;
+			return 1;
+		}
 		case '-': {
 			if ( z[1]=='-' ) { 
 				for (i = 2; (c = z[i]) != 0 && c != '\n'; i++) {}

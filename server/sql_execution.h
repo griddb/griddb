@@ -270,6 +270,11 @@ struct ResponseInfo {
 
 struct SQLConfigParam {
 public:
+	static const double INDEX_SCAN_COST_RATE_DEFAULT;
+	static const double RANGE_SCAN_COST_RATE_DEFAULT;
+	static const double BLOCK_SCAN_COUNT_RATE_DEFAULT;
+	static const double PATTERN_MATCH_MEMORY_LIMIT_RATE_DEFAULT;
+
 	SQLConfigParam(const ConfigTable& config);
 
 	void setMultiIndexScan(bool value) {
@@ -280,6 +285,10 @@ public:
 		partitioningRowKeyConstraint_ = value;
 	}
 
+	void setCostBasedIndexScan(bool value) {
+		costBasedIndexScan_ = value;
+	}
+
 	void setCostBasedJoin(bool value) {
 		costBasedJoin_ = value;
 	}
@@ -288,12 +297,32 @@ public:
 		costBasedJoinDriving_ = value;
 	}
 
+	void setIndexScanCostRate(bool value) {
+		indexScanCostRate_ = value;
+	}
+
+	void setRangeScanCostRate(bool value) {
+		rangeScanCostRate_ = value;
+	}
+
+	void setBlockScanCountRate(bool value) {
+		blockScanCountRate_ = value;
+	}
+
+	void setPatternMatchMemoryLimitRate(bool value) {
+		patternMatchMemoryLimitRate_ = value;
+	}
+
 	bool isMultiIndexScan() const {
 		return multiIndexScan_;
 	}
 
 	bool isPartitioningRowKeyConstraint() const {
 		return partitioningRowKeyConstraint_;
+	}
+
+	bool isCostBasedIndexScan() const {
+		return costBasedIndexScan_;
 	}
 
 	bool isCostBasedJoin() const {
@@ -308,6 +337,17 @@ public:
 		return planningVersion_;
 	}
 
+	double resolveIndexScanCostRate() const;
+	double resolveRangeScanCostRate() const;
+	double resolveBlockScanCountRate() const;
+
+	double getPatternMatchMemoryLimitRate() const {
+		return patternMatchMemoryLimitRate_;
+	}
+
+	int64_t resolvePatternMatchMemoryLimit(
+			int64_t workMemoryLimit) const;
+
 private:
 	SQLConfigParam(const SQLConfigParam&);
 	const SQLConfigParam& operator=(const SQLConfigParam&);
@@ -315,11 +355,19 @@ private:
 	SQLPlanningVersion getPlanningVersion(
 			const ConfigTable& config, SQLConfigTableParamId paramId);
 
+	static double resolveRateValue(
+			double value, double maxValue, double defaultValue);
+
 	bool multiIndexScan_;
 	bool partitioningRowKeyConstraint_;
+	bool costBasedIndexScan_;
 	bool costBasedJoin_;
 	bool costBasedJoinDriving_;
 	SQLPlanningVersion planningVersion_;
+	double indexScanCostRate_;
+	double rangeScanCostRate_;
+	double blockScanCountRate_;
+	double patternMatchMemoryLimitRate_;
 };
 
 class SQLConnectionControl {
@@ -376,14 +424,17 @@ struct SQLExpandViewContext {
 
 struct SQLFetchContext {
 
-	SQLFetchContext() {}
-	SQLFetchContext(TupleList::Reader* reader, TupleList::Column* columnList,
+	SQLFetchContext() :
+		reader_(NULL), columnList_(NULL),
+		columnSize_(0), isCompleted_(false) {
+	}
+	SQLFetchContext(TupleList::Reader* reader, const TupleList::Column* columnList,
 		size_t columnSize, bool isCompleted) :
 		reader_(reader), columnList_(columnList),
 		columnSize_(columnSize), isCompleted_(isCompleted) {
 	}
 	TupleList::Reader* reader_;
-	TupleList::Column* columnList_;
+	const TupleList::Column* columnList_;
 	size_t columnSize_;
 	bool isCompleted_;
 };
@@ -512,6 +563,14 @@ public:
 		return total;
 	}
 
+	void setExpiredContainerCount(size_t count) {
+		expiredContainerCount_+= static_cast<int64_t>(count);
+	}
+
+	int64_t getExpiredCountainerCount() {
+		return expiredContainerCount_;
+	}
+
 	uint64_t incNodeCounter() {
 		return ++nodeCounter_;
 	}
@@ -613,6 +672,7 @@ private:
 	util::Atomic<int64_t> tableCacheSearchCount_;
 	util::Atomic<int64_t> tableCacheSkipCount_;
 	util::Atomic<int64_t> tableCacheLoadTime_;
+	util::Atomic<int64_t> expiredContainerCount_;
 
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
 		virtual void operator()(ConfigTable& config);
@@ -916,6 +976,8 @@ public:
 
 		const NodeDescriptor& getClientNd() const;
 		const std::string getClientAddress() const;
+		void getClientAddress(std::string &address, uint16_t &port) const;
+
 		ExecutionId getExecId();
 		StatementHandler::ConnectionOption& getConnectionOption();
 		NoSQLSyncContext& getSyncContext();
@@ -927,6 +989,7 @@ public:
 		void setPendingException(std::exception& e);
 		void resetPendingException();
 		bool checkPendingException(bool flag);
+		bool isResponded() const;
 
 	private:
 
@@ -949,16 +1012,21 @@ public:
 	util::StackAllocator* getStackAllocator() { return &executionStackAlloc_; };
 
 	struct SQLReplyContext {
-		SQLReplyContext() : ec_(NULL), job_(NULL), typeList_(NULL),
-			versionId_(0), responseJobId_(NULL),
-			replyType_(SQL_REPLY_UNDEF), countList_(NULL) {}
-		void setExplainAnalyze(EventContext* ec, Job* job,
-			uint8_t versionId, JobId* responseJobId) {
+		SQLReplyContext() :
+				ec_(NULL), typeList_(NULL),
+				versionId_(0), responseJobId_(NULL),
+				replyType_(SQL_REPLY_UNDEF), countList_(NULL),
+				taskProfileList_(NULL) {
+		}
+
+		void setExplainAnalyze(
+				EventContext* ec, uint8_t versionId, JobId* responseJobId,
+				const util::Vector<TaskProfiler> *taskProfileList) {
 			assert(ec);
 			ec_ = ec;
-			job_ = job;
 			versionId_ = versionId;
 			responseJobId_ = responseJobId;
+			taskProfileList_ = taskProfileList;
 			replyType_ = SQL_REPLY_SUCCESS_EXPLAIN_ANALYZE;
 		}
 		void setExplain(EventContext* ec) {
@@ -981,13 +1049,14 @@ public:
 			responseJobId_ = responseJobId;
 			replyType_ = SQL_REPLY_SUCCESS;
 		}
+
 		EventContext* ec_;
-		Job* job_;
 		ValueTypeList* typeList_;
 		uint8_t versionId_;
 		JobId* responseJobId_;
 		int32_t replyType_;
 		util::Vector<int64_t> *countList_;
+		const util::Vector<TaskProfiler> *taskProfileList_;
 	};
 
 	bool replyClient(SQLReplyContext& cxt);
@@ -1051,6 +1120,10 @@ public:
 	int64_t getTotalSize() {
 		return executionStackAlloc_.getTotalSize();
 	}
+
+	static void traceLongQueryCore(
+			const JobResourceInfo &info, SQLExecution *execution,
+			SQLService &sqlSvc);
 
 private:
 
@@ -1125,10 +1198,20 @@ private:
 	bool checkFastInsert(util::Vector<BindParam*>& bindParamInfos);
 
 	struct ReplyOption {
-		ReplyOption() : typeList_(NULL), job_(NULL) {};
-		ReplyOption(ValueTypeList* typeList, Job* job) : typeList_(typeList), job_(job) {};
+		ReplyOption() :
+			typeList_(NULL),
+			taskProfileList_(NULL) {
+		}
+
+		ReplyOption(
+				ValueTypeList* typeList,
+				const util::Vector<TaskProfiler> *taskProfileList) :
+				typeList_(typeList),
+				taskProfileList_(taskProfileList) {
+		}
+
 		ValueTypeList* typeList_;
-		Job* job_;
+		const util::Vector<TaskProfiler> *taskProfileList_;
 	};
 	static const int32_t SQL_REPLY_UNDEF = -1;
 	static const int32_t SQL_REPLY_SUCCESS = 0;
@@ -1138,7 +1221,7 @@ private:
 	void setAnyTypeData(util::StackAllocator& alloc, const TupleValue& value);
 	void generateBlobValue(const TupleValue& value, util::XArray<uint8_t>& blobs);
 	void setNullValue(const TupleValue& value,
-		util::StackAllocator& alloc, TupleList::Column& column);
+		util::StackAllocator& alloc, const TupleList::Column& column);
 
 	NoSQLStore* getNoSQLStore();
 
@@ -1168,8 +1251,9 @@ private:
 		EventByteOutStream& out, ValueTypeList* typeList);
 	void encodeSuccessExplain(util::StackAllocator& alloc,
 		EventByteOutStream& out);
-	void encodeSuccessExplainAnalyze(util::StackAllocator& alloc,
-		EventByteOutStream& out, Job* job);
+	void encodeSuccessExplainAnalyze(
+		util::StackAllocator& alloc, EventByteOutStream& out,
+		const util::Vector<TaskProfiler> *taskProfileList);
 
 	void compile(
 			EventContext &ec, SQLConnectionControl &connectionControl,
@@ -1184,10 +1268,12 @@ private:
 			TupleValue::VarContext &varCxt, int64_t startTime);
 
 	bool replySuccessExplainAnalyze(
-		EventContext& ec, Job* job, uint8_t versionId, JobId* responseJobId);
+			EventContext &ec, uint8_t versionId, JobId *responseJobId,
+			const util::Vector<TaskProfiler> *taskProfileList);
 
-	bool replySuccessInternal(EventContext& ec, int32_t type,
-		uint8_t versionId, ReplyOption& option, JobId* responseJobId);
+	bool replySuccessInternal(
+		EventContext& ec, int32_t type, uint8_t versionId, ReplyOption& option,
+		JobId* responseJobId);
 	void cleanupPrevJob(EventContext& ec);
 	void cleanupSerializedData();
 	void copySerializedData(util::XArray<uint8_t>& binary);
@@ -1242,10 +1328,10 @@ private:
 		EventContext &ec, std::vector<int64_t> *countList);
 
 	bool fetchNotSelect(EventContext& ec,
-		TupleList::Reader* reader, TupleList::Column* columnList);
+		TupleList::Reader* reader, const TupleList::Column* columnList);
 
 	bool fetchSelect(EventContext& ec,
-		TupleList::Reader* reader, TupleList::Column* columnList,
+		TupleList::Reader* reader, const TupleList::Column* columnList,
 		size_t columnSize, bool isCompleted);
 
 	void setResponse();
@@ -1336,8 +1422,14 @@ private:
 		static const int32_t PARSE = 0;
 		static const int32_t COMPILE = 1;
 
-		ExecutionProfilerWatcher(SQLExecution* execution, bool isNormal, bool trace) :
-			profilerInfo_(execution->getProfilerInfo()), execution_(execution), isNormal_(isNormal), trace_(trace) {
+		ExecutionProfilerWatcher(
+				util::StackAllocator &alloc, SQLExecution *execution,
+				bool isNormal, bool trace) :
+				alloc_(alloc),
+				profilerInfo_(execution->getProfilerInfo()),
+				execution_(execution),
+				isNormal_(isNormal),
+				trace_(trace) {
 			profilerInfo_.init();
 			if (isNormal) {
 				watch_.reset();
@@ -1363,6 +1455,7 @@ private:
 		}
 
 	private:
+		util::StackAllocator &alloc_;
 		ExecutionProfilerInfo& profilerInfo_;
 		SQLExecution* execution_;
 		bool isNormal_;

@@ -221,6 +221,31 @@ public:
         }
     }
 
+    void getStatsMapForRequest(util::StackAllocator& alloc, util::Map<DatabaseId, DatabaseStats*>& statsMap) {
+        for (int32_t dbId = 0; dbId < directMaxDbId_; dbId++) {
+            if (sqlDirectRequestCounter_[dbId] > 0 || nosqlDirectRequestCounter_[dbId] > 0) {
+                auto stats = statsMap.find(dbId);
+                if (stats == statsMap.end()) {
+                    statsMap[dbId] = ALLOC_NEW(alloc) DatabaseStats;
+                }
+            }
+        }
+        for (auto& it : sqlRequestCountMap_) {
+            DatabaseId dbId = it.first;
+            auto stats = statsMap.find(dbId);
+            if (stats == statsMap.end() && it.second > 0) {
+                statsMap[dbId] = ALLOC_NEW(alloc) DatabaseStats;
+            }
+        }
+        for (auto& it : nosqlRequestCountMap_) {
+            DatabaseId dbId = it.first;
+            auto stats = statsMap.find(dbId);
+            if (stats == statsMap.end() && it.second > 0) {
+                statsMap[dbId] = ALLOC_NEW(alloc) DatabaseStats;
+            }
+        }
+    }
+
     void incrementRequest(DatabaseId dbId, bool isSQL) {
         if (dbId == UNDEF_DBID) return;
         if (dbId < directMaxDbId_) {
@@ -232,13 +257,25 @@ public:
             }
         }
         else {
-            util::LockGuard<util::Mutex> guard(requestLock_);
-            decltype(requestCountMap_)::iterator it = requestCountMap_.find(dbId);
-            if (it != requestCountMap_.end()) {
-                (*it).second++;
+            if (isSQL) {
+                util::LockGuard<util::Mutex> guard(sqlRequestLock_);
+                decltype(sqlRequestCountMap_)::iterator it = sqlRequestCountMap_.find(dbId);
+                if (it != sqlRequestCountMap_.end()) {
+                    (*it).second++;
+                }
+                else {
+                    sqlRequestCountMap_[dbId] = 1;
+                }
             }
             else {
-                requestCountMap_[dbId] = 0;
+                util::LockGuard<util::Mutex> guard(nosqlRequestLock_);
+                decltype(nosqlRequestCountMap_)::iterator it = nosqlRequestCountMap_.find(dbId);
+                if (it != nosqlRequestCountMap_.end()) {
+                    (*it).second++;
+                }
+                else {
+                    nosqlRequestCountMap_[dbId] = 1;
+                }
             }
         }
     }
@@ -254,13 +291,42 @@ public:
             }
         }
         else {
-            util::LockGuard<util::Mutex> guard(requestLock_);
-            decltype(requestCountMap_)::iterator it = requestCountMap_.find(dbId);
-            if (it != requestCountMap_.end()) {
-                return (*it).second;
+            if (isSQL) {
+                util::LockGuard<util::Mutex> guard(sqlRequestLock_);
+                decltype(sqlRequestCountMap_)::iterator it = sqlRequestCountMap_.find(dbId);
+                if (it != sqlRequestCountMap_.end()) {
+                    return (*it).second;
+                }
+                else {
+                    return 0;
+                }
             }
             else {
-                return 0;
+                util::LockGuard<util::Mutex> guard(nosqlRequestLock_);
+                decltype(nosqlRequestCountMap_)::iterator it = nosqlRequestCountMap_.find(dbId);
+                if (it != nosqlRequestCountMap_.end()) {
+                    return (*it).second;
+                }
+                else {
+                    return 0;
+                }
+            }
+        }
+    }
+
+    void dropRequest(DatabaseId dbId) {
+        if (dbId < directMaxDbId_) {
+            sqlDirectRequestCounter_[dbId] = 0;
+            nosqlDirectRequestCounter_[dbId] = 0;
+        }
+        else {
+            decltype(sqlRequestCountMap_)::iterator it1 = sqlRequestCountMap_.find(dbId);
+            if (it1 != sqlRequestCountMap_.end()) {
+                sqlRequestCountMap_.erase(it1);
+            }
+            decltype(nosqlRequestCountMap_)::iterator it2 = nosqlRequestCountMap_.find(dbId);
+            if (it2 != nosqlRequestCountMap_.end()) {
+                nosqlRequestCountMap_.erase(it2);
             }
         }
     }
@@ -280,7 +346,8 @@ private:
     int32_t limitDelayTime_;
     util::Mutex constraintLock_;
     util::Mutex dumpLock_;
-    util::Mutex requestLock_;
+    util::Mutex sqlRequestLock_;
+    util::Mutex nosqlRequestLock_;
 
     util::AllocMap< DatabaseId, ExecutionConstraint*> constraintMap_;
     std::vector<util::Atomic<int64_t>> nosqlDirectRequestCounter_;
@@ -288,7 +355,8 @@ private:
     std::vector<int64_t> nosqlRequestCounter_;
     std::vector<int64_t> sqlRequestCounter_;
     int32_t directMaxDbId_;
-    util::AllocMap< DatabaseId, int64_t> requestCountMap_;
+    util::AllocMap< DatabaseId, int64_t> sqlRequestCountMap_;
+    util::AllocMap< DatabaseId, int64_t> nosqlRequestCountMap_;
 };
 
 class DatabaseStatsMap {

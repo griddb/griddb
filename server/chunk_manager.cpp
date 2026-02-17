@@ -472,6 +472,23 @@ void MeshedChunkTable::Group::extentChecker() {
 	}
 }
 
+void MeshedChunkTable::Group::checkChunkTableIndex(int64_t chunkId, int32_t index) {
+	if (index < 0 || index >= static_cast<int32_t>(mct_.extents_.size())) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_OID,
+				"checkChunkTableIndex failed.: chunkId," << chunkId << ",extents_index," << index <<
+				",extents_size," << mct_.extents_.size());
+	}
+}
+
+void MeshedChunkTable::Group::checkChunkTablePos(
+		int64_t chunkId, int32_t index, int16_t pos, int64_t extentOffset) {
+	if (extentOffset < 0) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_OID,
+				"checkChunkTablePos failed.: chunkId," << chunkId << ",extents_index," << index <<
+				",extents_pos," << pos << ",extent_offset," << extentOffset);
+	}
+}
+
 
 void MeshedChunkTable::Group::StableGroupChunkCursor::setRawInfo(ChunkExtent* extent, int16_t pos, RawChunkInfo& rawInfo) {
 	rawInfo
@@ -978,6 +995,10 @@ void ChunkManager::extentChecker() {
 }
 
 void ChunkManager::updateStoreObjectUseStats() {
+}
+
+void ChunkManager::updateProfileCounter() {
+	chunkBuffer_.updateProfileCounter();
 }
 
 uint64_t ChunkManager::getCurrentLimit() {

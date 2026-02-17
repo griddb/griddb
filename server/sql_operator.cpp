@@ -18,6 +18,7 @@
 #include "sql_operator_utils.h"
 
 
+
 SQLOps::OpConfig::OpConfig() {
 	std::fill(valueList_, valueList_ + VALUE_COUNT, -1);
 }
@@ -87,7 +88,8 @@ SQLOps::ContainerLocation::ContainerLocation() :
 		indexFirstColumns_(NULL),
 		expirable_(false),
 		indexActivated_(false),
-		multiIndexActivated_(false) {
+		multiIndexActivated_(false),
+		noCostBased_(false) {
 }
 
 
@@ -2586,12 +2588,16 @@ SQLOps::TupleListReader& SQLOps::OpStore::Entry::getReader(
 
 void SQLOps::OpStore::Entry::closeReader(uint32_t index, uint32_t sub) {
 	EntryElement *elem = findElement(index, false);
-	if (elem == NULL || sub >= elem->readerList_.size()) {
+	if (elem == NULL) {
 		return;
 	}
 
-	elem->readerImageList_[sub]->reset();
-	elem->readerList_[sub]->reset();
+	if (sub < elem->readerImageList_.size()) {
+		elem->readerImageList_[sub]->reset();
+	}
+	if (sub < elem->readerList_.size()) {
+		elem->readerList_[sub]->reset();
+	}
 	elem->inputConsumedBlockCount_ = 0;
 
 	updateReaderRefListDetail(*elem);
@@ -2673,6 +2679,41 @@ void SQLOps::OpStore::Entry::closeWriter(uint32_t index, bool force) {
 	elem->writer_.reset();
 
 	updateWriterRefListDetail(*elem, index);
+}
+
+SQLOps::OpStore::BlockInterruptionHandler*
+SQLOps::OpStore::Entry::findInterruptionHandler(uint32_t index) {
+	BlockHandler *blockHandler = findBlockHandler(index);
+	if (blockHandler == NULL) {
+		return NULL;
+	}
+	return &blockHandler->getInterruptionHandler();
+}
+
+bool SQLOps::OpStore::Entry::isBlockTransferActive(uint32_t index) {
+	BlockHandler *blockHandler = findBlockHandler(index);
+	if (blockHandler == NULL) {
+		return false;
+	}
+	return blockHandler->isActive();
+}
+
+SQLOps::OpStore::BlockHandler*
+SQLOps::OpStore::Entry::findBlockHandler(uint32_t index) {
+	EntryElement *elem = findElement(index, false);
+	if (elem == NULL) {
+		return NULL;
+	}
+
+	EntryElement &handlerElem = (elem->outId_.isEmpty() ?
+			*elem : getOutputElement(index, false));
+
+	BlockHandler *blockHandler = handlerElem.blockHandler_.get();
+	if (blockHandler == NULL) {
+		return NULL;
+	}
+
+	return blockHandler;
 }
 
 int64_t SQLOps::OpStore::Entry::getOutputTupleCount(
@@ -3381,6 +3422,23 @@ SQLOps::OpStore::Entry::EntryRef SQLOps::OpStore::Entry::getOutput(
 }
 
 
+SQLOps::OpStore::BlockInterruptionHandler::BlockInterruptionHandler() :
+		cxt_(NULL) {
+}
+
+void SQLOps::OpStore::BlockInterruptionHandler::setContext(OpContext *cxt) {
+	cxt_ = cxt;
+}
+
+void SQLOps::OpStore::BlockInterruptionHandler::interrupt() {
+	if (cxt_ == NULL) {
+		return;
+	}
+
+	cxt_->interruptByBlockTransfer();
+}
+
+
 SQLOps::OpStore::EntryElement::EntryElement(util::StackAllocator &alloc) :
 		inPos_(std::numeric_limits<uint32_t>::max()),
 		outPos_(std::numeric_limits<uint32_t>::max()),
@@ -3412,13 +3470,16 @@ SQLOps::OpStore::EntryElement::EntryElement(util::StackAllocator &alloc) :
 }
 
 
+const uint32_t SQLOps::OpStore::BlockHandler::INTERRUPTION_BLOCK_COUNT = 2;
+
 SQLOps::OpStore::BlockHandler SQLOps::OpStore::BlockHandler::emptyHandler_(
 		std::numeric_limits<uint32_t>::max());
 
 SQLOps::OpStore::BlockHandler::BlockHandler(uint32_t id) :
 		id_(id),
 		extCxt_(NULL),
-		closed_(false) {
+		closed_(false),
+		interruptionRemaining_(INTERRUPTION_BLOCK_COUNT) {
 }
 
 void SQLOps::OpStore::BlockHandler::activate(ExtOpContext &extCxt) {
@@ -3426,6 +3487,10 @@ void SQLOps::OpStore::BlockHandler::activate(ExtOpContext &extCxt) {
 		return;
 	}
 	extCxt_ = &extCxt;
+}
+
+bool SQLOps::OpStore::BlockHandler::isActive() {
+	return (!closed_ && extCxt_ != NULL);
 }
 
 void SQLOps::OpStore::BlockHandler::close() {
@@ -3478,12 +3543,24 @@ void SQLOps::OpStore::BlockHandler::operator()() {
 
 	TupleList::Block block;
 	while (reader_->next(block)) {
+		if (interruptionRemaining_ <= 0) {
+			interruptionHandler_.interrupt();
+		}
+		else {
+			--interruptionRemaining_;
+		}
+
 		extCxt_->transfer(block, id_);
 	}
 }
 
 void SQLOps::OpStore::BlockHandler::unbindWriter(TupleListWriter &writer) {
 	writer.setBlockHandler(emptyHandler_);
+}
+
+SQLOps::OpStore::BlockInterruptionHandler&
+SQLOps::OpStore::BlockHandler::getInterruptionHandler() {
+	return interruptionHandler_;
 }
 
 
@@ -3495,6 +3572,7 @@ SQLOps::OpContext::OpContext(const Source &source) :
 		extCxt_(source.extCxt_),
 		interruptionCheckRemaining_(
 				getInitialInterruptionCheckCount(store_, true)),
+		interruptionHandler_(NULL),
 		invalidated_(false),
 		suspended_(false),
 		planPending_(false),
@@ -3502,6 +3580,8 @@ SQLOps::OpContext::OpContext(const Source &source) :
 }
 
 void SQLOps::OpContext::release() {
+	setBlockInterruptionHandler(false);
+
 	if (!invalidated_) {
 		if (exprCxtAvailable_) {
 			saveTupleId();
@@ -3545,6 +3625,8 @@ void SQLOps::OpContext::setUpExprContext() {
 		getWriter(i);
 		storeEntry_.updateWriterRefList(i);
 	}
+
+	setBlockInterruptionHandler(true);
 
 	exprCxt_.setActiveReaderRef(storeEntry_.getActiveReaderRef());
 	*exprCxt_.getActiveReaderRef() = NULL;
@@ -3636,8 +3718,29 @@ void SQLOps::OpContext::setNextCountForSuspend(uint64_t count) {
 	interruptionCheckRemaining_ = std::max<uint64_t>(count, 1);
 }
 
+void SQLOps::OpContext::interruptByBlockTransfer() {
+	setNextCountForSuspend(0);
+
+	if (interruptionHandler_ != NULL) {
+		interruptionHandler_->onInterrupted();
+	}
+}
+
 void SQLOps::OpContext::resetNextCountForSuspend() {
 	interruptionCheckRemaining_ = getInitialInterruptionCheckCount(store_, false);
+}
+
+void SQLOps::OpContext::setTransferInterruptionHandler(TransferInterruptionHandler *handler) {
+	interruptionHandler_ = handler;
+}
+
+bool SQLOps::OpContext::isBlockTransferActive() {
+	if (storeEntry_.getOutputCount() > 0) {
+		const uint32_t index = 0;
+		return storeEntry_.isBlockTransferActive(index);
+	}
+
+	return false;
 }
 
 SQLOps::OpPlan& SQLOps::OpContext::getPlan() {
@@ -3680,6 +3783,10 @@ SQLValues::ValueProfile* SQLOps::OpContext::getValueProfile() {
 
 SQLExprs::ExprProfile* SQLOps::OpContext::getExprProfile() {
 	return OpProfilerOptimizationEntry::getExprProfile(getOptimizationProfiler());
+}
+
+SQLOps::OpProfilerEntry* SQLOps::OpContext::getProfiler() {
+	return storeEntry_.getProfiler();
 }
 
 SQLOps::OpProfilerOptimizationEntry*
@@ -3947,6 +4054,17 @@ bool SQLOps::OpContext::checkSuspendedDetail() {
 	return true;
 }
 
+void SQLOps::OpContext::setBlockInterruptionHandler(bool enabled) {
+	if (storeEntry_.getOutputCount() > 0) {
+		const uint32_t index = 0;
+		OpStore::BlockInterruptionHandler *handler =
+				storeEntry_.findInterruptionHandler(index);
+		if (handler != NULL) {
+			handler->setContext((enabled ? this : NULL));
+		}
+	}
+}
+
 void SQLOps::OpContext::loadTupleId() {
 	const uint32_t count = storeEntry_.getOutputCount();
 	for (uint32_t i = 0; i < count; i++) {
@@ -3967,6 +4085,10 @@ SQLOps::OpContext::Source::Source(
 		id_(id),
 		store_(store),
 		extCxt_(extCxt) {
+}
+
+
+SQLOps::OpContext::TransferInterruptionHandler::~TransferInterruptionHandler() {
 }
 
 

@@ -28,8 +28,6 @@
 #include "util/container.h"
 #include "util/trace.h"
 
-#include "sql_common.h" //
-
 #include <deque>
 #include <list>
 #include <vector>
@@ -236,6 +234,8 @@ public:
 
 	void setSwapFileSizeLimit(uint64_t size);
 	void setStableMemoryLimit(uint64_t size);
+
+	void resetCache();
 
 	GroupId allocateGroup();
 	void deallocateGroup(GroupId groupId);
@@ -505,8 +505,8 @@ public:
 		return (getBlockId() == another.getBlockId());
 	};
 
-	void setGroupId(LocalTempStore::GroupId groupId);
-	LocalTempStore::GroupId getGroupId();
+	void setGroupId(LocalTempStore::GroupId groupId) const;
+	LocalTempStore::GroupId getGroupId() const;
 
 	void dumpContents(std::ostream &ostr) const;
 	void encode(EventByteOutStream &out, uint32_t checkRatio = 99);
@@ -601,9 +601,10 @@ public:
 
 	void remove(BlockId id);
 
-	LocalTempStore::BlockInfo* getNextTarget();
+	LocalTempStore::BlockInfo* getNextTarget(bool withSwapped);
 
 	void update(BlockInfo* &reuseBlockInfo, BlockId newId);
+	void setSwapped(BlockId id);
 
 	void setFixedAllocator(LTSFixedSizeAllocator *fixedAlloc);
 
@@ -614,6 +615,7 @@ public:
 
 	BlockId getCurrentMaxInuseBlockNth(BlockId id);
 
+	uint64_t getSwappedBlockCount();
 	uint64_t getMaxActiveBlockCount();
 
 	void dumpActiveBlockId(std::ostream &ostr, uint32_t blockExpSize);
@@ -645,6 +647,11 @@ private:
 	typedef std::set< LocalTempStore::BlockId, std::less<LocalTempStore::BlockId>,
 	util::StdAllocator< LocalTempStore::BlockId, LocalTempStore::LTSVariableSizeAllocator> > BlockIdSet;
 
+	void checkBlockAllocationLimit(
+			bool force, uint64_t current, uint64_t limit, const BlockId *blockId);
+	void errorBlockAllocationLimit(
+			uint64_t current, uint64_t limit, const BlockId *blockId);
+
 	LTSVariableSizeAllocator &varAlloc_;
 	LTSFixedSizeAllocator *fixedAlloc_;
 	LocalTempStore &store_;
@@ -654,9 +661,14 @@ private:
 	BlockInfoMap blockInfoMap_;
 	BlockIdSet freeBlockIdSet_;	
 	BaseBlockInfoArray baseBlockInfoArray_;
+
+	BlockInfoList::iterator swappedEnd_; 
+	BlockIdSet swappedBlockIdSet_;
+
 	const uint32_t blockExpSize_;
 	util::Atomic<uint64_t> stableMemoryLimit_;
 	util::Atomic<uint64_t> blockIdMaxLimit_;
+	uint64_t swapFileSizeLimit_;
 };
 
 /*!
@@ -684,6 +696,8 @@ public:
 
 	void incrementActiveBlockCount(); 
 	void decrementActiveBlockCount(); 
+
+	bool reserveMemory(uint64_t minSize, uint32_t maxRepeat, bool withSync);
 
 	void swapIn(BlockId id, BlockInfo &blockInfo);
 	void swapOut(BlockInfo &blockInfo);
@@ -715,6 +729,8 @@ public:
 	void setSwapFileSizeLimit(uint64_t size);
 	void setStableMemoryLimit(uint64_t size);
 
+	uint64_t getStableMemoryLimit();
+
 	uint64_t getCurrentTotalMemory();
 	uint64_t getPeakTotalMemory();
 	bool checkTotalMemory();
@@ -724,6 +740,8 @@ public:
 
 	uint64_t getActiveBlockCount();
 	uint64_t getMaxActiveBlockCount();
+
+	void resetCache();
 
 	void countBlockInfo(uint64_t &freeCount, uint64_t &latchedCount,
 						uint64_t &unlatchedCount, uint64_t &noneCount);
@@ -1390,6 +1408,10 @@ inline LocalTempStore::BlockId LocalTempStore::BlockInfoTable::getCurrentMaxInus
 }
 
 
+inline uint64_t LocalTempStore::BlockInfoTable::getSwappedBlockCount() {
+	return swappedBlockIdSet_.size();
+}
+
 inline uint64_t LocalTempStore::BlockInfoTable::getMaxActiveBlockCount() {
 	return static_cast<uint64_t>(baseBlockInfoArray_.size());
 }
@@ -1399,19 +1421,12 @@ inline LocalTempStore::BlockId LocalTempStore::BlockInfoTable::allocateBlockNth(
 	if (freeBlockIdSet_.size() > 0) {
 		BlockIdSet::iterator itr = freeBlockIdSet_.begin();
 		blockNth = LocalTempStore::getBlockNth(*itr);
-		if (!force && (blockNth > blockIdMaxLimit_)) {
-			GS_THROW_USER_ERROR(GS_ERROR_LTS_LIMIT_EXCEEDED,
-				"Swap file size limit exceeded. blockId=" << (*itr) <<
-				", blockNth=" << blockNth);
-		}
+		checkBlockAllocationLimit(force, blockNth, blockIdMaxLimit_, &(*itr));
 		freeBlockIdSet_.erase(itr);
 	}
 	else {
-		if (!force && (baseBlockInfoArray_.size() > (blockIdMaxLimit_ + 1))) {
-			GS_THROW_USER_ERROR(GS_ERROR_LTS_LIMIT_EXCEEDED,
-				"Swap file size limit exceeded. blockNth=" <<
-				baseBlockInfoArray_.size());
-		}
+		checkBlockAllocationLimit(
+				force, baseBlockInfoArray_.size(), blockIdMaxLimit_ + 1, NULL);
 		BaseBlockInfo baseInfo;
 		baseBlockInfoArray_.push_back(baseInfo);
 		blockNth = baseBlockInfoArray_.size() - 1;
@@ -1419,6 +1434,13 @@ inline LocalTempStore::BlockId LocalTempStore::BlockInfoTable::allocateBlockNth(
 	baseBlockInfoArray_[static_cast<size_t>(blockNth)].assignmentCount_ = 0;
 	baseBlockInfoArray_[static_cast<size_t>(blockNth)].groupId_ = LocalTempStore::UNDEF_GROUP_ID;
 	return blockNth;
+}
+
+inline void LocalTempStore::BlockInfoTable::checkBlockAllocationLimit(
+		bool force, uint64_t current, uint64_t limit, const BlockId *blockId) {
+	if (!force && (current > limit)) {
+		errorBlockAllocationLimit(current, limit, blockId);
+	}
 }
 
 /*!
@@ -1582,6 +1604,10 @@ inline void LocalTempStore::BlockInfoTable::insert(BlockId id, BlockInfo* &block
 	blockInfo->baseBlockInfo_ = lookupBaseInfo(id);
 	blockInfoList_.push_back(blockInfo); 
 	blockInfoMap_[id] = --blockInfoList_.end();
+
+	if (swappedEnd_ == blockInfoList_.end()) {
+		swappedEnd_ = blockInfoList_.begin();
+	}
 }
 
 /*!
@@ -1594,6 +1620,12 @@ inline void LocalTempStore::BlockInfoTable::remove(BlockId id) {
 	BlockInfoMap::iterator itr = blockInfoMap_.find(id);
 	if (blockInfoMap_.end() != itr) {
 		BlockInfoList::iterator listItr = itr->second;
+
+		if (swappedEnd_ == listItr) {
+			++swappedEnd_;
+		}
+		swappedBlockIdSet_.erase(id);
+
 		LocalTempStore::BlockInfo* blockInfo = *listItr;
 		UTIL_OBJECT_POOL_DELETE(*blockInfoPool_, blockInfo);
 		blockInfoMap_.erase(itr);
@@ -1609,6 +1641,11 @@ inline void LocalTempStore::BlockInfoTable::update(BlockInfo* &reuseBlockInfo, B
 	blockInfoMap_.erase(itr);
 	assert((*listItr) == reuseBlockInfo);
 
+	if (swappedEnd_ == listItr) {
+		++swappedEnd_;
+	}
+	swappedBlockIdSet_.erase(reuseBlockInfo->getBlockId());
+
 	itr = blockInfoMap_.find(newId);
 	assert(blockInfoMap_.end() == itr);
 	blockInfoList_.splice(blockInfoList_.end(), blockInfoList_, listItr); 
@@ -1617,6 +1654,20 @@ inline void LocalTempStore::BlockInfoTable::update(BlockInfo* &reuseBlockInfo, B
 	BlockInfo *checkBlockInfo = *(blockInfoMap_[newId]);
 	assert(checkBlockInfo->getBlockId() == reuseBlockInfo->getBlockId());
 #endif
+}
+
+inline void LocalTempStore::BlockInfoTable::setSwapped(BlockId id) {
+	BlockInfoMap::iterator itr = blockInfoMap_.find(id);
+	if (blockInfoMap_.end() != itr) {
+		BlockInfoList::iterator listItr = itr->second;
+		if (swappedEnd_ == listItr) {
+			++swappedEnd_;
+		}
+		else {
+			blockInfoList_.splice(swappedEnd_, blockInfoList_, listItr);
+		}
+		swappedBlockIdSet_.insert(id);
+	}
 }
 
 /*!
@@ -1632,9 +1683,11 @@ inline LocalTempStore::BaseBlockInfo* LocalTempStore::BlockInfoTable::lookupBase
 }
 
 
-inline LocalTempStore::BlockInfo* LocalTempStore::BlockInfoTable::getNextTarget() {
+inline LocalTempStore::BlockInfo* LocalTempStore::BlockInfoTable::getNextTarget(
+		bool withSwapped) {
 	LocalTempStore::BlockInfo* target = NULL;
-	BlockInfoList::iterator itr = blockInfoList_.begin();
+	BlockInfoList::iterator itr =
+			(withSwapped ? blockInfoList_.begin() : swappedEnd_);
 	for (; itr != blockInfoList_.end(); ++itr) {
 		if ((*itr)->refCount_ == 0) {
 			target = *itr;

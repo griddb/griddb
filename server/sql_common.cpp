@@ -379,7 +379,12 @@ TaskProfiler::TaskProfiler() :
 	worker_(0),
 	rows_(NULL),
 	address_(NULL),
-	customData_(NULL) {
+	customData_(NULL),
+	memoryUse_(-1),
+	sqlStoreUse_(-1),
+	dataStoreAccess_(-1),
+	networkTransferSize_(-1),
+	networkTime_(-1) {
 }
 
 void TaskProfiler::copy(util::StackAllocator& alloc, const TaskProfiler& target) {
@@ -410,6 +415,12 @@ void TaskProfiler::copy(util::StackAllocator& alloc, const TaskProfiler& target)
 		customData_ = ALLOC_NEW(alloc) util::XArray<uint8_t>(
 			target.customData_->begin(), target.customData_->end(), alloc);
 	}
+
+	memoryUse_ = target.memoryUse_;
+	sqlStoreUse_ = target.sqlStoreUse_;
+	dataStoreAccess_ = target.dataStoreAccess_;
+	networkTransferSize_ = target.networkTransferSize_;
+	networkTime_ = target.networkTime_;
 }
 
 int64_t convertToTime(util::String& timeStr) {
@@ -569,4 +580,39 @@ TupleList::TupleColumnType convertNoSQLTypeToTupleType(ColumnType type) {
 		GS_THROW_USER_ERROR(GS_ERROR_NOSQL_INTERNAL,
 				"Unsupported type, type=" << static_cast<int32_t>(type));
 	}
+}
+
+LimitedQueryStringFormatter::LimitedQueryStringFormatter(
+		const char8_t *str, size_t limit) :
+		str_(str),
+		limit_(limit) {
+}
+
+std::ostream& LimitedQueryStringFormatter::format(std::ostream &os) const {
+	if (str_ != NULL) {
+		const size_t orgLength = strlen(str_);
+		if (orgLength <= limit_) {
+			os << str_;
+		}
+		else {
+			u8string info;
+			{
+				util::NormalOStringStream ss;
+				ss << "(omitted, limit=" << limit_ <<
+						", size=" << orgLength << ")";
+				info = ss.str();
+			}
+
+			const size_t queryLength =
+					orgLength - std::min(info.size(), orgLength);
+			os.write(str_, queryLength);
+			os << info;
+		}
+	}
+	return os;
+}
+
+std::ostream& operator<<(
+		std::ostream &os, const LimitedQueryStringFormatter &formatter) {
+	return formatter.format(os);
 }

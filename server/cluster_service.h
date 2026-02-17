@@ -48,7 +48,7 @@ class SQLService;
 class SQLExecutionManager;
 class JobManager;
 class PartitionList;
-class DataStoreConfig;
+struct DataStoreConfig;
 struct ClusterOptionalInfo;
 class DatabaseManager;
 class OpenLDAPFactory;
@@ -368,6 +368,7 @@ public:
 		cpSvc_(NULL),
 		cpEE_(NULL),
 		sysSvc_(NULL),
+		sysEE_(NULL),
 		syncSvc_(NULL),
 		sqlSvc_(NULL),
 		sqlEE_(NULL),

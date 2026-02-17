@@ -32,7 +32,6 @@ UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK_DETAIL);
 UTIL_TRACER_DECLARE(SQL_INTERNAL);
 AUDIT_TRACER_DECLARE(AUDIT_CONNECT);
 
-
 const size_t SQLExecutionManager::DEFAULT_ALLOCATOR_BLOCK_SIZE = 20;
 const size_t SQLExecutionManager::EXECUTION_FREE_LIMIT_SIZE = 32 * 1024 * 1024;
 const int32_t SQLExecutionManager::DEFAULT_WORK_CACHE_MEMORY_MB = 128;
@@ -181,15 +180,75 @@ void BindParamSet::copyBindParamSet(const BindParamSet& rhs) {
 	}
 }
 
+const double SQLConfigParam::INDEX_SCAN_COST_RATE_DEFAULT = 3.0;
+const double SQLConfigParam::RANGE_SCAN_COST_RATE_DEFAULT = 2.0;
+const double SQLConfigParam::BLOCK_SCAN_COUNT_RATE_DEFAULT = 1.1;
+const double SQLConfigParam::PATTERN_MATCH_MEMORY_LIMIT_RATE_DEFAULT = 0.5;
+
 SQLConfigParam::SQLConfigParam(const ConfigTable& config) :
 		multiIndexScan_(config.get<bool>(CONFIG_TABLE_SQL_MULTI_INDEX_SCAN)),
 		partitioningRowKeyConstraint_(config.get<bool>(
 				CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT)),
+		costBasedIndexScan_(
+				config.get<bool>(CONFIG_TABLE_SQL_COST_BASED_INDEX_SCAN)),
 		costBasedJoin_(config.get<bool>(CONFIG_TABLE_SQL_COST_BASED_JOIN)),
 		costBasedJoinDriving_(
 				config.get<bool>(CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING)),
 		planningVersion_(
-				getPlanningVersion(config, CONFIG_TABLE_SQL_PLAN_VERSION)) {
+				getPlanningVersion(config, CONFIG_TABLE_SQL_PLAN_VERSION)),
+		indexScanCostRate_(config.get<double>(
+				CONFIG_TABLE_SQL_INDEX_SCAN_COST_RATE)),
+		rangeScanCostRate_(config.get<double>(
+				CONFIG_TABLE_SQL_RANGE_SCAN_COST_RATE)),
+		blockScanCountRate_(config.get<double>(
+				CONFIG_TABLE_SQL_BLOCK_SCAN_COUNT_RATE)),
+		patternMatchMemoryLimitRate_(config.get<double>(
+				CONFIG_TABLE_SQL_PATTERN_MATCH_MEMORY_LIMIT_RATE)) {
+}
+
+double SQLConfigParam::resolveIndexScanCostRate() const {
+	return resolveRateValue(
+			indexScanCostRate_, 100, INDEX_SCAN_COST_RATE_DEFAULT);
+}
+
+double SQLConfigParam::resolveRangeScanCostRate() const {
+	return resolveRateValue(
+			rangeScanCostRate_, 100, RANGE_SCAN_COST_RATE_DEFAULT);
+}
+
+double SQLConfigParam::resolveBlockScanCountRate() const {
+	return resolveRateValue(
+			blockScanCountRate_, 100, BLOCK_SCAN_COUNT_RATE_DEFAULT);
+}
+
+int64_t SQLConfigParam::resolvePatternMatchMemoryLimit(
+		int64_t workMemoryLimit) const {
+	double rate = patternMatchMemoryLimitRate_;
+	if (rate < 0) {
+		rate = PATTERN_MATCH_MEMORY_LIMIT_RATE_DEFAULT;
+	}
+
+	int64_t workLimit = workMemoryLimit;
+	if (workLimit <= 0) {
+		workLimit = ConfigTable::megaBytesToBytes(
+				SQLProcessorConfig::DEFAULT_WORK_MEMORY_MB);
+	}
+
+	double base = static_cast<double>(workLimit) * rate;
+	if (base < 0) {
+		return 0;
+	}
+
+	int64_t max = std::numeric_limits<int64_t>::max();
+	if (base >= static_cast<double>(max)) {
+		return max;
+	}
+
+	if (!(0 <= base && base <= static_cast<double>(max))) {
+		return workLimit;
+	}
+
+	return static_cast<int64_t>(base);
 }
 
 SQLPlanningVersion SQLConfigParam::getPlanningVersion(
@@ -200,6 +259,19 @@ SQLPlanningVersion SQLConfigParam::getPlanningVersion(
 		version.parse(str);
 	}
 	return version;
+}
+
+double SQLConfigParam::resolveRateValue(
+		double value, double maxValue, double defaultValue) {
+	if (value > maxValue) {
+		return maxValue;
+	}
+
+	if (!(value >= 0)) {
+		return defaultValue;
+	}
+
+	return value;
 }
 
 SQLExecutionManager::SQLExecutionManager(
@@ -230,6 +302,8 @@ SQLExecutionManager::SQLExecutionManager(
 		config.getUInt32(CONFIG_TABLE_SQL_WORK_MEMORY_LIMIT));
 	processorConfig_->workMemoryCacheBytes_ = ConfigTable::megaBytesToBytes(
 		config.getUInt32(CONFIG_TABLE_SQL_WORK_CACHE_MEMORY));
+	processorConfig_->patternMatchMemoryLimitBytes_ =
+		config_.resolvePatternMatchMemoryLimit(processorConfig_->workMemoryLimitBytes_);
 
 	uint64_t maxCount = processorConfig_->workMemoryCacheBytes_
 		/ static_cast<uint32_t>(1 << DEFAULT_ALLOCATOR_BLOCK_SIZE);
@@ -573,6 +647,27 @@ void SQLExecution::setRequest(RequestInfo& request) {
 
 }
 
+void SQLExecution::traceLongQueryCore(
+		const JobResourceInfo &info, SQLExecution *execution,
+		SQLService &sqlSvc) {
+	try {
+		util::NormalOStringStream ss;
+		ss << "startTime=" << CommonUtility::getTimeStr(info.startTime_) <<
+				", executionTime=" << info.leadTime_ <<
+				", query=" << sqlSvc.getTraceLimitQueryFormatter(
+						info.statement_.c_str()) <<
+				", dbName=" << info.dbName_ <<
+				", appName=" << info.applicationName_;
+		if (execution != NULL) {
+			AUDIT_TRACE_WARNING_EXECUTE(execution, ss.str().c_str());
+		}
+		GS_TRACE_WARNING(SQL_DETAIL, GS_TRACE_SQL_LONG_QUERY, ss.str().c_str());
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
+	}
+}
+
 SQLTableInfoList* SQLExecution::generateTableInfo(SQLExpandViewContext& cxt) {
 	SQLParsedInfo& parsedInfo = *cxt.parsedInfo_;
 	SQLConnectionControl* control = cxt.control_;
@@ -904,7 +999,7 @@ void SQLExecution::execute(EventContext& ec,
 				GS_RETHROW_USER_OR_SYSTEM(*e, "");
 			}
 
-			ExecutionProfilerWatcher watcher(this, (e == NULL), false);
+			ExecutionProfilerWatcher watcher(alloc, this, (e == NULL), false);
 
 			bool useCache = (!context_.isRetryStatement() && currentVersionId == 0);
 			resultSet_->resetSchema();
@@ -1045,7 +1140,7 @@ void SQLExecution::execute(EventContext& ec,
 
 			watcher.lap(ExecutionProfilerWatcher::COMPILE);
 
-			jobManager_->beginJob(ec, jobId, &jobInfo, delayStartTime);
+			jobManager_->beginJob(ec, jobId, &jobInfo, delayStartTime, *this);
 			getContext().setStartTime(jobInfo.startTime_);
 			return;
 		}
@@ -1355,13 +1450,7 @@ void SQLExecution::fetch(
 		}
 		JobId jobId;
 		context_.getCurrentJobId(jobId);
-		JobManager::Latch latch(jobId, "SQLExecution::fetch", jobManager_);
-		Job* job = latch.get();
-		if (job) {
-			getContext().checkPendingException(true);
-			job->fetch(ec, this);
-		}
-		else {
+		if (!jobManager_->fetch(ec, jobId, *this)) {
 			try {
 				getContext().checkPendingException(true);
 				GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
@@ -1404,7 +1493,7 @@ bool SQLExecution::fetch(EventContext& ec, SQLFetchContext& cxt,
 				setBatchCount(0);
 			}
 			else if (cxt.reader_->exists()) {
-				TupleList::Column& column = cxt.columnList_[0];
+				const TupleList::Column& column = cxt.columnList_[0];
 				int64_t updateCount = cxt.reader_->get().getAs<int64_t>(column);
 				setBatchCount(updateCount);
 			}
@@ -1563,8 +1652,9 @@ void SQLExecution::executeCancel(EventContext& ec, bool clientCancel) {
 	}
 }
 
-bool SQLExecution::replySuccessInternal(EventContext& ec, int32_t type,
-	uint8_t versionId, ReplyOption& option, JobId* responseJobId) {
+bool SQLExecution::replySuccessInternal(
+		EventContext& ec, int32_t type, uint8_t versionId, ReplyOption& option,
+		JobId* responseJobId) {
 	util::StackAllocator& alloc = ec.getAllocator();
 
 	bool responsed = executionStatus_.responsed_;
@@ -1597,8 +1687,7 @@ bool SQLExecution::replySuccessInternal(EventContext& ec, int32_t type,
 	}
 								  break;
 	case SQL_REPLY_SUCCESS_EXPLAIN_ANALYZE: {
-		Job* job = option.job_;
-		encodeSuccessExplainAnalyze(alloc, out, job);
+		encodeSuccessExplainAnalyze(alloc, out, option.taskProfileList_);
 		break;
 	}
 	default:
@@ -1764,8 +1853,8 @@ void SQLExecution::encodeSuccessExplain(util::StackAllocator& alloc,
 }
 
 void SQLExecution::encodeSuccessExplainAnalyze(
-	util::StackAllocator& eventStackAlloc,
-	EventByteOutStream& out, Job* job) {
+		util::StackAllocator& eventStackAlloc, EventByteOutStream& out,
+		const util::Vector<TaskProfiler> *taskProfileList) {
 
 	SQLResultSet resultSet(globalVarAlloc_);
 	util::Vector<TupleList::TupleColumnType> typeList(eventStackAlloc);
@@ -1791,7 +1880,9 @@ void SQLExecution::encodeSuccessExplainAnalyze(
 			picojson::value jsonPlanOutValue;
 			JsonUtils::OutStream planOut(jsonPlanOutValue);
 			TaskProfiler profile;
-			job->getProfiler(eventStackAlloc, profile, planId);
+			if (taskProfileList != NULL && planId < taskProfileList->size()) {
+				profile = (*taskProfileList)[planId];
+			}
 			SQLPreparedPlan::Node& node = (*plan).nodeList_[planId];
 			TupleValue::VarContext::Scope varScope(varCxt);
 			try {
@@ -1806,8 +1897,6 @@ void SQLExecution::encodeSuccessExplainAnalyze(
 
 				resultSet.setVarFieldValue(tmpStr.data(), tmpStr.size());
 			}
-			ALLOC_DELETE(eventStackAlloc, profile.rows_);
-			ALLOC_DELETE(eventStackAlloc, profile.address_);
 		}
 	}
 	executionStatus_.preparedPlan_ = NULL;
@@ -1835,9 +1924,10 @@ void SQLExecution::encodeSuccessExplainAnalyze(
 }
 
 bool SQLExecution::replySuccessExplainAnalyze(
-	EventContext& ec, Job* job, uint8_t versionId, JobId* responseJobId) {
+		EventContext &ec, uint8_t versionId, JobId *responseJobId,
+		const util::Vector<TaskProfiler> *taskProfileList) {
 	ReplyOption option;
-	option.job_ = job;
+	option.taskProfileList_ = taskProfileList;
 	bool retVal = replySuccessInternal(ec,
 		SQL_REPLY_SUCCESS_EXPLAIN_ANALYZE, versionId, option, responseJobId);
 	if (!context_.isPreparedStatement()) {
@@ -2215,7 +2305,7 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 	try {
 		int64_t startTime = util::DateTime::now(false).getUnixTime();
 		getContext().setStartTime(startTime);
-		ExecutionProfilerWatcher watcher(this, true, true);
+		ExecutionProfilerWatcher watcher(eventStackAlloc, this, true, true);
 		JobId jobId;
 		generateJobId(jobId, getContext().executionStatus_.execId_);
 
@@ -2255,10 +2345,6 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 		bool remoteUpdateCache = false;
 		bool needSchemaRefresh = false;
 		int64_t totalRowCount = 0;
-
-		DatabaseId dbId = context_.getDBId();
-		jobManager_->getTransactionService()->getManager()->getDatabaseManager().incrementRequest(dbId, true);
-
 		try {
 			latch = ALLOC_NEW(eventStackAlloc) TableLatch(ec,
 				conn, this, currentDBName, tableName, useCache);
@@ -2707,11 +2793,7 @@ void SQLExecutionManager::getProfiler(
 			prof.compileTime_ = execution->getProfilerInfo().compileTime_;
 			prof.nosqlPendingTime_ = execution->getProfilerInfo().nosqlPendingTime_;
 
-			JobManager::Latch latch(jobId, "SQLExecutionManager::getProfiler", jobManager_);
-			Job* job = latch.get();
-			if (job) {
-				job->setJobProfiler(prof);
-			}
+			jobManager_->setUpProfilerInfo(jobId, prof);
 
 			profs.sqlProfiler_.push_back(prof);
 		}
@@ -3106,6 +3188,12 @@ void SQLExecution::compileSub(
 		ValueTypeList &parameterTypeList, SQLTableInfoList *tableInfoList,
 		util::Vector<BindParam*> &bindParamInfos,
 		TupleValue::VarContext &varCxt, int64_t startTime) {
+	util::AllocatorLimitter &memoryLimitter =
+			executionManager_->getSQLService()->getWorkMemoryLimitter();
+
+	util::AllocatorLimitter::Scope limitterScope(memoryLimitter, alloc);
+	util::AllocatorLimitter::Scope varLimitterScope(
+			memoryLimitter, *varCxt.getVarAllocator());
 
 	SQLPreparedPlan* plan;
 	SQLParsedInfo& parsedInfo = getParsedInfo();
@@ -3115,6 +3203,7 @@ void SQLExecution::compileSub(
 		const SQLConfigParam &param = executionManager_->getSQLConfig();
 		option.setTimeZone(getContext().getTimezone());
 		option.setPlanningVersion(param.getPlanningVersion());
+		option.setCostBasedIndexScan(param.isCostBasedIndexScan());
 		option.setCostBasedJoin(param.isCostBasedJoin());
 		option.setCostBasedJoinDriving(param.isCostBasedJoinDriving());
 		option.setIndexStatsRequester(&indexStatsRequester_);
@@ -3172,7 +3261,7 @@ void SQLExecution::cleanupPrevJob(EventContext& ec) {
 	if (context_.isPreparedStatement()) {
 		JobId currentJobId;
 		context_.getCurrentJobId(currentJobId);
-		jobManager_->remove(currentJobId);
+		jobManager_->remove(&ec, currentJobId);
 	}
 }
 
@@ -3640,11 +3729,11 @@ bool SQLExecution::fetchBatch(
 }
 
 bool SQLExecution::fetchNotSelect(EventContext& ec,
-	TupleList::Reader* reader, TupleList::Column* columnList) {
+	TupleList::Reader* reader, const TupleList::Column* columnList) {
 	if (reader->exists()) {
 		TupleValue::VarContext::Scope varScope(reader->getVarContext());
 		assert(columnList != NULL);
-		TupleList::Column& column = columnList[0];
+		const TupleList::Column& column = columnList[0];
 		response_.updateCount_ = reader->get().getAs<int64_t>(column);
 		if (isDDL()) {
 			executionManager_->incOperation(false, ec.getWorkerId(), 1);
@@ -3670,7 +3759,7 @@ bool SQLExecution::fetchNotSelect(EventContext& ec,
 }
 
 bool SQLExecution::fetchSelect(EventContext& ec, TupleList::Reader* reader,
-	TupleList::Column* columnList, size_t columnSize, bool isCompleted) {
+	const TupleList::Column* columnList, size_t columnSize, bool isCompleted) {
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	bool retFlag = false;
@@ -3682,6 +3771,7 @@ bool SQLExecution::fetchSelect(EventContext& ec, TupleList::Reader* reader,
 	int64_t sizeLimit = executionManager_->getFetchSizeLimit();
 	resultSet_->clear();
 	resultSet_->init(alloc);
+	checkConcurrency(ec, NULL);
 
 	while (reader->exists() && actualFetchCount < currentFetchNum
 		&& resultSet_->getSize() < sizeLimit) {
@@ -3689,7 +3779,7 @@ bool SQLExecution::fetchSelect(EventContext& ec, TupleList::Reader* reader,
 		TupleValue::VarContext::Scope varScope(reader->getVarContext());
 		for (int32_t columnPos = 0;
 			columnPos < static_cast<int32_t>(columnSize); columnPos++) {
-			TupleList::Column& column = columnList[columnPos];
+			const TupleList::Column& column = columnList[columnPos];
 			const TupleValue& value = reader->get().get(column);
 			if (ColumnTypeUtils::isNull(value.getType())) {
 				setNullValue(value, alloc, column);
@@ -3771,7 +3861,7 @@ void SQLExecution::generateBlobValue(
 }
 
 void SQLExecution::setNullValue(const TupleValue& value,
-	util::StackAllocator& alloc, TupleList::Column& column) {
+	util::StackAllocator& alloc, const TupleList::Column& column) {
 	if (column.type_ == TupleList::TYPE_ANY) {
 		setAnyTypeData(alloc, value);
 	}
@@ -4240,8 +4330,28 @@ const std::string SQLExecution::SQLExecutionContext::getClientAddress() const {
 	std::string work;
 	oss << clientInfo_.clientNd_;
 	work = oss.str();
-	return work.substr(work.find("address=")+8,work.length()-work.find("address=")-9);
+	size_t addrPos = work.find("address=") + 8;
+	if (addrPos == std::string::npos) return "";
+	size_t colonPos = work.find(':', addrPos);
+	if (colonPos == std::string::npos || colonPos <= addrPos) return "";
+	return work.substr(addrPos, colonPos - addrPos);
 }
+
+void SQLExecution::SQLExecutionContext::getClientAddress(std::string& address, uint16_t &port) const {
+	port = 0;
+	util::NormalOStringStream oss;
+	std::string work;
+	oss << clientInfo_.clientNd_;
+	work = oss.str();
+	util::SocketAddress address2 = clientInfo_.clientNd_.getAddress();
+	size_t addrPos = work.find("address=") + 8;
+	if (addrPos == std::string::npos) return;
+	size_t colonPos = work.find(':', addrPos);
+	if (colonPos == std::string::npos || colonPos <= addrPos) return;
+	address = work.substr(addrPos, colonPos - addrPos);
+	port = static_cast<int16_t>(std::stoi(work.substr(colonPos + 1)));
+}
+
 
 ExecutionId SQLExecution::SQLExecutionContext::getExecId() {
 	return executionStatus_.execId_;
@@ -4265,8 +4375,9 @@ bool SQLExecution::replyClient(SQLExecution::SQLReplyContext& cxt) {
 		return replySuccessExplain(*cxt.ec_, UNDEF_JOB_VERSIONID, NULL);
 		break;
 	case SQL_REPLY_SUCCESS_EXPLAIN_ANALYZE:
-		return replySuccessExplainAnalyze(*cxt.ec_, cxt.job_,
-			cxt.versionId_, cxt.responseJobId_);
+		return replySuccessExplainAnalyze(
+				*cxt.ec_, cxt.versionId_, cxt.responseJobId_,
+				cxt.taskProfileList_);
 		break;
 	default:
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
@@ -4317,6 +4428,10 @@ bool SQLExecution::SQLExecutionContext::checkPendingException(bool flag) {
 uint8_t SQLExecution::SQLExecutionContext::getCurrentJobVersionId() {
 	util::LockGuard<util::Mutex> guard(lock_);
 	return currentJobId_.versionId_;
+}
+
+bool SQLExecution::SQLExecutionContext::isResponded() const {
+	return executionStatus_.responsed_;
 }
 
 util::StackAllocator* SQLExecution::wrapStackAllocator() {
@@ -4410,8 +4525,14 @@ void SQLExecutionManager::getDatabaseStats(util::StackAllocator& alloc,
 	}
 }
 
-void JobManager::remove(JobId& jobId) {
+void JobManager::remove(EventContext *ec, JobId &jobId) {
 	try {
+		if (isPriorityJobActivated()) {
+			if (ec != NULL) {
+				cancel(*ec, jobId, false);
+			}
+			return;
+		}
 		util::LockGuard<util::Mutex> guard(mutex_);
 		JobMapItr it = jobMap_.find(jobId);
 		if (it != jobMap_.end()) {
@@ -4422,7 +4543,7 @@ void JobManager::remove(JobId& jobId) {
 				SQLExecutionManager::Latch latch(jobId.clientId_, executionManager_);
 				SQLExecution* execution = latch.get();
 				if (execution) {
-					job->traceLongQuery(execution);
+					job->traceLongQuery(*execution);
 				}
 			}
 			if (job->decReference()) {
@@ -4437,44 +4558,11 @@ void JobManager::remove(JobId& jobId) {
 	}
 }
 
-void JobManager::Job::traceLongQuery(SQLExecution* execution) {
-	traceLongQueryCore(execution, startTime_, watch_.elapsedMillis());
-}
-
-void JobManager::Job::traceLongQueryCore(SQLExecution* execution, int64_t startTime, int64_t execTime) {
-	try {
-		SQLService* sqlSvc = execution->getExecutionManager()->getSQLService();
-		int64_t traceLimitTime = sqlSvc->getTraceLimitTime();
-		if (execTime < traceLimitTime) {
-			return;
-		}
-		util::NormalOStringStream ss;
-		ss << "startTime=" << CommonUtility::getTimeStr(startTime) << ", executionTime=" << execTime;
-		int32_t orgLength = static_cast<int32_t>(strlen(execution->getContext().getQuery()));
-		int32_t queryLength = orgLength;
-		int32_t queryLimitSize = sqlSvc->getTraceLimitQuerySize();
-		if (queryLength > queryLimitSize) {
-			queryLength = queryLimitSize;
-			ss << ", query=";
-			ss.write(execution->getContext().getQuery(), queryLength);
-			ss << "(ommited, limit=" << queryLimitSize << ", size=" << orgLength << ")";
-		}
-		else if (queryLength > 0) {
-			ss << ", query=" << execution->getContext().getQuery();
-		}
-		AUDIT_TRACE_WARNING_EXECUTE(execution, ss.str().c_str());
-		ss << ", dbName=" << execution->getContext().getDBName()
-			<< ", appName=" << execution->getContext().getApplicationName();
-		GS_TRACE_WARNING(SQL_DETAIL, GS_TRACE_SQL_LONG_QUERY, ss.str().c_str());
-	}
-	catch (std::exception& e) {
-		UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
-	}
-}
-
 SQLExecution::ExecutionProfilerWatcher::~ExecutionProfilerWatcher() {
 	if (trace_) {
-		JobManager::Job::traceLongQueryCore(execution_, execution_->getContext().getStartTime(), watch_.elapsedMillis());
+		JobManager::traceLongQueryByExecution(
+				alloc_, *execution_, execution_->getContext().getStartTime(),
+				watch_.elapsedMillis());
 	}
 }
 

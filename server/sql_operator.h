@@ -132,7 +132,8 @@ struct SQLOps::ContainerLocation {
 			indexFirstColumns_,
 			UTIL_OBJECT_CODER_OPTIONAL(expirable_, false),
 			UTIL_OBJECT_CODER_OPTIONAL(indexActivated_, false),
-			UTIL_OBJECT_CODER_OPTIONAL(multiIndexActivated_, false));
+			UTIL_OBJECT_CODER_OPTIONAL(multiIndexActivated_, false),
+			UTIL_OBJECT_CODER_OPTIONAL(noCostBased_, false));
 
 	SQLType::TableType type_;
 
@@ -147,6 +148,7 @@ struct SQLOps::ContainerLocation {
 	bool expirable_;
 	bool indexActivated_;
 	bool multiIndexActivated_;
+	bool noCostBased_;
 };
 
 class SQLOps::OpCode {
@@ -634,6 +636,7 @@ public:
 	class ResourceRef;
 	class TotalStats;
 	class Entry;
+	class BlockInterruptionHandler;
 	typedef std::pair<uint64_t, SQLOpTypes::Type> TotalStatsElement;
 
 	explicit OpStore(OpAllocatorManager &allocManager);
@@ -878,6 +881,10 @@ public:
 	TupleListWriter& getWriter(uint32_t index, bool withLocalRef);
 	void closeWriter(uint32_t index, bool force);
 
+	BlockInterruptionHandler* findInterruptionHandler(uint32_t index);
+	bool isBlockTransferActive(uint32_t index);
+	BlockHandler* findBlockHandler(uint32_t index);
+
 	int64_t getOutputTupleCount(uint32_t index, bool withLocalRef);
 	void addOutputTupleCount(
 			uint32_t index, bool withLocalRef, int64_t count);
@@ -1017,6 +1024,20 @@ private:
 	util::AllocUniquePtr<OpProfilerEntry> profiler_;
 };
 
+class SQLOps::OpStore::BlockInterruptionHandler {
+public:
+	BlockInterruptionHandler();
+
+	void setContext(OpContext *cxt);
+	void interrupt();
+
+private:
+	BlockInterruptionHandler(const BlockInterruptionHandler&);
+	BlockInterruptionHandler& operator=(const BlockInterruptionHandler&);
+
+	OpContext *cxt_;
+};
+
 struct SQLOps::OpStore::EntryElement {
 public:
 	typedef util::Vector<util::LocalUniquePtr<TupleListReader>*> ReaderList;
@@ -1101,6 +1122,7 @@ public:
 	void detach(util::StackAllocator &alloc);
 
 	void activate(ExtOpContext &extCxt);
+	bool isActive();
 
 	void bindWriter(TupleListWriter &writer);
 
@@ -1108,7 +1130,11 @@ public:
 
 	static void unbindWriter(TupleListWriter &writer);
 
+	BlockInterruptionHandler& getInterruptionHandler();
+
 private:
+	static const uint32_t INTERRUPTION_BLOCK_COUNT;
+
 	static BlockHandler emptyHandler_;
 
 	uint32_t id_;
@@ -1116,6 +1142,9 @@ private:
 	util::LocalUniquePtr<TupleList::BlockReader> reader_;
 	util::LocalUniquePtr<TupleList::BlockReader::Image> readerImage_;
 	bool closed_;
+
+	BlockInterruptionHandler interruptionHandler_;
+	uint32_t interruptionRemaining_;
 };
 
 class SQLOps::OpContext {
@@ -1123,6 +1152,7 @@ public:
 	typedef SQLExprs::ExprCode::InputSourceType InputSourceType;
 
 	class Source;
+	class TransferInterruptionHandler;
 
 	explicit OpContext(const Source &source);
 
@@ -1161,6 +1191,10 @@ public:
 	void setNextCountForSuspend(uint64_t count);
 	void resetNextCountForSuspend();
 
+	void interruptByBlockTransfer();
+	void setTransferInterruptionHandler(TransferInterruptionHandler *handler);
+	bool isBlockTransferActive();
+
 	OpPlan& getPlan();
 	Source getSource();
 	OpCursor::Source getCursorSource();
@@ -1177,6 +1211,7 @@ public:
 	SQLValues::ValueProfile* getValueProfile();
 	SQLExprs::ExprProfile* getExprProfile();
 
+	OpProfilerEntry* getProfiler();
 	OpProfilerOptimizationEntry* getOptimizationProfiler();
 	OpProfilerIndexEntry* getIndexProfiler(uint32_t ordinal);
 
@@ -1257,6 +1292,8 @@ private:
 
 	bool checkSuspendedDetail();
 
+	void setBlockInterruptionHandler(bool enabled);
+
 	void loadTupleId();
 	void saveTupleId();
 
@@ -1268,6 +1305,7 @@ private:
 	ExtOpContext *extCxt_;
 
 	uint64_t interruptionCheckRemaining_;
+	TransferInterruptionHandler *interruptionHandler_;
 
 	bool invalidated_;
 	bool suspended_;
@@ -1285,6 +1323,12 @@ private:
 	OpStoreId id_;
 	OpStore &store_;
 	ExtOpContext *extCxt_;
+};
+
+class SQLOps::OpContext::TransferInterruptionHandler {
+public:
+	virtual ~TransferInterruptionHandler();
+	virtual void onInterrupted() = 0;
 };
 
 class SQLOps::ProjectionCode {

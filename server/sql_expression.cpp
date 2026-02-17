@@ -570,7 +570,8 @@ SQLExprs::WindowState::WindowState() :
 		partitionValueCount_(-1),
 		rangeKey_(RangeKey::invalid()),
 		rangePrevKey_(RangeKey::invalid()),
-		rangeNextKey_(RangeKey::invalid()) {
+		rangeNextKey_(RangeKey::invalid()),
+		variableName_(NULL) {
 }
 
 
@@ -773,6 +774,10 @@ SQLExprs::ExprContext::prepareEntry(uint32_t index) {
 	return entryList_[index];
 }
 
+const SQLExprs::WindowState& SQLExprs::ExprContext::errorWindowState() {
+	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+}
+
 
 SQLExprs::ExprContext::Entry::Entry() :
 		reader_(NULL),
@@ -827,6 +832,16 @@ SQLExprs::Expression& SQLExprs::ExprFactory::create(
 	ExprCode code;
 	code.setType(type);
 	return create(cxt, code);
+}
+
+SQLExprs::ExprFactory::FactoryFunc SQLExprs::ExprFactory::getEmptyFunc() {
+	return &emptyFunc;
+}
+
+SQLExprs::Expression& SQLExprs::ExprFactory::emptyFunc(
+		ExprFactoryContext&, const ExprCode&) {
+	assert(false);
+	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 }
 
 

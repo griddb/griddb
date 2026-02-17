@@ -783,6 +783,19 @@ struct KeyDataStoreValue : public Serializable {
 		Serializable(NULL), containerId_(src.containerId_), oId_(src.oId_),
 		storeType_(src.storeType_), attribute_(src.attribute_) {}
 
+	KeyDataStoreValue& operator=(const KeyDataStoreValue& src) {
+		if (this == &src) {
+			return *this;
+		}
+
+		static_cast<Serializable&>(*this) = static_cast<const Serializable&>(src);
+		containerId_ = src.containerId_;
+		oId_ = src.oId_;
+		storeType_ = src.storeType_;
+		attribute_ = src.attribute_;
+		return *this;
+	}
+
 	bool operator==(const KeyDataStoreValue& b) const {
 		bool isEqual = (this->containerId_ == b.containerId_) &&
 			(this->oId_ == b.oId_) &&

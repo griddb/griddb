@@ -35,6 +35,7 @@
 #include "key_data_store.h"
 #include "interchangeable.h"
 
+
 template<>
 void StatementMessage::OptionSet::encode<>(EventByteOutStream& out) const;
 template<>
@@ -2345,10 +2346,17 @@ void StatementHandler::handleError(
 			}
 			retryLockConflictedRequest(ec, ev, lockConflictStatus);
 		}
-		catch (DenyException&) {
-			UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e, errorMessage.withDescription(
-					"Request denied"));
+		catch (DenyException& e2) {
+			if (e2.getErrorCode() == GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH) {
+				UTIL_TRACE_EXCEPTION_WARNING(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"Request denied"));
+			}
+			else {
+				UTIL_TRACE_EXCEPTION(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"Request denied"));
+			}
 			if ( AUDIT_TRACE_CHECK ) {
 				if ( AuditCategoryType(ev) != 0 ) {
 					AUDIT_TRACE_ERROR_OPERATOR("")
@@ -3166,10 +3174,18 @@ void ConnectHandler::handleError(
 				TXN_STATEMENT_ERROR, request, e);
 
 		}
-		catch (DenyException&) {
-			UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e, errorMessage.withDescription(
-					"Request denied"));
+		catch (DenyException& e2) {
+			e2.getErrorCode();
+			if (e2.getErrorCode() == GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH) {
+				UTIL_TRACE_EXCEPTION_WARNING(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"Request denied"));
+			}
+			else {
+				UTIL_TRACE_EXCEPTION(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"Request denied"));
+			}
 			replyError(ec, alloc, ev.getSenderND(), ev.getType(),
 				TXN_STATEMENT_DENY, request, e);
 
@@ -7901,10 +7917,17 @@ void MultiStatementHandler::handleWholeError(
 			ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_ERROR, request, e);
 	}
-	catch (DenyException&) {
-		UTIL_TRACE_EXCEPTION(
-			TRANSACTION_SERVICE, e, errorMessage.withDescription(
-				"Request denied"));
+	catch (DenyException& e2) {
+		if (e2.getErrorCode() == GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH) {
+			UTIL_TRACE_EXCEPTION_WARNING(
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+					"Request denied"));
+		}
+		else {
+			UTIL_TRACE_EXCEPTION(
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+					"Request denied"));
+		}
 		if ( AUDIT_TRACE_CHECK ) {
 			if ( AuditCategoryType(ev) != 0 ) {
 				AUDIT_TRACE_ERROR_OPERATOR("")
@@ -10364,8 +10387,26 @@ DataStorePeriodicallyHandler::ExpiredContainerContext::ExpiredContainerContext(
 	startPId_(pgConfig.getGroupBeginPartitionId(pgId)),
 	endPId_(pgConfig.getGroupEndPartitionId(pgId)),
 	currentPId_(startPId_), currentPos_(0), checkInterval_(1), limitCount_(1),
-	interruptionInterval_(1), counter_(0) {
+	interruptionInterval_(1), counter_(0), execCounter_(0), actualTime_(0), totalSize_(0) {
 };
+
+bool DataStorePeriodicallyHandler::ExpiredContainerContext::checkCounter() {
+	counter_++;
+	if (counter_ % checkInterval_ == 0) {
+		status_ = EXECUTE;
+		GS_TRACE_WARNING(DATA_EXPIRATION_DETAIL, GS_TRACE_DS_EXPIRED_CONTAINER_INFO,
+			"Expired container check started, pgId=" << pgId_);
+		totalWatch_.reset();
+		execCounter_ = 0;
+		actualTime_ = 0;
+		totalSize_ = 0;
+		totalWatch_.start();
+		return true;
+	}
+	else {
+		return false;
+	}
+}
 
 bool DataStorePeriodicallyHandler::ExpiredContainerContext::next(int64_t size) {
 
@@ -10380,6 +10421,12 @@ bool DataStorePeriodicallyHandler::ExpiredContainerContext::next(int64_t size) {
 		status_ = INIT;
 		currentPId_ = startPId_;
 		currentPos_ = 0;
+		GS_TRACE_WARNING(DATA_EXPIRATION_DETAIL, GS_TRACE_DS_EXPIRED_CONTAINER_INFO,
+			"Expired container check completed, pgId=" << pgId_ << ", elapsedMillis = " << totalWatch_.elapsedMillis() << ", actualTime=" << actualTime_ <<", scanCount=" << totalSize_);
+		totalWatch_.reset();
+		execCounter_ = 0;
+		actualTime_ = 0;
+		totalSize_ = 0;
 		return true;
 	}
 	return false;
@@ -12023,7 +12070,7 @@ void TransactionService::StatSetUpHandler::operator()(StatTable& stat) {
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_NUM_NO_EXPIRE_TXN);
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_INTERNAL_CONNECTION_COUNT);
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_EXTERNAL_CONNECTION_COUNT);
-
+	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_EXPIRATION_CONTAINER_COUNT);
 
 	stat.resolveGroup(parentId, STAT_TABLE_PERF_TXN_DETAIL, "txnDetail");
 	parentId = STAT_TABLE_PERF_TXN_DETAIL;
@@ -12098,6 +12145,9 @@ bool TransactionService::StatUpdator::operator()(StatTable& stat) {
 		stat.set(STAT_TABLE_PERF_TXN_TOTAL_INTERNAL_CONNECTION_COUNT, svc.getTotalInternalConnectionCount());
 
 		stat.set(STAT_TABLE_PERF_TXN_TOTAL_EXTERNAL_CONNECTION_COUNT, svc.getTotalExternalConnectionCount());
+
+		stat.set(STAT_TABLE_PERF_TXN_TOTAL_EXPIRATION_CONTAINER_COUNT, svc.getExpiredCountainerCount());
+
 	}
 	return true;
 }
@@ -12130,11 +12180,21 @@ int32_t TransactionService::getWaitTime(EventContext& ec, Event* ev, int32_t ope
 				interval = syncManager_->getExtraConfig().getLongtermHighLoadInterval();
 				int32_t logWaitInterval = syncManager_->getExtraConfig().getLongtermLogWaitInterval();
 				if (logWaitInterval > 0) {
+					syncManager_->addTotalSyncWaitTime(logWaitInterval);
 					return logWaitInterval;
 				}
-				int32_t queueSize = static_cast<int32_t>(
-					stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
-				if (queueSize >= queueSizeLimit) {
+				EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
+					EventEngine::Stats::EVENT_ACTIVE_EXECUTABLE_ONE_SHOT_COUNT,
+					executableCount, &ec, ev);
+				EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
+					EventEngine::Stats::EVENT_CYCLE_HANDLING_AFTER_ONE_SHOT_COUNT,
+					afterCount, &ec, ev);
+				int64_t totalCount = executableCount + afterCount;
+				if (queueSizeLimit < totalCount) {
+					syncManager_->addTotalSyncWaitTime(interval);
+					GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_SYNC_LEVEL,
+						"pgId=" << pgId << ", executableCount=" << executableCount << ", afterCount = " << afterCount << ", queueSizeLimit="
+						<< queueSizeLimit << ", wait=" << interval << ", totalWait=" << syncManager_->getTotalSyncWaitTime ());
 					return interval;
 				}
 				else {
@@ -12461,13 +12521,15 @@ bool StatementHandler::checkConstraint(Event& ev, ConnectionOption& connOption, 
 		}
 	}
 	if (isClientNd) {
-		if (transactionManager_->getDatabaseManager().getExecutionConstraint(connOption.dbId_, delayTime1, delayTime2, false)) {
+		DatabaseManager& dbManager = transactionManager_->getDatabaseManager();
+		if (dbManager.getExecutionConstraint(connOption.dbId_, delayTime1, delayTime2, false)) {
 			if (delayTime1 > 0 && connOption.retryCount_ == 0) {
 				connOption.retryCount_++;
 				transactionService_->getEE()->addTimer(ev, delayTime1);
 				return true;
 			}
 		}
+		dbManager.incrementRequest(connOption.dbId_, false);
 	}
 	connOption.retryCount_ = 0;
 	return false;

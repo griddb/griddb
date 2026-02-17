@@ -111,6 +111,7 @@ PartitionTable::PartitionTable(const ConfigTable& configTable, const char* confi
 	goalBlockQueue_(configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
 	prevCatchupPId_(UNDEF_PARTITIONID),
 	prevCatchupNodeId_(UNDEF_NODEID),
+	prevParallelCount_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_SYNC_NUM)),
 	partitions_(NULL),
 	nodes_(NULL),
 	enableRackZoneAwareness_(configTable.get<bool>(CONFIG_TABLE_CS_RACK_ZONE_AWARENESS)),
@@ -131,14 +132,17 @@ PartitionTable::PartitionTable(const ConfigTable& configTable, const char* confi
 	parallelSyncNum_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_SYNC_NUM)),
 	parallelChunkSyncNum_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_SYNC_NUM)),
 	immediateCheck_(configTable.get<bool>(CONFIG_TABLE_CS_IMMEDIATE_PARTITION_CHECK)),
-	mgrSet_(NULL), prevCatchupWaitCount_(0), 
+	mgrSet_(NULL), 
 	logSyncLsnDifference_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_LOG_SYNC_LSN_DIFFERENCE)),
-	applyNodeBalance_(configTable.get<bool>(CONFIG_TABLE_CS_PARTITION_NODE_BALANCE))
+	applyNodeBalance_(configTable.get<bool>(CONFIG_TABLE_CS_PARTITION_NODE_BALANCE)),
+	parallelWorkerSyncNum_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_WORKER_SYNC_NUM)),
+	parallelNodeSyncNum_(configTable.get<int32_t>(CONFIG_TABLE_SYNC_MAX_PARALLEL_NODE_SYNC_NUM)),
+	enableParallelSync_(configTable.get<bool>(CONFIG_TABLE_SYNC_ENABLE_PARALLEL_SYNC))
 {
 	try {
 		if (goalAssignmentRule_ != PARTITION_ASSIGNMENT_RULE_DEFAULT && enableRackZoneAwareness_) {
 			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, 
-				"Rackzone awareness and partition assignement rule (NOT 'DEfAULT') can not be defined at the same time");
+				"Rackzone awareness and partition assignement rule (NOT 'DEFAULT') can not be defined at the same time");
 		}
 
 		uint32_t partitionNum = config_.partitionNum_;
@@ -175,7 +179,9 @@ PartitionTable::PartitionTable(const ConfigTable& configTable, const char* confi
 		for (PartitionId pId = 0; pId < partitionNum; pId++) {
 			newsqlPartitionList_[pId].init(pId);
 		}
-		parallelCatchupList_.assign(pgConfig_.getPartitionGroupCount(), ParallelCatchup());
+		parallelCatchupList_.assign(getPartitionNum(), UNDEF_NODEID);
+		prevCatchupList_.assign(getPartitionNum(), false);
+
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -445,6 +451,7 @@ bool PartitionTable::checkConfigurationChange(util::StackAllocator& alloc,
 		context.setConfigurationChange();
 		if (context.isAutoGoal_) {
 			planGoal(context);
+			GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, dumpPartitions(alloc, PartitionTable::PT_CURRENT_GOAL));
 		}
 	}
 	checkRepairPartition(context);
@@ -472,8 +479,7 @@ bool PartitionTable::check(PartitionContext& context) {
 		bool isAllSame = true;
 		bool catchupWait = false;
 		bool isIrregular = false;
-		int32_t checkCount = 0;
-		int32_t waitCount = 0;
+		int32_t catchupCount = 0;
 		for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 			PartitionRole currentRole;
 			PartitionRole goalRole;
@@ -485,23 +491,36 @@ bool PartitionTable::check(PartitionContext& context) {
 				isAllSame = false;
 			}
 			bool currentCatchupWait = false;
-			if (currentRole.hasCatchupRole()) {
-				checkCount++;
-			}
 			if (checkTargetPartition(pId, context.backupNum_, currentCatchupWait, context)) {
 				isIrregular = true;
+			}
+			if (currentRole.hasCatchupRole()) {
+				catchupCount++;
 			}
 			if (currentCatchupWait) {
 				catchupWait = true;
 			}
 		}
-		prevCatchupWaitCount_ = waitCount;
+		if (enableParallelSync()) {
+			int32_t currentparallelCount = context.getParallelCount();
+			util::XArray<NodeId> liveNodeList(alloc);
+			getLiveNodeIdList(liveNodeList);
+			int32_t liveNodeNum = static_cast<int32_t>(liveNodeList.size());
+			context.setLiveNodeNum(liveNodeNum);
+			if (currentparallelCount == 0 || liveNodeNum < currentparallelCount) {
+				context.setParallelCount(liveNodeNum);
+			}
+			if (catchupCount > 0 && prevParallelCount_ > 0 && prevParallelCount_ < currentparallelCount) {
+				catchupWait = false;
+			}
+			prevParallelCount_ = currentparallelCount;
+		}
 		if (catchupWait && !isIrregular) {
 			return false;
 		}
 		if (isAllSame && !isIrregular) {
 			isGoalPartition_ = true;
-			loadInfo_.status_ = PT_NORMAL;
+			checkPartitionSummaryStatus(alloc, false, true);
 			context.isGoalPartition_ = true;
 			return false;
 		}
@@ -1063,6 +1082,31 @@ bool PartitionTable::isUseRackZoneAwareness(util::StackAllocator& alloc) {
 			<< ", nodes=" << dumpNodeAddressList(emptyRackZoneIdList) << ")");
 	}
 	return retFlag;
+}
+
+
+
+bool PartitionTable::refreshGoal(util::StackAllocator& alloc) {
+	try {
+		for (int32_t i = 0; i < getNodeNum(); i++) {
+			if (getHeartbeatTimeout(i) == UNDEF_TTL) {
+				resetDownNode(i);
+			}
+		}
+		picojson::value value;
+		if (stableGoal_.isEnable()) {
+			if (stableGoal_.load() && stableGoal_.validateFormat(value, true)) {
+				if (setGoalPartitions(alloc, &value, PT_STABLE_GOAL, true)) {
+//					GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
 }
 
 /** **
@@ -1656,7 +1700,10 @@ void PartitionTable::modifyGoalTable(util::StackAllocator& alloc,
 void PartitionTable::addCandBackup(PartitionId pId, NodeIdList& backups, PartitionContext& context,
 	NodeId ownerNodeId, util::XArray<NodeId> &activeNodeList) {
 	int32_t backupNum = backups.size();
-	if (backupNum < context.backupNum_ && context.isLoadBalance_) {
+	PartitionRole goalRole;
+	getPartitionRole(pId, goalRole, PT_CURRENT_GOAL);
+	int32_t checkBackupNum = std::min(backupNum, goalRole.getBackupSize());
+	if (backupNum < checkBackupNum && context.isLoadBalance_) {
 		PartitionRole currentRole;
 		getPartitionRole(pId, currentRole, PT_CURRENT_OB);
 		util::Set<NodeId> nodeIdSet(context.getAllocator());
@@ -1676,14 +1723,14 @@ void PartitionTable::addCandBackup(PartitionId pId, NodeIdList& backups, Partiti
 					if (it == nodeIdSet.end()) {
 						backups.push_back(candBackup);
 						nodeIdSet.insert(candBackup);
-						if (backups.size() >= static_cast<size_t>(context.backupNum_)) {
+						if (backups.size() >= static_cast<size_t>(checkBackupNum)) {
 							break;
 						}
 					}
 				}
 			}
 		}
-		if (backups.size() < context.backupNum_) {
+		if (backups.size() < checkBackupNum) {
 			LogSequentialNumber maxLsn = getMaxLsn(pId);
 			for (size_t pos = 0; pos < activeNodeList.size(); pos++) {
 				NodeId candBackup = activeNodeList[pos];
@@ -1694,7 +1741,7 @@ void PartitionTable::addCandBackup(PartitionId pId, NodeIdList& backups, Partiti
 				LogSequentialNumber backupLSN = getLSN(pId, candBackup);
 				if (backupLSN >= maxLsn && checkNextBackup(pId, candBackup, backupLSN, ownerStartLsn, ownerLsn)) {
 					backups.push_back(candBackup);
-					if (backups.size() >= static_cast<size_t>(context.backupNum_)) {
+					if (backups.size() >= static_cast<size_t>(checkBackupNum)) {
 						break;
 					}
 				}
@@ -1865,12 +1912,7 @@ bool PartitionTable::applyInitialRule(
 		}
 	}
 	if (subPartitionTable.size() > 0) {
-		resetCatchup();
-		if (enableParallelSync()) {
-			for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
-				resetCatchup(subPartitionTable.getSubPartition(pos).pId_);
-			}
-		}
+		resetCatchup(subPartitionTable);
 		return true;
 	}
 	else {
@@ -1933,185 +1975,698 @@ void PartitionTable::getCurrentCatchupPIdList(util::Vector<PartitionId>& catchup
 	}
 }
 
-PartitionTable::ApplyContext::ApplyContext(PartitionContext& cxt, util::Vector<ReplicaInfo>& resolvePartitionList) : 
-	alloc_(*cxt.eventStackAlloc_), subPartitionTable_(cxt.subPartitionTable_),
-	resolvePartitionList_(resolvePartitionList), catchupPGIdList_(alloc_),
-	syncMaxNum_(0), chunkSyncMaxNum_(0), currentSyncCount_(0), currentChunkSyncCount_(0) {
+PartitionTable::ApplyContext::ApplyContext(PartitionContext& cxt, util::Vector<ReplicaInfo>& resolvePartitionList) :
+alloc_(*cxt.eventStackAlloc_), subPartitionTable_(cxt.subPartitionTable_),
+resolvePartitionList_(resolvePartitionList), catchupPGIdList_(alloc_),
+syncMaxNum_(cxt.getParallelCount()), chunkSyncMaxNum_(0), currentSyncCount_(0), currentChunkSyncCount_(0), liveNodeNum_(cxt.getLiveNodeNum()){
 }
 
-void PartitionTable::setParallelCatchup(PartitionTable::ApplyContext& cxt) {
-	util::Vector<ReplicaInfo>& resolvePartitionList = cxt.resolvePartitionList_;
-	util::Vector<PartitionGroupId>& catchupPGIdList = cxt.catchupPGIdList_;
-	SubPartitionTable& subPartitionTable = cxt.subPartitionTable_;
-	util::StackAllocator& alloc = cxt.alloc_;
-	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
-	std::vector<PartitionRole> logSyncList;
-	std::vector<PartitionRole> chunkSyncList;
+/**
+ * @brief Manages assignment of partition roles to nodes in the cluster.
+ * @note Maintains node and relation entries, and provides methods for role assignment, status reporting, and resource management.
+ */
+class NodeAssign {
+public:
 
-	bool logSync = true;
-	LogSequentialNumber diffLimit = getLogSyncLsnDifference();
-	for (int32_t i = 0; i < 2; i++) {
-		logSync = (i == 0);
-		if (logSync) {
-			cxt.syncMaxNum_ = parallelSyncNum_;
-			cxt.chunkSyncMaxNum_ = parallelChunkSyncNum_;
-			assert(cxt.syncMaxNum_ > 1);
-			cxt.catchupPGIdList_.assign(pgConfig_.getPartitionGroupCount(), -1);
+	/**
+	 * @brief Represents a candidate assignment between nodes and partitions.
+	 * @note Stores owner/catchup node IDs, partition ID, and data count for assignment evaluation.
+	 */
+	struct RelationEntry {
+		/**
+		 * @brief Constructs a RelationEntry representing a candidate assignment between nodes and partitions.
+		 * @param [in] ownerNodeId Node ID of the owner.
+		 * @param [in] catchupNodeId Node ID of the catchup target.
+		 * @param [in] pId Partition ID for the relation.
+		 * @param [in] dataCount Data count associated with the catchup node.
+		 */
+		RelationEntry(NodeId ownerNodeId, NodeId catchupNodeId, PartitionId pId, int32_t dataCount, bool logSync, bool replicaLoss, int32_t replicaLossCount) :
+			ownerNodeId_(ownerNodeId), catchupNodeId_(catchupNodeId), pId_(pId), dataCount_(dataCount), logSync_(logSync), 
+			replicaLoss_(replicaLoss), replicaLossCount_(replicaLossCount) {}
+		
+		bool operator<(const RelationEntry& other) const {
+			if (replicaLossCount_ != other.replicaLossCount_) {
+				return (replicaLossCount_ > other.replicaLossCount_);
+			}
+			return dataCount_ < other.dataCount_;
 		}
-		else {
-			if (cxt.chunkSyncMaxNum_ == 0) {
-				if (subPartitionTable.size() == 0) {
-					cxt.chunkSyncMaxNum_ = 1;
+		/**
+		 * @brief Returns a string representation of the worker entry, including assigned partitions.
+		 * @return String containing pgId and assigned partition IDs.
+		 */
+		std::string dump() {
+			util::NormalOStringStream oss;
+			oss << "Relation : { " << "pId=" << pId_ << ", owner=" << ownerNodeId_ << ", catchup=" << catchupNodeId_
+				<< ", dataCount=" << dataCount_ << ", logSync=" << (int32_t)logSync_ << ", replicaLoss=" << (int32_t)replicaLoss_
+				<< ", replicaLossCount=" << replicaLossCount_ << " }" << std::endl;
+			return oss.str();
+		}
+		NodeId ownerNodeId_;
+		NodeId catchupNodeId_;
+		PartitionId pId_;
+		int32_t dataCount_;
+		bool logSync_;
+		bool replicaLoss_;
+		int32_t replicaLossCount_;
+	};
+	typedef NodeAssign::RelationEntry RelationEntry;
+
+	/**
+	 * @brief Represents a node and its assignment state for partition roles.
+	 * @note Maintains candidate catchup list, assignment counters, and provides methods for status reporting.
+	 */
+	struct NodeEntry {
+		/**
+		 * @brief Constructs a NodeEntry representing a node and its assignment state.
+		 * @param [in] alloc Stack allocator for memory management.
+		 * @param [in] nodeId Node ID for this entry.
+		 * @note Initializes candidate catchup list and assignment counters.
+		 */
+		NodeEntry(util::StackAllocator& alloc, NodeId nodeId, bool isAlive) :
+			alloc_(alloc), candCatchupList_(alloc), nodeId_(nodeId), ownerCount_(0), dataCount_(0),
+			available_(true), parallelCount_(0), assignCount_(0), isAlive_(isAlive), replicaLossCount_(0) {}
+
+		/**
+		 * @brief Destructor for NodeEntry. Cleans up candidate catchup list and releases resources.
+		 */
+		~NodeEntry() {
+			for (RelationEntry* entry : candCatchupList_) {
+				ALLOC_DELETE(alloc_, entry);
+			}
+		}
+
+		/**
+		 * @brief Checks if the node is available for assignment.
+		 * @return True if the node is available and has at least one owner count, false otherwise.
+		 */
+		bool isAvailable() {
+			return(isAlive_ && available_ && ownerCount_ > 0);
+		}
+		
+        /**
+         * @brief Returns a string representation of the node entry, including assignment details.
+         * @return String containing nodeId, ownerCount, dataCount, availability, parallelCount, and relation info.
+         */
+		std::string dump() {
+			util::NormalOStringStream oss;
+			oss << "NodeEntry : { nodeId=" << nodeId_ << ", ownerCount=" << ownerCount_ << ", dataCount=" << dataCount_
+				<< ", available=" << (int32_t)available_ << ", paralleCount=" << parallelCount_ << ", assignCount=" << assignCount_
+				<<", isAlive=" << (int32_t)isAlive_ << ", replicaLossCount=" << replicaLossCount_ << std::endl;
+			oss << "relation:";
+			for (RelationEntry* relation : candCatchupList_) {
+				oss << relation->dump();
+			}
+			oss << " }" << std::endl;
+			return oss.str();
+		}
+
+		util::StackAllocator& alloc_;
+		util::Vector<RelationEntry*> candCatchupList_;
+		NodeId nodeId_;
+		int32_t ownerCount_;
+		int32_t dataCount_;
+		bool available_;
+		int32_t parallelCount_;
+		int32_t assignCount_;
+		bool isAlive_;
+		int32_t replicaLossCount_;
+	};
+
+	/**
+	 * @brief Represents a worker group for partition assignment within a partition group.
+	 * @note Maintains assigned partition IDs and provides methods for assignment and status reporting.
+	 */
+	struct WorkerEntry {
+
+		/**
+		 * @brief Constructs a WorkerEntry for managing partition assignments within a partition group.
+		 * @param [in] alloc Stack allocator for memory management.
+		 * @param [in] pgId Partition group ID for this worker entry.
+		 */
+		WorkerEntry(util::StackAllocator& alloc, PartitionGroupId pgId) : assignedPIdSet_(alloc), pgId_(pgId), replicaLossCount_(0) {}
+
+		/**
+		 * @brief Adds a partition ID to the worker's assigned set.
+		 * @param [in] pId Partition ID to assign.
+		 * @return True if the partition was newly added, false if it was already present.
+		 */
+		bool append(PartitionId pId) {
+			return assignedPIdSet_.insert(pId).second;
+		}
+		
+		/**
+		 * @brief Gets the number of partitions assigned to this worker.
+		 * @return The count of assigned partitions.
+		 */
+		size_t size() {
+			return assignedPIdSet_.size();
+		}
+
+        /**
+         * @brief Returns a string representation of the worker entry, including assigned partitions.
+         * @return String containing pgId and assigned partition IDs.
+         */
+		std::string dump() {
+			util::NormalOStringStream oss;
+			oss << "WorkerEntry : { pgId=" << pgId_ << ", replicaLoss=" << replicaLossCount_ << ", size=" << size();
+			if (size() > 0) {
+				oss << "{";
+				auto last = std::prev(assignedPIdSet_.end());
+				for (const PartitionId& pId : assignedPIdSet_) {
+					if (pId != *last) {
+						oss << ",";
+					}
+				}
+			}
+			oss << " }" << std::endl;
+			return oss.str();
+		}
+
+		util::Set<PartitionId> assignedPIdSet_;
+		PartitionGroupId pgId_;
+		int32_t replicaLossCount_;
+	};
+
+	/**
+	 * @brief Manages assignment of partitions to worker groups for parallel catchup operations.
+	 * @note Provides methods for optimizing and balancing partition assignments among workers.
+	 *       Maintains internal state for worker entries and assignment strategies.
+	 */
+	class WorkerAssign {
+	public:
+		class NodeAssign;
+	/**
+	 * @brief Initializes the WorkerAssign instance for partition assignment optimization.
+	 * @param [in] alloc Stack allocator for memory management.
+	 * @param [in] pt Pointer to the PartitionTable instance.
+	 * @param [in] maxParallelWorkerCount Maximum number of parallel workers to be managed.
+	 * @note Prepares internal data structures for worker assignment and validates input parameters.
+	 * @note Throws an exception or asserts if parameters are invalid (e.g., zero or negative worker count).
+	 */
+		WorkerAssign(util::StackAllocator& alloc, PartitionTable* pt, int32_t maxParallelWorkerCount, int32_t liveNodeNum) :
+			alloc_(alloc), workerEntryList_(alloc), workerCount_(pt->getPartitionGroupCount()), pt_(pt),
+			maxParallelWorkerCount_(maxParallelWorkerCount), replicaLossCount_(0) {
+			for (int32_t workerNo = 0; workerNo < workerCount_; workerNo++) {
+				workerEntryList_.emplace_back(WorkerEntry(alloc, workerNo));
+			}
+		}
+
+		void updateReplicaInfo(PartitionId pId, PartitionGroupId pgId, int32_t replicaLossCount) {
+			replicaLossCount_ += replicaLossCount;
+		}
+
+		void appendEntry(PartitionId pId, PartitionGroupId pgId) {
+			workerEntryList_[pgId].append(pId);
+		}
+
+		/**
+		 * @brief Comparator for sorting WorkerEntry pointers by their assigned partition count.
+		 * @param [in] a Pointer to the first WorkerEntry.
+		 * @param [in] b Pointer to the second WorkerEntry.
+		 * @return True if a has fewer assigned partitions than b, false otherwise.
+		 */
+		static bool compareWorkerEntrySize(WorkerEntry* a, WorkerEntry* b) {
+			return a->size() < b->size();
+		};
+
+		/**
+		 * @brief Checks and assigns a candidate relation entry to the specified worker entry.
+		 * @param [in,out] entry WorkerEntry to which the partition may be assigned.
+		 * @param [in] relList List of candidate RelationEntry pointers.
+		 * @return Pointer to the assigned RelationEntry if successful, nullptr otherwise.
+		 * @note Skips blocked partitions and only assigns if not already present in the worker entry.
+		 */
+		util::Vector<RelationEntry*>::iterator checkEntry(WorkerEntry& entry, util::Vector<RelationEntry*>& relList, bool isLogSync, bool replicaLoss = false) {
+			for (util::Vector < RelationEntry*>::iterator relIt = relList.begin(); relIt != relList.end(); relIt++) {
+				RelationEntry* relation = (*relIt);
+				GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, "Check relation : " << relation->dump());
+				if (pt_->getPartitionGroupId(relation->pId_) == entry.pgId_ &&
+					!pt_->isGoalBlockedPartition(relation->pId_, relation->catchupNodeId_)) {
+					if (replicaLoss && !relation->replicaLoss_) continue;
+					if (isLogSync && !relation->logSync_) continue;
+					if (entry.append(relation->pId_)) {
+						GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Append relation : " << relation->dump());
+						return relIt;
+					}
+				}
+			}
+			return relList.end();
+		}
+
+		/**
+		 * @brief Assigns an optimal relation entry to a worker based on current assignment state.
+		 * @param [in] relList List of candidate RelationEntry pointers.
+		 * @return Pointer to the assigned RelationEntry if successful, nullptr otherwise.
+		 * @note Uses worker entry size and assignment strategy to select the optimal candidate.
+		 */
+		util::Vector<RelationEntry*>::iterator  assignOptimizeGroup(util::Vector<RelationEntry*>& relList) {
+			GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Assgined optimize start, maxWorkerCount=" << maxParallelWorkerCount_);
+			if (maxParallelWorkerCount_ == 1) {
+				for (int32_t k = 0; k < 2; k++) {
+					GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Search : " << k);
+					for (WorkerEntry& entry : workerEntryList_) {
+						GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, entry.dump());
+						if (entry.size() == 0) {
+							util::Vector<RelationEntry*>::iterator relIt = checkEntry(entry, relList, false, (k == 0));
+							if (relIt != relList.end()) {
+								return relIt;
+							}
+						}
+					}
+				}
+			}
+			else {
+				GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Assgined noraml start, maxWorkerCount=" << maxParallelWorkerCount_);
+				util::Vector<WorkerEntry*> sorted(alloc_);
+				for (WorkerEntry& entry : workerEntryList_) {
+					sorted.push_back(&entry);
+				}
+				std::sort(sorted.begin(), sorted.end(), compareWorkerEntrySize);
+				size_t minValue = sorted.front()->size();
+				for (int32_t k = 0; k < 2; k++) {
+					GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Search : " << k);
+					for (WorkerEntry* entry : sorted) {
+						GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, entry->dump());
+						if (entry->size() != minValue) break;
+						util::Vector<RelationEntry*>::iterator relIt = checkEntry(*entry, relList, false, (k == 0));
+						if (relIt != relList.end()) {
+							return relIt;
+						}
+					}
+				}
+			}
+			return relList.end();
+		}
+
+		struct SortEntry {
+			SortEntry(size_t size, PartitionGroupId pgId) : size_(size), pgId_(pgId) {}
+			size_t size_;
+			PartitionGroupId pgId_;
+			/**
+			 * @brief Comparator for SortEntry based on assignment size.
+			 * @param [in] other Reference to another SortEntry to compare with.
+			 * @return True if this entry has a smaller size than the other.
+			 */
+			bool operator<(const SortEntry& other) const {
+				return size_ < other.size_;
+			}
+		};
+
+		/**
+		 * @brief Assigns a relation entry to the worker group with the minimum assignment size.
+		 * @param [in] relList List of candidate RelationEntry pointers.
+		 * @return Pointer to the assigned RelationEntry if successful, nullptr otherwise.
+		 * @note Prioritizes worker groups with the least number of assigned partitions.
+		 */
+		util::Vector<RelationEntry*>::iterator assignMinGroup(util::Vector<RelationEntry*>& relList, bool isLogSync, bool replicaLoss = false) {
+			GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Assgined min group start, maxWorkerCount=" << maxParallelWorkerCount_);
+			util::Vector<SortEntry> sortedList(alloc_);
+			for (WorkerEntry& entry : workerEntryList_) {
+				sortedList.emplace_back(entry.size(), entry.pgId_);
+			}
+			std::sort(sortedList.begin(), sortedList.end());
+			for (const SortEntry& e : sortedList) {
+				WorkerEntry& entry = workerEntryList_[e.pgId_];
+				GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, entry.dump());
+				if (entry.size() >= maxParallelWorkerCount_) {
+					GS_OUTPUT_DIRECT(DUMP_LEVEL2, DUMP_PARTITION_LEVEL, "Worker assigned size exceed, size=" << entry.size());
+					continue;
+				}
+				util::Vector<RelationEntry*>::iterator relIt = checkEntry(entry, relList, isLogSync, replicaLoss);
+				if (relIt != relList.end()) {
+					return relIt;
+				}
+			}
+			return  relList.end();
+		}
+
+        /**
+         * @brief Appends a partition ID to the corresponding worker entry based on its partition group.
+         * @param [in] pId Partition ID to assign.
+         * @note The partition is assigned to the worker entry that manages its partition group.
+         */
+		void append(PartitionId pId) {
+			PartitionGroupId pgId = pt_->getPartitionGroupId(pId);
+			workerEntryList_[pgId].append(pId);
+		}
+		
+        /**
+         * @brief Returns a string representation of all worker entries managed by WorkerAssign.
+         * @return String containing details of each worker entry and their assigned partitions.
+         */
+		std::string dump() {
+			util::NormalOStringStream oss;
+			auto last = std::prev(workerEntryList_.end());
+			oss << "[Worker]" << std::endl;
+			for (auto it = workerEntryList_.begin(); it != workerEntryList_.end(); ++it) {
+				if (it != last) {
+					oss << (*it).dump();
 				}
 				else {
-					break;
+					std::cout << std::endl;
 				}
 			}
-			if (subPartitionTable.size() > 0) {
-				break;
-			}
+			return oss.str();
 		}
-		DUMP_PARTITION_INFO("parallel = " << cxt.syncMaxNum_ << ", " << cxt.chunkSyncMaxNum_);
-		for (util::Vector<ReplicaInfo>::iterator it = resolvePartitionList.begin(); it != resolvePartitionList.end(); it++) {
-			PartitionId targetPId = (*it).pId_;
-			PartitionGroupId targetPgId = getPartitionGroupId(targetPId);
-			DUMP_PARTITION_INFO("target pId=" << targetPId << ", pgId=" << targetPgId);
-			if (catchupPGIdList[targetPgId] != -1) {
-				DUMP_PARTITION_INFO("already assigned pId=" << targetPId  << ", pgId=" << targetPgId);
-				continue;
-			}
-			NodeId currentOwner = getOwner(targetPId);
-			if (currentOwner == UNDEF_NODEID) {
-				DUMP_PARTITION_INFO("not current owner pId=" << targetPId << ", pgId=" << targetPgId);
-				continue;
-			}
-			LogSequentialNumber ownerLsn = getLSN(targetPId, currentOwner);
-			LogSequentialNumber ownerStartLsn = getStartLSN(targetPId, currentOwner);
-			PartitionRole currentRole;
-			getPartitionRole(targetPId, currentRole, PT_CURRENT_OB);
-			if (currentRole.hasCatchupRole()) {
-				DUMP_PARTITION_INFO("has catchup role owner pId=" << targetPId << ", pgId=" << targetPgId << "," <<currentRole);
-				continue;
-			}
+		
+		util::StackAllocator& alloc_;
+		util::Vector<WorkerEntry> workerEntryList_;
+		int32_t workerCount_;
+		PartitionTable* pt_;
+		int32_t maxParallelWorkerCount_;
+		int32_t replicaLossCount_;
+	};
 
-			PartitionRole nextRole(targetPId, revision_, PT_CURRENT_OB);
+	 /**
+	  * @brief Initializes the NodeAssign instance and prepares node/partition entries for assignment.
+	  * @param [in] alloc Stack allocator for memory management.
+	  * @param [in] pt Pointer to the PartitionTable instance.
+	  * @param [in] maxParallelCount Maximum number of parallel assignments.
+	  * @param [in] maxParallelWorkerCount Maximum number of parallel workers (default: 1).
+	  * @param [in] maxNodeNum Maximum number of nodes in the cluster.
+	  * @param [in] maxNodeAssignedNum Maximum number of assignments per node.
+	  * @note Initializes node entries, updates owner/data counts, and prepares assignment candidates.
+	  */
+	NodeAssign(util::StackAllocator& alloc, PartitionTable* pt, int32_t maxParallelCount, int32_t maxParallelWorkerCount,
+		int32_t maxNodeAssignedNum, int32_t liveNodeNum)
+		: alloc_(alloc), nodeEntryList_(alloc), nodeEntryPosList_(alloc),  pt_(pt),
+		workerAssign_(alloc, pt, maxParallelWorkerCount, liveNodeNum),
+		maxParallelCount_(maxParallelCount),
+		currentParallelCount_(0),
+		maxParallelWorkerCount_(maxParallelWorkerCount),
+		origMaxParallelWorkerCount_(maxParallelWorkerCount),
+		maxNodeAssignedCount_(maxNodeAssignedNum),
+		liveNodeNum_(liveNodeNum) {
+
+		initializeNodeEntries();
+		aggregatePartitionRoles();
+		generateCatchupCandidates();
+	}
+
+
+	static bool compareNodeEntry(const NodeEntry* a, const NodeEntry* b) {
+		if (a->replicaLossCount_ != b->replicaLossCount_) {
+			return a->replicaLossCount_ > b->replicaLossCount_; 
+		}
+		if (a->ownerCount_ != b->ownerCount_) {
+			return a->ownerCount_ > b->ownerCount_; 
+		}
+		return a->dataCount_ > b->dataCount_; 
+	}
+
+
+	void updateEntryPosList() {
+		std::sort(nodeEntryList_.begin(), nodeEntryList_.end(), compareNodeEntry);
+		for (NodeEntry* entry : nodeEntryList_) {
+			nodeEntryPosList_[entry->nodeId_] = entry;
+		}
+	}
+
+	/**
+	 * @brief Initializes node entries for all nodes in the partition table.
+	 * @note Allocates and appends a NodeEntry instance for each node.
+	 */
+	void initializeNodeEntries() {
+		for (NodeId nodeId = 0; nodeId < pt_->getNodeNum(); nodeId++) {
+			nodeEntryList_.push_back(ALLOC_NEW(alloc_) NodeEntry(alloc_, nodeId, pt_->checkLiveNode(nodeId, false)));
+			nodeEntryPosList_.push_back(nodeEntryList_.back());
+		}
+	}
+
+	/**
+	 * @brief Aggregates owner and backup counts for each node.
+	 * @note Sorts nodeEntryList_ at the end.
+	 */
+	void aggregatePartitionRoles() {
+		for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
+			PartitionRole role;
+			pt_->getPartitionRole(pId, role, PartitionTable::PT_CURRENT_OB);
+			NodeId owner = role.getOwner();
+			if (owner == UNDEF_NODEID || pt_->getHeartbeatTimeout(owner) == UNDEF_TTL) {
+				continue;
+			}
 			PartitionRole goalRole;
-			getPartitionRole(targetPId, goalRole, PT_CURRENT_GOAL);
-			NodeId goalOwner = goalRole.getOwner();
-			if (goalOwner == UNDEF_NODEID) {
-				DUMP_PARTITION_INFO("not goal owner pId=" << targetPId << ", pgId=" << targetPgId);
-				continue;
-			}
-			NodeIdList& currentBackups = currentRole.getBackups();
-			NodeIdList& goalBackups = goalRole.getBackups();
-			NodeIdList catchups;
-			if (!currentRole.isOwnerOrBackup(goalOwner)) {
-				DUMP_PARTITION_INFO("assigned include goal,  pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner);
-				if (goalBlockQueue_.find(targetPId, goalOwner)) {
-					DUMP_PARTITION_INFO("block pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner);
-					continue;
-				}
-				LogSequentialNumber goalLsn = getLSN(targetPId, goalOwner);
-				int64_t diff = ownerLsn - goalLsn;
-				if (!logSync || (ownerStartLsn <= goalLsn && diff >= 0 && diff <= diffLimit)) {
-				}
-				else {
-					DUMP_PARTITION_INFO("first continue pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner << ", ownerLsn= " << ownerStartLsn << ", goalLsn=" << goalLsn);
-					continue;
-				}
-				catchups.push_back(goalOwner);
-				nextRole.set(currentOwner, currentBackups, catchups);
-				subPartitionTable.set(this, targetPId, nextRole, currentOwner);
-				DUMP_PARTITION_INFO("assigned add,  nextRole=" << nextRole << ", currentOwner=" << currentOwner);
-
-				setPrevCatchup(targetPId, goalOwner);
-				catchupPGIdList[targetPgId] = targetPId;
-				cxt.currentSyncCount_++;
-				if (!logSync) {
-					cxt.currentChunkSyncCount_++;
-					chunkSyncList.push_back(nextRole);
-				}
-				else {
-					logSyncList.push_back(nextRole);
-				}
-				DUMP_PARTITION_INFO("check pId=" << targetPId << ", pgId=" << targetPgId
-					<< ", syncCount1=" << cxt.currentSyncCount_ << ", syncCount2=" << cxt.syncMaxNum_
-					<< ",  chuncCount1=" << cxt.currentChunkSyncCount_ << ", chunkCount2=" << cxt.chunkSyncMaxNum_);
-
-				if (cxt.currentSyncCount_ == cxt.syncMaxNum_ || cxt.currentChunkSyncCount_ == cxt.chunkSyncMaxNum_) {
-					DUMP_PARTITION_INFO("check break pId=" << targetPId << ", pgId=" << targetPgId);
-					break;
-				}
-				else {
-					DUMP_PARTITION_INFO("check continue pId=" << targetPId << ", pgId=" << targetPgId);
-					continue;
+			pt_->getPartitionRole(pId, goalRole, PartitionTable::PT_CURRENT_GOAL);
+			nodeEntryList_[owner]->ownerCount_++;
+			nodeEntryList_[owner]->dataCount_++;
+			PartitionGroupId pgId = pt_->getPartitionGroupId(pId);
+			std::vector<NodeId>& backups = role.getBackups();
+			for (NodeId backup : backups) {
+				if (pt_->getHeartbeatTimeout(backup) != UNDEF_TTL) {
+					nodeEntryList_[backup]->dataCount_++;
 				}
 			}
-			util::StackAllocator::Scope scope(alloc);
-			util::XArray<NodeId> backupOrderList(alloc);
-			for (size_t pos = 0; pos < goalBackups.size(); pos++) {
-				DUMP_PARTITION_INFO("not goal check continue pId=" << targetPId << ", pgId=" << targetPgId<<", goal=" << goalBackups[pos]);
-				if (nextBlockQueue_.find(targetPId, goalBackups[pos])) {
-					DUMP_PARTITION_INFO("not goal block pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalBackups[pos]);
-					continue;
-				}
-				if (currentRole.isOwnerOrBackup(goalBackups[pos])) {
-					DUMP_PARTITION_INFO("not goal current pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalBackups[pos]);
-					continue;
-				}
-				if (goalBlockQueue_.find(targetPId, goalBackups[pos])) {
-					DUMP_PARTITION_INFO("not goal block2 pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalBackups[pos]);
-					continue;
-				}
-				if (logSync) {
-					LogSequentialNumber goalLsn = getLSN(targetPId, goalBackups[pos]);
-					DUMP_PARTITION_INFO("checkdiff pId=" << targetPId << ", pgId="
-						<< targetPgId << ", goal=" << goalBackups[pos] << ", owner=" << ownerStartLsn << ", goal=" << goalLsn);
-					int64_t diff = ownerLsn - goalLsn;
-					if (ownerStartLsn <= goalLsn && diff >= 0 && diff <= diffLimit) {
-					}
-					else {
-						DUMP_PARTITION_INFO("not goal first continue pId=" << targetPId << ", pgId=" << targetPgId << ", goal=" << goalOwner << ", ownerLsn= " << ownerStartLsn << ", goalLsn=" << goalLsn);
-						continue;
-					}
-				}
-				backupOrderList.push_back(goalBackups[pos]);
+			int32_t replicaLossCount = goalRole.getBackupSize() - backups.size();
+			if (replicaLossCount > 0) {
+				workerAssign_.updateReplicaInfo(pId, pgId, replicaLossCount);
+				nodeEntryList_[owner]->replicaLossCount_ += replicaLossCount;
 			}
-			if (backupOrderList.size() > 0) {
-				util::NormalOStringStream oss;
-				CommonUtility::dumpValueList(oss, backupOrderList);
-				DUMP_PARTITION_INFO("cand backup exists pId=" << targetPId << ", pgId=" << targetPgId << ", list=" << oss.str());
-				arrayShuffle<util::XArray<NodeId>, NodeId>(backupOrderList, random);
-				catchups.push_back(backupOrderList[0]);
-				nextRole.set(currentOwner, currentBackups, catchups);
-				subPartitionTable.set(this, targetPId, nextRole, currentOwner);
-				DUMP_PARTITION_INFO("assigned add2,  nextRole=" << nextRole << ", currentOwner=" << currentOwner);
-
-				setPrevCatchup(targetPId, backupOrderList[0]);
-				catchupPGIdList[targetPgId] = targetPId;
-				cxt.currentSyncCount_++;
-				if (!logSync) {
-					cxt.currentChunkSyncCount_++;
-					chunkSyncList.push_back(nextRole);
-				}
-				else {
-					logSyncList.push_back(nextRole);
-				}
-				DUMP_PARTITION_INFO("check2 pId=" << targetPId << ", pgId=" << targetPgId
-					<< ", syncCount1=" << cxt.currentSyncCount_ << ", syncCount2=" << cxt.syncMaxNum_
-					<< ",  chuncCount1=" << cxt.currentChunkSyncCount_ << ", chunkCount2=" << cxt.chunkSyncMaxNum_);
-
-				if (cxt.currentSyncCount_ == cxt.syncMaxNum_ || cxt.currentChunkSyncCount_ == cxt.chunkSyncMaxNum_) {
-					DUMP_PARTITION_INFO("check break2 pId=" << targetPId << ", pgId=" << targetPgId);
-					break;
-				}
-				else {
-					DUMP_PARTITION_INFO("check continue pId=" << targetPId << ", pgId=" << targetPgId);
-					continue;
+			if (role.hasCatchupRole()) {
+				nodeEntryList_[owner]->available_ = false;
+				nodeEntryList_[owner]->parallelCount_++;
+				currentParallelCount_++;
+				workerAssign_.appendEntry(pId, pgId);
+			}
+			std::vector<NodeId>& catchups = role.getCatchups();
+			for (NodeId catchup : catchups) {
+				if (pt_->getHeartbeatTimeout(catchup) != UNDEF_TTL) {
+					nodeEntryList_[catchup]->dataCount_++;
 				}
 			}
 		}
 	}
+
+	/**
+	 * @brief Generates catchup candidates for partitions with replica loss.
+	 * @note Adds RelationEntry to candCatchupList_ for each candidate.
+	 */
+
+	struct RelationEntryComparator {
+		bool operator()(const RelationEntry* a, const RelationEntry* b) const {
+			if (a->replicaLossCount_ != b->replicaLossCount_) {
+				return a->replicaLossCount_ > b->replicaLossCount_;  
+			}
+			return a->dataCount_ < b->dataCount_;  
+		}
+	};
+
+	void generateCatchupCandidates() {
+		util::Vector<PartitionId> pIdList(pt_->getPartitionNum(), alloc_);
+		std::iota(pIdList.begin(), pIdList.end(), 0);
+
+		util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
+		pt_->arrayShuffle<util::Vector<PartitionId>, PartitionId>(pIdList, random);
+
+		for (PartitionId pId : pIdList) {
+			PartitionRole currentRole, goalRole;
+			pt_->getPartitionRole(pId, currentRole, PartitionTable::PT_CURRENT_OB);
+			NodeId owner = currentRole.getOwner();
+
+			if (owner == UNDEF_NODEID || !nodeEntryList_[owner]->available_) continue;
+
+			pt_->getPartitionRole(pId, goalRole, PartitionTable::PT_CURRENT_GOAL);
+
+			std::set<NodeId> currentSet, goalSet;
+			currentRole.getRoleSet(currentSet);
+			goalRole.getRoleSet(pt_, goalSet);
+
+			util::Vector<NodeId> candList(alloc_);
+			std::set_difference(goalSet.begin(), goalSet.end(),
+				currentSet.begin(), currentSet.end(),
+				std::back_inserter(candList));
+
+			int32_t replicaLossCount = std::max(0, goalRole.getBackupSize() - currentRole.getBackupSize());
+			bool replicaLoss = (replicaLossCount > 0);
+
+			LogSequentialNumber ownerLsn = pt_->getLSN(pId, owner);
+			LogSequentialNumber ownerStartLsn = pt_->getStartLSN(pId, owner);
+
+			for (NodeId catchup : candList) {
+				LogSequentialNumber catchupLsn = pt_->getLSN(pId, catchup);
+				bool logSync = (ownerLsn >= catchupLsn && ownerStartLsn <= catchupLsn);
+
+				nodeEntryList_[owner]->candCatchupList_.push_back(
+					ALLOC_NEW(alloc_) RelationEntry(owner, catchup, pId,
+						nodeEntryList_[catchup]->dataCount_, logSync, replicaLoss, replicaLossCount));
+
+				GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL,
+					"Cand Catchup Relation : " << nodeEntryList_[owner]->candCatchupList_.back()->dump());
+			}
+		}
+
+		for (NodeEntry* entry : nodeEntryList_) {
+			std::sort(entry->candCatchupList_.begin(), entry->candCatchupList_.end(), RelationEntryComparator());
+		}
+
+		updateEntryPosList();
+	}
+
+	/**
+	 * @brief Destructor for NodeAssign. Deletes all NodeEntry instances.
+	 */
+	~NodeAssign() {
+		for (NodeEntry* entry : nodeEntryList_) {
+			ALLOC_DELETE(alloc_, entry);
+		}
+	}
+
+	/**
+	 * @brief Assigns partition roles to nodes in three phases and updates the SubPartitionTable.
+	 * @param [in,out] subTable SubPartitionTable to be updated.
+	 * @note Outputs assignment results after each phase.
+	 */
+	void assign(PartitionTable::SubPartitionTable& subTable) {
+		int32_t originalMaxParallelWorkerCount = maxParallelWorkerCount_;
+
+		maxParallelWorkerCount_ = 1;
+		workerAssign_.maxParallelWorkerCount_ = 1;
+		GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL,
+			"Phase1 : maxParallelCount=" << maxParallelCount_ << ", maxParallelWorkerCount = " << maxParallelCount_);
+		assignPhase(subTable);
+		int32_t first = currentParallelCount_;
+		if (currentParallelCount_ > 0) {
+			GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, "RESULT: " << subTable.dump(false));
+			updateEntryPosList();
+		}
+		maxParallelWorkerCount_ = originalMaxParallelWorkerCount;
+		workerAssign_.maxParallelWorkerCount_ = originalMaxParallelWorkerCount;
+		GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL,
+			"Phase2 : maxParallelCount=" << maxParallelCount_ << ", current=" << currentParallelCount_ <<", maxParallelWorkerCount = " << maxParallelWorkerCount_);
+		assignPhase(subTable);
+		int32_t second = currentParallelCount_;
+		if (first != second) {
+			GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, "RESULT: " << subTable.dump(false));
+			updateEntryPosList();
+		}
+
+		GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL,
+			"Phase3 : maxParallelCount=" << maxParallelCount_ << ", current=" << currentParallelCount_ << ", maxParallelWorkerCount = " 
+			<< maxParallelWorkerCount_ << ", maxNodeAssignedCount=" << maxNodeAssignedCount_);
+		if (currentParallelCount_ < maxParallelCount_ && maxNodeAssignedCount_ > 1 && maxParallelWorkerCount_ > 1) {
+			assignExtendedPhase(subTable);
+		}
+		int32_t third = currentParallelCount_;
+		if (second != third) {
+			GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, "RESULT: " << subTable.dump(false));
+		}
+	}
+
+	/**
+	 * @brief Assigns catchup relations to nodes in one phase.
+	 * @param [in,out] subTable SubPartitionTable to be updated.
+	 * @note Skips unavailable nodes and stops if the assignment limit is reached.
+	 */
+	void assignPhase(PartitionTable::SubPartitionTable& subTable) {
+		for (NodeEntry* entry : nodeEntryList_) {
+			if (currentParallelCount_ >= maxParallelCount_) break;
+			if (!entry->isAvailable()) continue;
+			if (entry->assignCount_ >= 1) continue;
+			GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, entry->dump());
+			auto relIt = workerAssign_.assignOptimizeGroup(entry->candCatchupList_);
+			if (relIt != entry->candCatchupList_.end()) {
+				assignRelation(relIt, entry, subTable);
+			}
+			else if (maxParallelWorkerCount_ > 1) {
+				relIt = workerAssign_.assignMinGroup(entry->candCatchupList_, false);
+				if (relIt != entry->candCatchupList_.end()) {
+					assignRelation(relIt, entry, subTable);
+				}
+			}
+		}
+	}
+
+	/**
+	 * @brief Performs extended assignment of catchup relations in two passes.
+	 * @param [in,out] subTable SubPartitionTable to be updated.
+	 * @note Stops if assignment does not progress or limits are reached.
+	 */
+	void assignExtendedPhase(PartitionTable::SubPartitionTable& subTable) {
+		for (int32_t k = 0; k < 3; ++k) {
+			while (currentParallelCount_ < maxParallelCount_) {
+				bool updated = false;
+				for (NodeEntry* entry : nodeEntryList_) {
+					if (!entry->isAlive_) continue;
+					if (entry->assignCount_ >= maxNodeAssignedCount_) continue;
+					GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, "k" << k << ",entry=" << entry->dump());
+					auto relIt = workerAssign_.assignMinGroup(entry->candCatchupList_, k == 1, k == 0);
+					if (relIt != entry->candCatchupList_.end()) {
+						assignRelation(relIt, entry, subTable);
+						updated = true;
+					}
+					if (currentParallelCount_ >= maxParallelCount_) break;
+				}
+				if (!updated) break;
+				updateEntryPosList();
+			}
+		}
+	}
+
+	/**
+	 * @brief Assigns a relation to a node and updates the sub-partition table.
+	 * @param [in] relIt Iterator to the assigned RelationEntry.
+	 * @param [in,out] entry NodeEntry to update.
+	 * @param [in,out] subTable SubPartitionTable to update.
+	 * @note Removes the assigned relation from candCatchupList_.
+	 */
+	void assignRelation(util::Vector<RelationEntry*>::iterator relIt, NodeEntry* entry, PartitionTable::SubPartitionTable& subTable) {
+		currentParallelCount_++;
+		setSubPartition(*relIt, subTable);
+		NodeId owner = (*relIt)->ownerNodeId_;
+		NodeId catchup = (*relIt)->catchupNodeId_;
+		if (nodeEntryPosList_[owner]->ownerCount_ > 0 ) nodeEntryPosList_[owner]->ownerCount_--;
+		if (nodeEntryPosList_[owner]->dataCount_ > 0)  nodeEntryPosList_[owner]->dataCount_--;
+		nodeEntryPosList_[catchup]->dataCount_++;
+		entry->candCatchupList_.erase(relIt);
+		entry->assignCount_++;
+	}
+
+	/**
+	 * @brief Updates the sub-partition table with the assigned catchup relation.
+	 * @param [in] entry Pointer to the assigned RelationEntry.
+	 * @param [in,out] subTable SubPartitionTable to update.
+	 * @note Sets the catchup node for the partition and updates previous catchup info.
+	 */
+	void setSubPartition(const RelationEntry*entry, PartitionTable::SubPartitionTable& subTable) {
+		PartitionRole nextRole;
+		pt_->getPartitionRole(entry->pId_, nextRole, PartitionTable::PT_CURRENT_OB);
+		nextRole.setRevision(pt_->getPartitionRevision());
+		nextRole.clearCatchup();
+		NodeIdList catchups;
+		nextRole.getCatchups().push_back(entry->catchupNodeId_);
+		subTable.set(pt_, entry->pId_, nextRole, nextRole.getOwner());
+		pt_->setPrevCatchup(entry->pId_, entry->catchupNodeId_);
+	}
+
+	util::StackAllocator& alloc_;
+	util::Vector<NodeEntry*> nodeEntryList_;
+	util::Vector<NodeEntry*> nodeEntryPosList_;
+	PartitionTable* pt_;
+	WorkerAssign workerAssign_;
+	int32_t maxParallelCount_;
+	int32_t currentParallelCount_;
+	int32_t maxParallelWorkerCount_;
+	int32_t origMaxParallelWorkerCount_;
+	int32_t maxNodeAssignedCount_;
+	int32_t liveNodeNum_;
+};
+
+
+/**
+ * @brief Assigns parallel catchup roles to partitions based on current configuration and state.
+ * @param [in,out] cxt ApplyContext containing configuration and sub-partition table to be updated.
+ * @note Determines parallel assignment parameters and delegates assignment to NodeAssign.
+ */
+void PartitionTable::setParallelCatchup(PartitionTable::ApplyContext& cxt) {
+	int32_t parallelWorkerNum = getParallelWorkerSyncNum();
+	int32_t parallelNodeNum = getParallelNodeSyncNum();
+	if (parallelWorkerNum == 0) {
+		parallelWorkerNum = cxt.syncMaxNum_;
+	}
+	if (parallelNodeNum == 0) {
+		parallelNodeNum = cxt.syncMaxNum_;
+	}
+	NodeAssign parallelPlanner(cxt.alloc_, this, cxt.syncMaxNum_, parallelWorkerNum, parallelNodeNum, cxt.liveNodeNum_);
+	parallelPlanner.assign(cxt.subPartitionTable_);
 }
 
 bool PartitionTable::applyAddRule(PartitionContext& context) {
@@ -2188,19 +2743,22 @@ bool PartitionTable::applyAddRule(PartitionContext& context) {
 		ApplyContext cxt(context, resolvePartitionList);
 		setParallelCatchup(cxt);
 	}
+	GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, subPartitionTable.dump());
 
 	if (subPartitionTable.size() > 0) {
-		PartitionId catchupPId = subPartitionTable.getSubPartition(0).pId_;
-		for (size_t pos = 0; pos < catchupPIdList.size(); pos++) {
-			PartitionId checkPId = catchupPIdList[pos];
-			if (!enableParallelSync()) {
-				if (catchupPId != catchupPIdList[pos]) {
-					PartitionRole nextRole;
-					getPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
-					nextRole.clearCatchup();
-					setPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
-					NodeId currentOwner = getOwner(checkPId);
-					subPartitionTable.set(this, checkPId, nextRole, currentOwner);
+		if (!enableParallelSync()) {
+			if (subPartitionTable.size() > 0) {
+				PartitionId catchupPId = subPartitionTable.getSubPartition(0).pId_;
+				for (size_t pos = 0; pos < catchupPIdList.size(); pos++) {
+					PartitionId checkPId = catchupPIdList[pos];
+					if (catchupPId != catchupPIdList[pos]) {
+						PartitionRole nextRole;
+						getPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
+						nextRole.clearCatchup();
+						setPartitionRole(checkPId, nextRole, PT_CURRENT_OB);
+						NodeId currentOwner = getOwner(checkPId);
+						subPartitionTable.set(this, checkPId, nextRole, currentOwner);
+					}
 				}
 			}
 		}
@@ -2242,6 +2800,7 @@ bool PartitionTable::applyRemoveRule(
 			continue;
 		}
 		bool diff = false;
+		int32_t checkBackupNum = std::min(context.backupNum_, goalRole.getBackupSize());
 		for (size_t pos = 0;
 			pos < currentBackups.size(); pos++) {
 
@@ -2259,7 +2818,7 @@ bool PartitionTable::applyRemoveRule(
 		if (diff) {
 
 			if (nextBackups.size() >=
-				static_cast<size_t>(context.backupNum_)) {
+				static_cast<size_t>(checkBackupNum)) {
 				nextRole.set(
 					currentOwner, nextBackups, nextCatchups);
 				subPartitionTable.set(
@@ -2267,14 +2826,14 @@ bool PartitionTable::applyRemoveRule(
 			}
 			else {
 				if (currentBackups.size()
-			> static_cast<size_t>(context.backupNum_)) {
+			> static_cast<size_t>(checkBackupNum)) {
 					for (size_t pos = 0;
 						pos < currentBackups.size(); pos++) {
 						if (!goalRole.isOwnerOrBackup(
 							currentBackups[pos])) {
 							nextBackups.push_back(currentBackups[pos]);
 							if (currentBackups.size()
-								>= static_cast<size_t>(context.backupNum_)) {
+								>= static_cast<size_t>(checkBackupNum)) {
 								nextRole.set(
 									currentOwner, nextBackups, nextCatchups);
 								subPartitionTable.set(
@@ -2289,12 +2848,7 @@ bool PartitionTable::applyRemoveRule(
 	}
 
 	if (subPartitionTable.size() > 0) {
-		resetCatchup();
-		if (enableParallelSync()) {
-			for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
-				resetCatchup(subPartitionTable.getSubPartition(pos).pId_);
-			}
-		}
+		resetCatchup(subPartitionTable);
 		return true;
 	}
 	else {
@@ -2376,12 +2930,7 @@ bool PartitionTable::applySwapRule(
 	}
 
 	if (subPartitionTable.size() > 0) {
-		resetCatchup();
-		if (enableParallelSync()) {
-			for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
-				resetCatchup(subPartitionTable.getSubPartition(pos).pId_);
-			}
-		}
+		resetCatchup(subPartitionTable);
 		return true;
 	}
 	else {
@@ -2402,6 +2951,7 @@ void PartitionTable::planNext(PartitionContext& context) {
 	int32_t liveNum = static_cast<int32_t>(activeNodeList.size());
 	nextApplyRuleLimitTime_ = context.currentRuleLimitTime_;
 	SubPartitionTable& subPartitionTable = context.subPartitionTable_;
+	context.setLiveNodeNum(liveNum);
 
 	if (backupNum > liveNum - 1) {
 		context.backupNum_ = liveNum - 1;
@@ -2443,15 +2993,27 @@ void PartitionTable::planNext(PartitionContext& context) {
 	}
 	PartitionRevisionNo revision = getPartitionRevisionNo();
 	if (currentRuleNo_ != PARTITION_RULE_UNDEF) {
-		DUMP_PARTITION_INFO_1(CommonUtility::getTimeStr(util::DateTime::now(TRIM_MILLISECONDS).getUnixTime()) << "Apply Rule:"
-			<< dumpPartitionRule(currentRuleNo_) << ", revision=" << revision);
+
+		double goalProgress = 0;
+		double replicaProgress = 0;
+		progress(goalProgress, replicaProgress);
+		if (replicaProgress > 1) {
+			replicaProgress = 1;
+		}
+
+		GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL,
+			"Apply Rule : " << dumpPartitionRule(currentRuleNo_) << ", revision=" << revision);
 //		GS_TRACE_CLUSTER_INFO(std::endl << "Apply Rule:"
-//			<< dumpPartitionRule(currentRuleNo_) << ", revision=" << revision);
+//			<< dumpPartitionRule(currentRuleNo_) << ", revision=" << revision << "," << "replicationProgress="
+//			<< replicaProgress << ", goalProgress=" << goalProgress << ", " << subPartitionTable.dumpPartition());
+
 		if (subPartitionTable.size() > 0) {
 			currentRevisionNo_ = revision;
 			context.needUpdatePartition_ = true;
-//			GS_TRACE_CLUSTER_INFO("Next partitions  : "<< std::endl
+//			GS_TRACE_CLUSTER_INFO("Next partitions  :  " << std::endl
 //				<< dumpPartitionsNew(alloc, PT_CURRENT_OB, &subPartitionTable));
+			GS_OUTPUT_DIRECT(DUMP_LEVEL1, DUMP_PARTITION_LEVEL, "Next partitions : " << std::endl
+				<< dumpPartitionsNew(alloc, PT_CURRENT_OB, &subPartitionTable));
 		}
 	}
 	subPartitionTable.setRevision(getPartitionRevision());
@@ -2503,7 +3065,16 @@ void PartitionTable::clearCatchupRole(PartitionId pId) {
 	setPartitionRole(pId, currentRole, PT_CURRENT_OB);
 }
 
-
+/**
+ * @brief Detects abnormal states of a partition and updates relevant flags and status.
+ * @param [in] pId The partition ID to check.
+ * @param [in] backupNum The required number of backups.
+ * @param [out] catchupWait Flag set to true if long-term catchup synchronization is in progress.
+ * @param [in,out] context Partition state management context.
+ * @return Returns true if an abnormal state is detected, false if the state is normal.
+ * @note Verifies consistency of owner, backup, and catchup roles, and outputs detailed logs in case of anomalies.
+ * @note Includes handling for role mismatches and transition time limits.
+ */
 bool PartitionTable::checkTargetPartition(
 	PartitionId pId, int32_t backupNum, bool& catchupWait, PartitionContext& context) {
 
@@ -2513,9 +3084,15 @@ bool PartitionTable::checkTargetPartition(
 	NodeId currentOwnerId = currentRole.getOwner();
 	NodeIdList& currentBackups = currentRole.getBackups();
 	NodeIdList& currentCatchups = currentRole.getCatchups();
+	bool prevCatchup = false;
+	bool isCurrentCatchup = (currentCatchups.size() > 0);
+	if (enableParallelSync()) {
+		prevCatchup = prevCatchupList_[pId];
+	}
+
 	bool detectError = false;
 	PartitionGroupId pgId = getPartitionGroupId(pId);
-
+	bool roleChange = false;
 	if (currentOwnerId == UNDEF_NODEID) {
 		loadInfo_.status_ = PT_OWNER_LOSS;
 	}
@@ -2548,39 +3125,32 @@ bool PartitionTable::checkTargetPartition(
 			}
 		}
 	}
-	if (getRuleNo() == PARTITION_RULE_ADD) {
-		PartitionId prevPId = enableParallelSync() ? prevCatchupPId_ : parallelCatchupList_[pgId].pId_;
-		NodeId prevNodeId = enableParallelSync() ? prevCatchupNodeId_ : parallelCatchupList_[pgId].nodeId_;
-		if (prevPId == pId) {
-			if (currentCatchups.size() == 0) {
-				PartitionRoleStatus roleStatus = getPartitionRoleStatus(pId, prevNodeId);
-				if (roleStatus != PT_BACKUP) {
-					if (checkTransitionLimitTime(context)) {
+	if (!enableParallelSync()) {
+		if (getRuleNo() == PARTITION_RULE_ADD) {
+			PartitionId prevPId = prevCatchupPId_;
+			NodeId prevNodeId = prevCatchupNodeId_;
+			if (prevPId == pId) {
+				if (currentCatchups.size() == 0) {
+					PartitionRoleStatus roleStatus = getPartitionRoleStatus(pId, prevNodeId);
+					if (roleStatus != PT_BACKUP) {
+						if (checkTransitionLimitTime(context)) {
+							detectError = true;
+						}
+					}
+				}
+				else {
+					if (currentCatchups[0] != prevNodeId) {
 						detectError = true;
 					}
 				}
 			}
-			else {
-				if (currentCatchups[0] != prevNodeId) {
-					detectError = true;
-				}
-			}
 		}
-	}
-
-	if (getRuleNo() != PARTITION_RULE_ADD && currentCatchups.size() > 0) {
-		if (!enableParallelSync()) {
+		if (getRuleNo() != PARTITION_RULE_ADD && currentCatchups.size() > 0) {
 			clearCatchupRole(pId);
 			return true;
 		}
-		else {
-			PartitionId prevPId = parallelCatchupList_[pgId].pId_;
-			if (prevPId != UNDEF_PARTITIONID && pId != prevPId) {
-				clearCatchupRole(prevPId);
-				return true;
-			}
-		}
 	}
+
 	if (currentOwnerId != UNDEF_NODEID && getErrorStatus(pId, currentOwnerId) == PT_ERROR_LONG_SYNC_FAIL) {
 		detectError = true;
 	}
@@ -2598,6 +3168,11 @@ bool PartitionTable::checkTargetPartition(
 				getPartitionRole(pId, currentRole);
 				currentRole.promoteCatchup();
 				setPartitionRole(pId, currentRole);
+				GS_TRACE_CLUSTER_INFO_AND_DIRECT(
+					"Detect catchup promotion, catchup sync, pId=" << pId << ", role=" << currentRole.dump(),
+					DUMP_LEVEL1, DUMP_PARTITION_LEVEL);
+
+				isCurrentCatchup = false;
 			}
 			else {
 				if (checkTransitionLimitTime(context)) {
@@ -2620,6 +3195,16 @@ bool PartitionTable::checkTargetPartition(
 	if (detectError) {
 		clearPartitionRole(pId);
 	}
+
+	if (enableParallelSync()) {
+		prevCatchupList_[pId] = isCurrentCatchup;
+		if (!detectError && prevCatchup && !isCurrentCatchup) {
+			GS_TRACE_CLUSTER_INFO_AND_DIRECT(
+				"Complete catchup sync, pId=" << pId << ", role=" << currentRole.dump(),
+				DUMP_LEVEL1, DUMP_PARTITION_LEVEL);
+			return true;
+		}
+	}
 	return detectError;
 }
 
@@ -2640,11 +3225,11 @@ void PartitionTable::checkRepairPartition(PartitionContext& context) {
 				}
 			}
 			setRepairedMaxLsn(pId, maxLSN);
-			if (maxLSN != prevMaxLsn) {
+//			if (maxLSN != prevMaxLsn) {
 //				GS_TRACE_CLUSTER_INFO(
 //					"Max Lsn updated, pId=" << pId << ", prevMaxLsn="
 //					<< prevMaxLsn << ", currentMaxLsn=" << maxLSN);
-			}
+//			}
 		}
 	}
 }
@@ -3595,9 +4180,14 @@ void PartitionTable::progress(double& goalProgress, double& replicaProgress) {
 		for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 			PartitionRole goal;
 			PartitionRole current;
+			int32_t pcount = 0;
 			getPartitionRole(pId, goal, PT_CURRENT_GOAL);
 			getPartitionRole(pId, current, PT_CURRENT_OB);
-			currentReplicaCount += current.getRoledSize();
+			pcount = current.getRoledSize();
+			if (pcount > (backupNum+1)) {
+				pcount = backupNum + 1;
+			}
+			currentReplicaCount += pcount;
 			if (goal.getOwner() != UNDEF_NODEID) {
 				goalCount += goal.getRoledSize();
 				NodeIdList& currentBackupList = current.getBackups();
@@ -3886,7 +4476,7 @@ bool PartitionTable::GoalPartition::load() {
 	try {
 		if (!util::FileSystem::exists(goalFileName_.c_str())) {
 //			if (!isEnableInitialGenerate()) {
-//				GS_TRACE_CLUSTER_INFO("Failed to load stable goal (fileName='" << goalFileName_ << "'  is already exists )");
+//				GS_TRACE_CLUSTER_INFO("Failed to load stable goal (fileName='" << goalFileName_ << "'  is not exists )");
 //			}
 			return false;
 		}
@@ -3955,8 +4545,14 @@ PartitionTable::StableGoalPartition::StableGoalPartition(const ConfigTable& conf
 	GoalPartition(configDir, config.get<const char8_t*>(CONFIG_TABLE_CS_STABLE_GOAL_FILE_NAME)),
 	enable_(config.get<bool>(CONFIG_TABLE_CS_ENABLE_STABLE_GOAL)),
 	policy_(config.get<int32_t>(CONFIG_TABLE_CS_STABLE_GOAL_POLICY)),
-	configDir_(configDir), isAssigned_(false) {
+	configDir_(configDir), isAssigned_(false),
+	//refreshInterval_(config.get<int32_t>(CONFIG_TABLE_CS_REFRESH_STABLE_GOAL_INTERVAL))
+	refreshInterval_(0)
+{
 	enableInitialGenerate_ = (config.get<bool>(CONFIG_TABLE_CS_GENERATE_INITIAL_STABLE_GOAL));
+	if (refreshInterval_ != 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_CS_PARAMETER_INVALID, "Only the value 0 is currently supported");
+	}
 }
 
 bool PartitionTable::StableGoalPartition::validateFormat(picojson::value& value, bool useCheckSum) {

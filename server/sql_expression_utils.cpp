@@ -19,7 +19,6 @@
 #include "sql_expression_base.h"
 #include "query_function.h"
 
-
 SQLExprs::ExprRewriter::ExprRewriter(util::StackAllocator &alloc) :
 		alloc_(alloc),
 		localEntry_(alloc),
@@ -2014,6 +2013,13 @@ TupleColumnType SQLExprs::ExprRewriter::resolveColumnTypeAt(
 		}
 
 		type = arg2.getCode().getColumnType();
+
+		if (SQLValues::TypeUtils::isNullable(type) &&
+				!SQLValues::TypeUtils::isNullable(baseType) &&
+				!SQLValues::TypeUtils::isNull(baseType) &&
+				!SQLValues::TypeUtils::isAny(baseType)) {
+			type = SQLValues::TypeUtils::toNonNullable(type);
+		}
 
 		if (!SQLValues::TypeUtils::isDeclarable(
 				SQLValues::TypeUtils::toNonNullable(type))) {
@@ -4278,7 +4284,8 @@ SQLExprs::IndexCondition::IndexCondition() :
 		bulkOrOrdinal_(0),
 		specId_(0),
 		firstHitOnly_(false),
-		descending_(false) {
+		descending_(false),
+		dynamic_(false) {
 }
 
 SQLExprs::IndexCondition SQLExprs::IndexCondition::createNull() {
@@ -4356,10 +4363,13 @@ SQLExprs::IndexSelector::IndexSelector(
 		indexAvailable_(true),
 		placeholderAffected_(false),
 		multiAndConditionEnabled_(false),
+		dynamicSelectionEnabled_(false),
 		bulkGrouping_(false),
 		complexReordering_(false),
 		completed_(false),
 		cleared_(false),
+		uniqueMatchCount_(0),
+		nonUniqueMatchCount_(0),
 		exprFactory_(&ExprFactory::getDefaultFactory()) {
 }
 
@@ -4382,12 +4392,13 @@ void SQLExprs::IndexSelector::addIndex(
 		uint32_t column, IndexFlags flags) {
 	util::Vector<uint32_t> columnList(1, column, indexList_.get_allocator());
 	util::Vector<IndexFlags> flagsList(1, flags, indexList_.get_allocator());
-	addIndex(columnList, flagsList);
+	const bool unique = false;
+	addIndex(columnList, flagsList, unique);
 }
 
 void SQLExprs::IndexSelector::addIndex(
 		const util::Vector<uint32_t> &columnList,
-		const util::Vector<IndexFlags> &flagsList) {
+		const util::Vector<IndexFlags> &flagsList, bool unique) {
 	if (completed_) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
@@ -4416,18 +4427,27 @@ void SQLExprs::IndexSelector::addIndex(
 	util::Vector<IndexFlags>::const_iterator flagsIt = flagsList.begin();
 	for (util::Vector<uint32_t>::const_iterator it = columnList.begin();
 			it != columnList.end(); ++it, ++flagsIt) {
+		const bool top = (it == columnList.begin());
 		const uint32_t column = *it;
 		const IndexFlags flags = *flagsIt;
 
 		IndexFlagsEntry &flagsEntry = indexList_[column];
-		flagsEntry.add(
-				(composite ?
-						IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_ALL :
-						IndexFlagsEntry::FLAGS_TYPE_SINGLE),
-				flags);
+		{
+			flagsEntry.add(getIndexFlagsType(composite, false, false), flags);
 
-		if (composite && it == columnList.begin()) {
-			flagsEntry.add(IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_TOP, flags);
+			if (composite && top) {
+				flagsEntry.add(
+						getIndexFlagsType(composite, true, false), flags);
+			}
+		}
+
+		if (unique) {
+			flagsEntry.add(getIndexFlagsType(composite, false, true), flags);
+
+			if (composite && top) {
+				flagsEntry.add(
+						getIndexFlagsType(composite, true, true), flags);
+			}
 		}
 	}
 }
@@ -4458,6 +4478,11 @@ void SQLExprs::IndexSelector::setMultiAndConditionEnabled(
 	multiAndConditionEnabled_ = enabled;
 }
 
+void SQLExprs::IndexSelector::setDynamicSelectionEnabled(
+		bool enabled) {
+	dynamicSelectionEnabled_ = enabled;
+}
+
 void SQLExprs::IndexSelector::setBulkGrouping(bool enabled) {
 	bulkGrouping_ = enabled;
 }
@@ -4471,8 +4496,8 @@ bool SQLExprs::IndexSelector::matchIndexList(
 	for (size_t i = 0; i < size; i++) {
 		const IndexFlagsEntry &flagsEntry = indexList_[i];
 		const IndexFlags flags =
-				flagsEntry.get(IndexFlagsEntry::FLAGS_TYPE_SINGLE) |
-				flagsEntry.get(IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_TOP);
+				flagsEntry.get(FLAGS_TYPE_SINGLE) |
+				flagsEntry.get(FLAGS_TYPE_COMPOSITE_TOP);
 
 		if (flags != static_cast<IndexFlags>(indexList[i])) {
 			return false;
@@ -4583,6 +4608,10 @@ bool SQLExprs::IndexSelector::isSelected() const {
 bool SQLExprs::IndexSelector::isComplex() const {
 	return getOrConditionCount(
 			condList_.begin(), condList_.end()) != condList_.size();
+}
+
+bool SQLExprs::IndexSelector::isUnique() const {
+	return (isSelected() && uniqueMatchCount_ == nonUniqueMatchCount_);
 }
 
 const SQLExprs::IndexSelector::ConditionList&
@@ -4699,6 +4728,14 @@ size_t SQLExprs::IndexSelector::getOrConditionCount(
 size_t SQLExprs::IndexSelector::nextOrConditionDistance(
 		ConditionList::const_iterator it,
 		ConditionList::const_iterator endIt) {
+	if (!it->isAndTop()) {
+		size_t distance = 0;
+		ConditionList::const_iterator sub = it;
+		for (; sub != endIt && !sub->isAndTop(); sub++) {
+			distance++;
+		}
+		return distance;
+	}
 	assert(it != endIt);
 	assert(it->isAndTop());
 
@@ -5022,17 +5059,20 @@ void SQLExprs::IndexSelector::assignAndOrdinals(
 	size_t compAndOrdinal = 0;
 	const size_t compCheckStartPos =
 			(atAndTop ? totalRange.first() : totalRange.second());
+	const bool multiAllowed =
+			(multiAndConditionEnabled_ || dynamicSelectionEnabled_);
 
 	bool first = true;
+	bool unique = false;
 	for (size_t pos = compCheckStartPos; pos < totalRange.second();) {
 		const size_t acceptedCondCount = pos - totalRange.first();
 
 		size_t count;
-		if (atAndTop && !first && !multiAndConditionEnabled_) {
+		if (atAndTop && !first && (!multiAllowed || unique)) {
 			count = 0;
 		}
 		else {
-			count = matchAndConditions(totalRange, acceptedCondCount);
+			count = matchAndConditions(totalRange, acceptedCondCount, unique);
 		}
 		first = false;
 
@@ -5061,22 +5101,27 @@ void SQLExprs::IndexSelector::assignAndOrdinals(
 
 	const size_t andCount = totalRange.second() - totalRange.first();
 	const size_t compAndCount = compAndOrdinal;
+	const bool dynamic = (dynamicSelectionEnabled_ && andCount > 1);
 	for (size_t pos = totalRange.first(); pos < totalRange.second(); pos++) {
 		Condition &cond = condList_[pos];
 		cond.andCount_ = andCount;
 		cond.compositeAndCount_ = (atAndTop ? compAndCount : andCount);
+		cond.dynamic_ = dynamic;
 	}
+
+	++(unique ? uniqueMatchCount_ : nonUniqueMatchCount_);
 }
 
 size_t SQLExprs::IndexSelector::matchAndConditions(
-		Range &totalRange, size_t acceptedCondCount) {
+		Range &totalRange, size_t acceptedCondCount, bool &unique) {
 	ConditionList::iterator condBegin = condList_.begin() + totalRange.first();
 	ConditionList::iterator condEnd = condList_.begin() + totalRange.second();
 
 	size_t condOrdinal;
 	IndexSpecId specId;
 	if (!selectClosestIndex(
-			condBegin, condEnd, acceptedCondCount, condOrdinal, specId)) {
+			condBegin, condEnd, acceptedCondCount, condOrdinal, specId,
+			unique)) {
 		return 0;
 	}
 
@@ -5834,7 +5879,27 @@ bool SQLExprs::IndexSelector::selectClosestIndex(
 		ConditionList::const_iterator condBegin,
 		ConditionList::const_iterator condEnd,
 		size_t acceptedCondCount, size_t &condOrdinal,
-		IndexSpecId &specId) {
+		IndexSpecId &specId, bool &unique) {
+	unique = false;
+
+	for (size_t i = 0; i < 2; i++) {
+		const bool uniqueOnly = (i == 0);
+		if (selectClosestIndexDetail(
+				condBegin, condEnd, acceptedCondCount, condOrdinal, specId,
+				uniqueOnly)) {
+			unique = uniqueOnly;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool SQLExprs::IndexSelector::selectClosestIndexDetail(
+		ConditionList::const_iterator condBegin,
+		ConditionList::const_iterator condEnd,
+		size_t acceptedCondCount, size_t &condOrdinal,
+		IndexSpecId &specId, bool uniqueOnly) {
 	condOrdinal = std::numeric_limits<size_t>::max();
 	specId = std::numeric_limits<IndexSpecId>::max();
 
@@ -5843,7 +5908,9 @@ bool SQLExprs::IndexSelector::selectClosestIndex(
 		IndexMatchList &matchList = indexMatchList_;
 		matchList.clear();
 
-		if (!getAvailableIndex(*condIt, false, NULL, &specId, &matchList)) {
+		if (!getAvailableIndex(
+				*condIt, false, NULL, &specId, &matchList, false, false,
+				uniqueOnly)) {
 			continue;
 		}
 
@@ -5866,6 +5933,10 @@ bool SQLExprs::IndexSelector::selectClosestIndex(
 		}
 
 		std::sort(matchList.begin(), matchList.end());
+
+		if (uniqueOnly && !matchList.front().completed_) {
+			continue;
+		}
 
 		condOrdinal = static_cast<size_t>(condIt - condBegin);
 		specId = matchList.front().specId_;
@@ -6016,7 +6087,7 @@ bool SQLExprs::IndexSelector::matchIndexColumn(
 bool SQLExprs::IndexSelector::getAvailableIndex(
 		const Condition &cond, bool withSpec, SQLType::IndexType *indexType,
 		IndexSpecId *specId, IndexMatchList *matchList,
-		bool topColumnOnly, bool treeIndexExtended) const {
+		bool topColumnOnly, bool treeIndexExtended, bool uniqueOnly) const {
 	assert(completed_);
 	assert((!withSpec) == (specId != NULL));
 
@@ -6044,15 +6115,15 @@ bool SQLExprs::IndexSelector::getAvailableIndex(
 
 		const IndexFlags flags = indexList_[cond.column_].get(forComposite ?
 				(topColumnOnly ?
-						IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_TOP :
-						IndexFlagsEntry::FLAGS_TYPE_COMPOSITE_ALL) :
-				IndexFlagsEntry::FLAGS_TYPE_SINGLE);
+						getIndexFlagsType(true, true, uniqueOnly) :
+						getIndexFlagsType(true, false, uniqueOnly)) :
+				getIndexFlagsType(false, true, uniqueOnly));
 		if (flags == 0) {
 			continue;
 		}
 
 		bool foundLocal = false;
-		if (cond.opType_ == SQLType::EXPR_BETWEEN) {
+		if (cond.opType_ == SQLType::EXPR_BETWEEN && !uniqueOnly) {
 			if (((flags & (1 << SQLType::INDEX_TREE_RANGE)) != 0 ||
 					(treeIndexExtended &&
 							(flags & (1 << SQLType::INDEX_TREE_EQ)) != 0)) &&
@@ -6181,6 +6252,28 @@ bool SQLExprs::IndexSelector::isTrueValue(
 	return boolValue;
 }
 
+SQLExprs::IndexSelector::IndexFlagsType
+SQLExprs::IndexSelector::getIndexFlagsType(
+		bool composite, bool top, bool unique) {
+	if (composite) {
+		if (top) {
+			return (unique ?
+					FLAGS_TYPE_COMPOSITE_TOP :
+					FLAGS_TYPE_COMPOSITE_TOP_UNIQUE);
+		}
+		else {
+			return (unique ?
+					FLAGS_TYPE_COMPOSITE_ALL :
+					FLAGS_TYPE_COMPOSITE_ALL_UNIQUE);
+		}
+	}
+	else {
+		return (unique ?
+				FLAGS_TYPE_SINGLE :
+				FLAGS_TYPE_SINGLE_UNIQUE);
+	}
+}
+
 SQLExprs::IndexSpec SQLExprs::IndexSelector::createIndexSpec(
 		const util::Vector<uint32_t> &columnList) {
 	util::AllocUniquePtr< util::AllocVector<uint32_t> > ptr(ALLOC_UNIQUE(
@@ -6229,8 +6322,7 @@ SQLExprs::IndexSelector::IndexFlagsEntry::IndexFlagsEntry() {
 }
 
 SQLExprs::IndexSelector::IndexFlags
-SQLExprs::IndexSelector::IndexFlagsEntry::get(
-		IndexFlagsType type) const {
+SQLExprs::IndexSelector::IndexFlagsEntry::get(IndexFlagsType type) const {
 	return elems_[type];
 }
 
@@ -6957,6 +7049,47 @@ bool SQLExprs::ExprTypeUtils::isVarNonGenerative(
 	}
 
 	return false;
+}
+
+bool SQLExprs::ExprTypeUtils::getPatternMatchExprInfo(
+		ExprType type, bool onPatternMatch, bool &measuresOnly,
+		bool &implicitlyNavigable, ExprType &rewritableExprType) {
+	measuresOnly = false;
+	implicitlyNavigable = false;
+	rewritableExprType = SQLType::START_EXPR;
+
+	const ExprSpec &spec = ExprFactory::getDefaultFactory().getSpec(type);
+
+	const bool patternMatchOnly =
+			((spec.flags_ & ExprSpec::FLAG_PATTERN_MATCH_ONLY) != 0);
+	if (!patternMatchOnly) {
+		if (onPatternMatch && type == SQLType::EXPR_COLUMN) {
+			implicitlyNavigable = true;
+			rewritableExprType = SQLType::EXPR_PATTERN_CURRENT;
+			return true;
+		}
+		return false;
+	}
+
+	measuresOnly = (type == SQLType::FUNC_CLASSIFIER);
+	switch (type) {
+	case SQLType::FUNC_PREV:
+		rewritableExprType = SQLType::EXPR_PATTERN_PREV;
+		break;
+	case SQLType::FUNC_NEXT:
+		rewritableExprType = SQLType::EXPR_PATTERN_NEXT;
+		break;
+	case SQLType::FUNC_FIRST:
+		rewritableExprType = SQLType::EXPR_PATTERN_FIRST;
+		break;
+	case SQLType::FUNC_LAST:
+		rewritableExprType = SQLType::EXPR_PATTERN_LAST;
+		break;
+	default:
+		break;
+	}
+
+	return true;
 }
 
 
@@ -7973,12 +8106,12 @@ SQLExprs::Expression& SQLExprs::DefaultExprFactory::create(
 		const ExprType type = code.getType();
 		FactoryFunc func = entryList_[getEntryIndex(type, overwriting)].func_;
 
-		if (func == NULL) {
-			assert(false);
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		if ((code.getAttributes() & EXTRA_ATTRIBUTES) != 0) {
+			expr = &createWithExtaAttributes(cxt, code, func);
 		}
-
-		expr = &(func(cxt, code));
+		else {
+			expr = &(func(cxt, code));
+		}
 	}
 
 	expr->initialize(cxt, code);
@@ -8040,9 +8173,20 @@ size_t SQLExprs::DefaultExprFactory::getEntryIndex(
 	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 }
 
+SQLExprs::Expression& SQLExprs::DefaultExprFactory::createWithExtaAttributes(
+		ExprFactoryContext &cxt, const ExprCode &code, FactoryFunc func) {
+	ExprFactoryContext::Scope scope(cxt);
+
+	if ((code.getAttributes() & ExprCode::ATTR_AGGR_FINISH_ALWAYS) != 0) {
+		cxt.setAggregationPhase(false, SQLType::AGG_PHASE_MERGE_FINISH);
+	}
+
+	return func(cxt, code);
+}
+
 SQLExprs::DefaultExprFactory::Entry::Entry() :
 		type_(SQLType::START_EXPR),
-		func_(NULL) {
+		func_(getEmptyFunc()) {
 }
 
 
@@ -8235,7 +8379,7 @@ const SQLExprs::Expression& SQLExprs::ExprRegistrar::resolveBaseExpression(
 }
 
 SQLExprs::ExprRegistrar::FuncTableByTypes::FuncTableByTypes() {
-	std::fill(list_, list_ + LIST_SIZE, FactoryFunc());
+	std::fill(list_, list_ + LIST_SIZE, ExprFactory::getEmptyFunc());
 }
 
 SQLExprs::ExprRegistrar::FuncTableByTypes::FuncTableByTypes(

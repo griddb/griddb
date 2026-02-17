@@ -86,6 +86,7 @@ public:
 	int64_t interruptionProjectionCount_;
 	int64_t interruptionScanCount_;
 	int64_t scanCountBased_;
+	int64_t patternMatchMemoryLimitBytes_;
 
 	UTIL_OBJECT_CODER_MEMBERS(
 			UTIL_OBJECT_CODER_OPTIONAL(workMemoryLimitBytes_, -1),
@@ -114,7 +115,8 @@ public:
 			UTIL_OBJECT_CODER_OPTIONAL(sortTopNBatchSize_, -1),
 			UTIL_OBJECT_CODER_OPTIONAL(interruptionProjectionCount_, -1),
 			UTIL_OBJECT_CODER_OPTIONAL(interruptionScanCount_, -1),
-			UTIL_OBJECT_CODER_OPTIONAL(scanCountBased_, -1));
+			UTIL_OBJECT_CODER_OPTIONAL(scanCountBased_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(patternMatchMemoryLimitBytes_, -1));
 
 private:
 	static const SQLProcessorConfig DEFAULT_CONFIG;
@@ -249,14 +251,6 @@ struct TableSchemaInfo;
 class SQLContext : public TaskContext {
 public:
 	typedef StatementId ExecId;
-
-	SQLContext(
-			SQLVariableSizeGlobalAllocator *valloc,
-			Task *task,
-			SQLAllocator *alloc,
-			SQLVarSizeAllocator *varAlloc,
-			LocalTempStore &store,
-			const SQLProcessorConfig *config);
 
 	SQLContext(
 			SQLAllocator *alloc,
@@ -402,6 +396,10 @@ public:
 
 	util::AllocatorLimitter* getAllocatorLimitter();
 	void setAllocatorLimitter(util::AllocatorLimitter *allocLimitter);
+
+	void getIndexScanCostConfig(
+			double &indexScanCostRate, double &rangeScanCostRate,
+			double &blockScanCountRate);
 
 private:
 

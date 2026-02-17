@@ -683,6 +683,9 @@ const SQLPreparedPlan::Node::CommandOptionFlag
 const SQLPreparedPlan::Node::CommandOptionFlag
 		SQLPreparedPlan::Node::Config::CMD_OPT_JOIN_DRIVING_SOME = 1 << 10;
 
+const SQLPreparedPlan::Node::CommandOptionFlag
+		SQLPreparedPlan::Node::Config::CMD_OPT_SCAN_NO_COST_BASED = 1 << 11;
+
 SQLPreparedPlan::Node::Node(util::StackAllocator &alloc) :
 		id_(0),
 		type_(Type()),
@@ -1525,7 +1528,7 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 	plan.validateReference(tableInfoList_);
 
 	bool tableCostAffected = false;
-	if (optimizationOption_->isSomeEnabled()) {
+	if (!isOptimizationDisabled(plan)) {
 		OptimizationContext cxt(*this, plan);
 
 		{
@@ -2815,8 +2818,7 @@ void SQLCompiler::genAggrFunc(GenRAContext &cxt, Plan &plan) {
 		PlanExprList::const_iterator inItr = aggrList.begin();
 		PlanExprList::iterator outItr = cxt.selectList_.begin();
 		for (; inItr != aggrList.end(); ++inItr, ++outItr) {
-			bool isAggrExpr = findAggrExpr(*inItr, true);
-			if (isAggrExpr) {
+			if (cxt.aggrModeList_[inItr - aggrList.begin()]) {
 				*outItr = *inItr;
 			}
 		}
@@ -2826,8 +2828,7 @@ void SQLCompiler::genAggrFunc(GenRAContext &cxt, Plan &plan) {
 			inItr = aggrList.begin();
 			outItr = node->outputList_.begin() + cxt.selectTopColumnId_;
 			for (; inItr != aggrList.end(); ++inItr, ++outItr) {
-				bool isAggrExpr = findAggrExpr(*inItr, true);
-				if (isAggrExpr) {
+				if (cxt.aggrModeList_[inItr - aggrList.begin()]) {
 					*outItr = *inItr;
 				}
 			}
@@ -3020,8 +3021,7 @@ void SQLCompiler::genGroupBy(GenRAContext &cxt, ExprRef &havingExprRef, Plan &pl
 		PlanExprList::const_iterator inItr = aggrList.begin();
 		PlanExprList::iterator outItr = cxt.selectList_.begin();
 		for (; inItr != aggrList.end(); ++inItr, ++outItr) {
-			bool isAggrExpr = findAggrExpr(*inItr, true);
-			if (isAggrExpr) {
+			if (cxt.aggrModeList_[inItr - aggrList.begin()]) {
 				*outItr = *inItr;
 			}
 		}
@@ -3039,8 +3039,7 @@ void SQLCompiler::genGroupBy(GenRAContext &cxt, ExprRef &havingExprRef, Plan &pl
 			outItr = node->outputList_.begin() + cxt.selectTopColumnId_;
 			size_t pos = 0;
 			for (; inItr != aggrList.end(); ++inItr, ++outItr, ++pos) {
-				bool isAggrExpr = findAggrExpr(*inItr, true);
-				if (isAggrExpr) {
+				if (cxt.aggrModeList_[inItr - aggrList.begin()]) {
 					if (pos < cxt.selectExprRefList_.size()) {
 						cxt.selectExprRefList_[pos].update();
 						Expr *selectExpr = cxt.selectExprRefList_[pos].get();
@@ -3064,8 +3063,7 @@ void SQLCompiler::genGroupBy(GenRAContext &cxt, ExprRef &havingExprRef, Plan &pl
 			inItr = aggrList.begin();
 			outItr = node->outputList_.begin() + cxt.selectTopColumnId_;
 			for (; inItr != aggrList.end(); ++inItr, ++outItr) {
-				bool isAggrExpr = findAggrExpr(*inItr, true);
-				if (isAggrExpr) {
+				if (cxt.aggrModeList_[inItr - aggrList.begin()]) {
 					*outItr = *inItr;
 				}
 			}
@@ -3268,6 +3266,12 @@ bool SQLCompiler::genRangeGroup(
 				inTotalAggrList.end(),
 				cxt.windowExprList_.begin(), cxt.windowExprList_.end());
 
+		util::Vector<bool> totalAggrModeList(alloc_);
+		totalAggrModeList.insert(
+				totalAggrModeList.end(),
+				cxt.aggrModeList_.begin(), cxt.aggrModeList_.end());
+		totalAggrModeList.resize(inTotalAggrList.size(), false);
+
 		PlanExprList totalAggrList = genColumnExprList(
 				inTotalAggrList, plan, MODE_GROUP_SELECT, productedNodeId);
 		assert(&node == &plan.back());
@@ -3281,7 +3285,7 @@ bool SQLCompiler::genRangeGroup(
 			PlanExprList::const_iterator inIt = aggrBegin;
 			PlanExprList::iterator outIt = cxt.selectList_.begin();
 			for (; inIt != aggrEnd; ++inIt, ++outIt) {
-				if (findAggrExpr(*inIt, true)) {
+				if (totalAggrModeList[inIt - aggrBegin]) {
 					*outIt = *inIt;
 				}
 			}
@@ -3291,7 +3295,7 @@ bool SQLCompiler::genRangeGroup(
 			PlanExprList::iterator outIt =
 					node.outputList_.begin() + cxt.selectTopColumnId_;
 			for (; inIt != aggrEnd; ++inIt, ++outIt) {
-				if (findAggrExpr(*inIt, true)) {
+				if (totalAggrModeList[inIt - aggrBegin]) {
 					*outIt = *inIt;
 				}
 			}
@@ -6445,6 +6449,11 @@ void SQLCompiler::genTableOrSubquery(
 			assert(table.subQuery_->right_);
 			PlanNodeId productedNodeId = UNDEF_PLAN_NODEID;
 			genSelect(*table.subQuery_->right_, false, productedNodeId, plan);
+
+			if (table.patternRecognizeOpt_) {
+				GenPatternContext cxt(alloc_, table.patternRecognizeOpt_);
+				genPatternRecognition(cxt, plan);
+			}
 		}
 		else {
 			genSet(*table.subQuery_, table.aliasName_, plan);
@@ -6475,6 +6484,19 @@ void SQLCompiler::genTableOrSubquery(
 				}
 			}
 			genTable(table, whereExpr, plan);
+
+			if (table.patternRecognizeOpt_) {
+				GenPatternContext cxt(alloc_, table.patternRecognizeOpt_);
+				genPatternRecognition(cxt, plan);
+
+				if (table.aliasName_) {
+					int64_t nsId = 0;
+					if (table.qName_) {
+						nsId = table.qName_->nsId_;
+					}
+					plan.back().setName(*table.aliasName_, NULL, nsId);
+				}
+			}
 		}
 		else {
 			assert(false);
@@ -6487,6 +6509,615 @@ void SQLCompiler::genTableOrSubquery(
 	else {
 		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &table,
 			"Invalid from expression");
+	}
+}
+
+void SQLCompiler::genPatternRecognition(GenPatternContext &cxt, Plan &plan) {
+	if (cxt.patternOption_->partitionByList_ || cxt.patternOption_->orderByList_) {
+		genPatternSortNode(cxt, plan);
+	}
+	genPatternMatchNode(cxt, plan);
+}
+
+void SQLCompiler::genPatternSortNode(GenPatternContext &cxt, Plan& plan) {
+
+	const SyntaxTree::PatternRecognizeOption* patternOption = cxt.patternOption_;
+
+	size_t predListSize = 0;
+	if (patternOption->partitionByList_) {
+		predListSize += patternOption->partitionByList_->size();
+	}
+	if (patternOption->orderByList_) {
+		predListSize += patternOption->orderByList_->size();
+	}
+	assert(predListSize > 0);
+	PlanNodeId inputId = plan.back().id_;
+	SQLPreparedPlan::Node& sortNode = plan.append(SQLType::EXEC_SORT);
+	sortNode.inputList_.push_back(inputId);
+	sortNode.predList_.reserve(predListSize);
+	sortNode.outputList_ = inputListToOutput(plan);
+
+	PlanExprList tmpPredList(alloc_);
+	if (patternOption->partitionByList_) {
+		validatePatternSortKeysSyntax(*patternOption->partitionByList_);
+		cxt.patternPartitionByList_ = genExprList(
+			*patternOption->partitionByList_,
+			plan, MODE_NORMAL_SELECT, &inputId);
+		if (sortNode.id_ != plan.back().id_) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, patternOption->partitionByList_->at(0),
+					"Illegal column reference");
+		}
+		tmpPredList.insert(
+			tmpPredList.end(),
+			cxt.patternPartitionByList_.begin(),
+			cxt.patternPartitionByList_.end());
+	}
+	if (patternOption->orderByList_) {
+		validatePatternSortKeysSyntax(*patternOption->orderByList_);
+		cxt.patternOrderByList_ = genExprList(
+			*patternOption->orderByList_,
+			plan, MODE_NORMAL_SELECT, &inputId);
+		if (sortNode.id_ != plan.back().id_) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, patternOption->orderByList_->at(0),
+					"Illegal column reference");
+		}
+		tmpPredList.insert(
+			tmpPredList.end(),
+			cxt.patternOrderByList_.begin(),
+			cxt.patternOrderByList_.end());
+	}
+	appendUniqueExpr(tmpPredList, sortNode.predList_);
+}
+
+void SQLCompiler::genPatternMatchNode(GenPatternContext &cxt, Plan &plan) {
+
+	PlanNodeId inputId = plan.back().id_;
+	SQLPreparedPlan::Node& planNode = plan.append(SQLType::EXEC_SORT);
+	planNode.cmdOptionFlag_ |= PlanNode::Config::CMD_OPT_WINDOW_SORTED;
+	planNode.inputList_.push_back(inputId);
+	planNode.outputList_ = inputListToOutput(plan);
+
+	PatternVarIdMap varIdMap(alloc_);
+	genPatternMatchPredicate(plan, cxt, planNode.predList_, varIdMap);
+
+	genPatternMatchMeasures(plan, cxt, planNode.outputList_, varIdMap);
+}
+
+void SQLCompiler::genPatternMatchMeasures(
+		Plan& plan, GenPatternContext &cxt, PlanExprList& outputList,
+		const PatternVarIdMap &varIdMap) {
+
+	const SyntaxTree::PatternRecognizeOption* patternOption = cxt.patternOption_;
+	if (patternOption->measuresList_) {
+		outputList.clear();
+		ExprList::const_iterator itr = patternOption->measuresList_->begin();
+		for (; itr != patternOption->measuresList_->end(); ++itr) {
+			const Expr &expr = genPatternMeasuresExpr(plan, *(*itr), varIdMap);
+			outputList.push_back(expr);
+		}
+	} else {
+		outputList = genPatternMeasuresDefaultExprList(plan, varIdMap);
+	}
+}
+
+void SQLCompiler::genPatternMatchPredicate(
+		Plan& plan, GenPatternContext &cxt, PlanExprList& exprList,
+		PatternVarIdMap &varIdMap) {
+
+	exprList.push_back(genPatternMatchOption(plan, cxt, varIdMap));
+
+	exprList.insert(
+		exprList.end(),
+		cxt.patternPartitionByList_.begin(),
+		cxt.patternPartitionByList_.end());
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternMatchOption(
+		Plan& plan, GenPatternContext& cxt, PatternVarIdMap &varIdMap) {
+
+	ExprList &varListArgs = genPatternVariableListArgs(plan, cxt);
+
+	Expr descExpr = genPatternDescription(plan, cxt, varListArgs);
+	varIdMap = getPatternVariableIdMap(varListArgs);
+
+	Expr varListExpr = genPatternVariableList(plan, varListArgs, varIdMap);
+
+	Expr modeExpr = genPatternMatchMode(plan, cxt);
+
+	ExprList *exprList = ALLOC_NEW(alloc_) ExprList(alloc_);
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(descExpr));
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(varListExpr));
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(modeExpr));
+	return genExprWithArgs(
+			plan, SQLType::EXPR_PATTERN_OPTION, exprList,
+			MODE_NORMAL_SELECT, true);
+}
+
+/*
+・<pattern recognition func>
+  - 一覧
+	- FUNC_CLASSIFIER()
+	- FUNC_MATCH_NUMBER()
+
+  - 留意事項
+	- コンパイラは、個々の式種別を認識する必要はない(カテゴリ別操作で完結)
+
+・<pattern navigation func>
+  - 一覧(raw func)
+	- FUNC_PREV(column_expr)
+	- FUNC_NEXT(column_expr)
+	- FUNC_FIRST(column_expr)
+	- FUNC_LAST(column_expr)
+
+  - 一覧(resolved expr)
+	- EXPR_PATTERN_PREV(var_id, column_expr)
+	- EXPR_PATTERN_NEXT(var_id, column_expr)
+	- EXPR_PATTERN_FIRST(var_id, column_expr)
+	- EXPR_PATTERN_LAST(var_id, column_expr)
+	  - next_
+		- var_id: EXPR_CONST(LONG)
+		- column_expr: EXPR_COLUMN
+
+  - 留意事項
+	- コンパイラは、個々の式種別を認識する必要はない(カテゴリ別操作で完結)
+	- パターン変数との紐づけのため、式の書き換えを伴う
+	  - var_id: column_expr内の変数名相当の文字列(qName_.table_)に基づき、決定される
+		- 変数名あり: 0以上の値。<pattern variables definition>で示されたvar_idと対応づくもの
+		- 変数名なし: -1。特定のパターン変数には紐づかない(マッチ全体との対応)ことを意味する
+	  - 第2引数以降: 元の関数の引数を引継ぎ。書き換え後は、qName_は実質使われない
+		- 現行バージョンでは、元の引数は1つのみだが、今後のバージョンでも同様とは限らない
+
+・<other pattern expr>
+  - <current column>
+	- <raw expr>
+	  - EXPR_COLUMN
+	- <resolved expr>
+	  - EXPR_PATTERN_CURRENT(var_id, column_expr)
+	- 留意事項
+	  - <pattern navigation func>と類似の扱い(上記の通り書き換え方法が若干異なるだけ)
+		- コンパイラは、式種別を認識する必要はない(カテゴリ別操作で完結)
+ */
+
+
+SQLCompiler::Expr SQLCompiler::genPatternDescription(
+		Plan& plan, GenPatternContext &cxt, ExprList& varListArgs) {
+	const SyntaxTree::PatternRecognizeOption* patternOption = cxt.patternOption_;
+	assert(patternOption->pattern_);
+	for (int64_t varId = 0; varId < cxt.definedVarCount_; varId++) {
+		cxt.checkVarIdSet_.insert(varId);
+	}
+	Expr patternDescriptionExpr = genPatternTree(
+			plan, cxt, *patternOption->pattern_, varListArgs);
+	if (!cxt.checkVarIdSet_.empty()) {
+		SQL_COMPILER_THROW_ERROR(
+			GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &patternDescriptionExpr,
+			"Every variable defined in the DEFINE clause must also appear in the PATTERN clause");
+	}
+	return patternDescriptionExpr;
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternTree(
+		Plan &plan, GenPatternContext &cxt,
+		const SyntaxTree::RegexNode &regexNode, ExprList& varListArgs) {
+	const Mode mode = MODE_NORMAL_SELECT;
+	Type exprType;
+	ExprList *exprList = ALLOC_NEW(alloc_) ExprList(alloc_);
+	switch (regexNode.nodeType_) {
+		case SyntaxTree::PATTERN_REGEX_ALT: {
+			exprType = SQLType::EXPR_PATTERN_OR;
+			util::Vector<SyntaxTree::RegexNode*>::const_iterator itr = regexNode.children_.begin();
+			for (; itr != regexNode.children_.end(); ++itr) {
+				Expr* nextExpr = ALLOC_NEW(alloc_) Expr(genPatternTree(plan, cxt, **itr, varListArgs));
+				exprList->push_back(nextExpr);
+			}
+			break;
+		}
+		case SyntaxTree::PATTERN_REGEX_CONCAT: {
+			exprType = SQLType::EXPR_PATTERN_CONCAT;
+			util::Vector<SyntaxTree::RegexNode*>::const_iterator itr = regexNode.children_.begin();
+			for (; itr != regexNode.children_.end(); ++itr) {
+				Expr* nextExpr = ALLOC_NEW(alloc_) Expr(genPatternTree(plan, cxt, **itr, varListArgs));
+				exprList->push_back(nextExpr);
+			}
+			break;
+		}
+		case SyntaxTree::PATTERN_REGEX_REPEAT: {
+			exprType = SQLType::EXPR_PATTERN_REPEAT;
+			assert(regexNode.children_.size() == 1);
+			util::Vector<SyntaxTree::RegexNode*>::const_iterator itr = regexNode.children_.begin();
+			Expr* elemExpr = ALLOC_NEW(alloc_) Expr(genPatternTree(plan, cxt, **itr, varListArgs));
+			exprList->push_back(elemExpr);
+			Expr* minExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(regexNode.min_), mode));
+			Expr* maxExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(regexNode.max_), mode));
+			exprList->push_back(minExpr);
+			exprList->push_back(maxExpr);
+			break;
+		}
+		case SyntaxTree::PATTERN_REGEX_GROUP: {
+			exprType = SQLType::EXPR_PATTERN_CONCAT;
+			util::Vector<SyntaxTree::RegexNode*>::const_iterator itr = regexNode.children_.begin();
+			for (; itr != regexNode.children_.end(); ++itr) {
+				Expr* nextExpr = ALLOC_NEW(alloc_) Expr(genPatternTree(plan, cxt, **itr, varListArgs));
+				exprList->push_back(nextExpr);
+			}
+			break;
+		}
+		case SyntaxTree::PATTERN_REGEX_ANCHOR_START: {
+			exprType = SQLType::EXPR_PATTERN_ANCHOR;
+			assert(regexNode.children_.size() == 1);
+			util::Vector<SyntaxTree::RegexNode*>::const_iterator itr = regexNode.children_.begin();
+			Expr* elemExpr = ALLOC_NEW(alloc_) Expr(genPatternTree(plan, cxt, **itr, varListArgs));
+			exprList->push_back(elemExpr);
+			Expr* constTrueExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(true), mode));
+			Expr* constFalseExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(false), mode));
+			exprList->push_back(constTrueExpr);
+			exprList->push_back(constFalseExpr);
+			break;
+		}
+		case SyntaxTree::PATTERN_REGEX_ANCHOR_END: {
+			exprType = SQLType::EXPR_PATTERN_ANCHOR;
+			assert(regexNode.children_.size() == 1);
+			util::Vector<SyntaxTree::RegexNode*>::const_iterator itr = regexNode.children_.begin();
+			Expr* elemExpr = ALLOC_NEW(alloc_) Expr(genPatternTree(plan, cxt, **itr, varListArgs));
+			exprList->push_back(elemExpr);
+			Expr* constTrueExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(true), mode));
+			Expr* constFalseExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(false), mode));
+			exprList->push_back(constFalseExpr);
+			exprList->push_back(constTrueExpr);
+			break;
+		}
+		case SyntaxTree::PATTERN_REGEX_VARNAME: {
+			exprType = SQLType::EXPR_PATTERN_VARIABLE;
+			assert(cxt.varIdCount_ > 0);
+
+			const QualifiedName &qName =
+					checkPatternVariableName(regexNode.varName_, NULL);
+
+			const char8_t *varName = qName.name_->c_str();
+			const bool caseSensitive = qName.nameCaseSensitive_;
+
+			int64_t varId;
+			const PatternVarIdEntry *varIdEntry;
+			if (findPatternVariableIdEntry(
+					cxt.varIdMap_, varName, caseSensitive, varIdEntry)) {
+				varId = varIdEntry->first;
+				if (varId < cxt.definedVarCount_) {
+					cxt.checkVarIdSet_.erase(varId);
+				}
+			}
+			else {
+				varId = addPatternVariableIdEntry(
+						cxt.varIdMap_, cxt.varIdCount_, varName);
+				Expr* constTrueExpr = ALLOC_NEW(alloc_) Expr(
+						genConstExpr(plan, TupleValue(true), MODE_NORMAL_SELECT) );
+				Expr* patternVarExpr = ALLOC_NEW(alloc_) Expr(
+						genPatternVariable(plan, qName, *constTrueExpr) );
+				varListArgs.push_back(patternVarExpr);
+				assert(varListArgs.size() == varId + 1);
+			}
+			Expr* varIdExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(plan, TupleValue(varId), mode));
+			exprList->push_back(varIdExpr);
+			break;
+		}
+		default:
+			assert(false);
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, 
+				"SyntaxTree::RegexNode: unknown nodeType: " << static_cast<int32_t>(regexNode.nodeType_) );
+	} 
+	return genExprWithArgs(plan, exprType, exprList, MODE_NORMAL_SELECT, true);
+}
+
+
+SQLCompiler::ExprList& SQLCompiler::genPatternVariableListArgs(
+		Plan& plan, GenPatternContext &cxt) {
+
+	const SyntaxTree::PatternRecognizeOption* patternOption = cxt.patternOption_;
+	assert(patternOption->defineList_);
+	assert(cxt.varIdMap_.empty());
+
+	ExprList *exprList = ALLOC_NEW(alloc_) ExprList(alloc_);
+
+	cxt.varIdCount_ = 0; 
+	ExprList::iterator itr = patternOption->defineList_->begin();
+	for (; itr != patternOption->defineList_->end(); ++itr) {
+		if (!(*itr)->right_) {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, (*itr),
+					"Invalid define variable expression");
+		}
+
+		const QualifiedName &qName =
+				checkPatternVariableName((*itr)->qName_, *itr);
+
+		const util::String *varName = qName.name_;
+		const bool caseSensitive = false;
+		if (findPatternVariableIdEntry(
+				cxt.varIdMap_, varName->c_str(), caseSensitive)) {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, (*itr),
+					"Duplicate define variable name detected ("
+					"name=" << *varName << ")");
+		}
+		addPatternVariableIdEntry(
+				cxt.varIdMap_, cxt.varIdCount_, varName->c_str());
+		Expr* patternVarExpr = ALLOC_NEW(alloc_) Expr(
+				genPatternVariable(plan, qName, *((*itr)->right_)) );
+		exprList->push_back(patternVarExpr);
+	}
+	cxt.definedVarCount_ = cxt.varIdCount_;
+
+	return *exprList;
+}
+
+SQLCompiler::PatternVarIdMap SQLCompiler::getPatternVariableIdMap(
+		const ExprList &varListArgs) {
+	PatternVarIdMap map(alloc_);
+	int64_t varIdCount = 0;
+	for (ExprList::const_iterator it = varListArgs.begin();
+			it != varListArgs.end(); ++it) {
+		const TupleString::BufferInfo &nameBuf =
+				TupleString((*it)->next_->front()->value_).getBuffer();
+		const util::String baseName(nameBuf.first, nameBuf.second, alloc_);
+		addPatternVariableIdEntry(map, varIdCount, baseName.c_str());
+	}
+	return map;
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternVariableList(
+		Plan& plan, ExprList &varListArgs, PatternVarIdMap &varIdMap) {
+	const Mode &mode = MODE_PATTERN_VARIABLE;
+	const Expr &baseExpr = genExprWithArgs(
+			plan, SQLType::EXPR_PATTERN_VARIABLE_LIST, &varListArgs,
+			MODE_NORMAL_SELECT, true);
+
+	const bool withVarName = true;
+	return genPatternExpr(plan, baseExpr, mode, varIdMap, withVarName);
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternVariable(
+		Plan &plan, const QualifiedName &qName, Expr &srcPredExpr) {
+	const Mode mode = MODE_PATTERN_VARIABLE;
+
+	if (findSubqueryExpr(&srcPredExpr)) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &srcPredExpr,
+				"Subqueries in the DEFINE clause are not supported");
+	}
+
+	const util::String *name = checkPatternVariableName(&qName, NULL).name_;
+	const TupleValue &varNameValue =
+			SyntaxTree::makeStringValue(alloc_, name->c_str(), name->size());
+
+	const Expr &varNameExpr = genConstExpr(plan, varNameValue, mode);
+	const Expr &predExpr = genExpr(srcPredExpr, plan, mode);
+
+	ExprList *exprList = ALLOC_NEW(alloc_) ExprList(alloc_);
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(varNameExpr));
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(predExpr));
+	return genExprWithArgs(
+			plan, SQLType::EXPR_PATTERN_VARIABLE_DEF, exprList,
+			MODE_NORMAL_SELECT, true);
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternMatchMode(
+		const Plan& plan, GenPatternContext &cxt) {
+	const TupleValue modeValue =
+			TupleValue(static_cast<int64_t>(cxt.patternOption_->matchMode_));
+
+	return genConstExpr(plan, modeValue, MODE_NORMAL_SELECT);
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternMeasuresExpr(
+		Plan& plan, const Expr &expr, const PatternVarIdMap &varIdMap) {
+	if (findSubqueryExpr(&expr)) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &expr,
+				"Subqueries in the MEASURES clause are not supported");
+	}
+
+	const Mode &mode = MODE_PATTERN_MEASURES;
+	const Expr &baseExpr = genExpr(expr, plan, MODE_PATTERN_MEASURES);
+
+	const bool withVarName = true;
+	return genPatternExpr(plan, baseExpr, mode, varIdMap, withVarName);
+}
+
+SQLCompiler::PlanExprList SQLCompiler::genPatternMeasuresDefaultExprList(
+		Plan& plan, const PatternVarIdMap &varIdMap) {
+	const Mode &mode = MODE_PATTERN_MEASURES;
+	const bool withVarName = false;
+	PlanExprList dest(alloc_);
+
+	PlanExprList baseList = inputListToOutput(plan);
+	for (PlanExprList::iterator it = baseList.begin();
+			it != baseList.end(); ++it) {
+		dest.push_back(genPatternExpr(plan, *it, mode, varIdMap, withVarName));
+	}
+
+	return dest;
+}
+
+SQLCompiler::Expr SQLCompiler::genPatternExpr(
+		const Plan &plan, const Expr &baseExpr, Mode mode,
+		const PatternVarIdMap &varIdMap, bool withVarName) {
+	assert(mode == MODE_PATTERN_VARIABLE || mode == MODE_PATTERN_MEASURES);
+
+	do {
+		const bool onPatternMatch = true;
+		bool measuresOnly;
+		bool implicitlyNavigable;
+		Type rewritableExprType;
+		if (!ProcessorUtils::getPatternMatchExprInfo(
+				baseExpr.op_, onPatternMatch, measuresOnly, implicitlyNavigable,
+				rewritableExprType)) {
+			break;
+		}
+
+		if (rewritableExprType == SQLType::START_EXPR) {
+			break;
+		}
+
+		return resolveNavigationExpr(
+				plan, baseExpr, mode, varIdMap, withVarName,
+				implicitlyNavigable, rewritableExprType);
+	}
+	while (false);
+
+	Expr outExpr = baseExpr;
+	for (ExprArgsIterator<false> it(outExpr); it.exists(); it.next()) {
+		Expr &sub = it.get();
+		sub = genPatternExpr(plan, sub, mode, varIdMap, withVarName);
+	}
+
+	return outExpr;
+}
+
+SQLCompiler::Expr SQLCompiler::resolveNavigationExpr(
+		const Plan &plan, const Expr &baseExpr, Mode mode,
+		const PatternVarIdMap &varIdMap, bool withVarName,
+		bool implicitlyNavigable, Type rewritableExprType) {
+	assert(rewritableExprType != SQLType::START_EXPR);
+
+	if (!implicitlyNavigable &&
+			(baseExpr.next_ == NULL || baseExpr.next_->empty())) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, "");
+	}
+
+	const Expr &columnExpr =
+			(implicitlyNavigable ? baseExpr : *baseExpr.next_->front());
+
+	const QualifiedName *qName =
+			(withVarName ? findPatternVariableName(columnExpr.qName_) : NULL);
+
+	const util::String *name = (qName == NULL ? NULL : qName->table_);
+	const bool caseSensitive = (qName == NULL ? false : qName->tableCaseSensitive_);
+
+	int64_t varId = -1;
+	if (withVarName && name != NULL && !name->empty()) {
+		const PatternVarIdEntry *entry;
+		if (!findPatternVariableIdEntry(
+				varIdMap, name->c_str(), caseSensitive, entry)) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &baseExpr,
+					"Pattern variable name not resolved (name=" <<
+					*name << ")");
+		}
+		varId = entry->first;
+	}
+
+	ExprList *exprList = ALLOC_NEW(alloc_) ExprList(alloc_);
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(genConstExpr(
+			plan, TupleValue(varId), mode)));
+	exprList->push_back(ALLOC_NEW(alloc_) Expr(columnExpr));
+
+	Expr outExpr =
+			genExprWithArgs(plan, rewritableExprType, exprList, mode, true);
+	outExpr.qName_ = columnExpr.qName_;
+	outExpr.autoGenerated_ = baseExpr.autoGenerated_;
+	return outExpr;
+}
+
+const SyntaxTree::QualifiedName& SQLCompiler::checkPatternVariableName(
+		const QualifiedName *qName, const Expr *baseExpr) {
+	if (findPatternVariableName(qName) == NULL) {
+		SQL_COMPILER_THROW_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, baseExpr,
+				"Pattern variable name is empty");
+	}
+
+	return *qName;
+}
+
+const SyntaxTree::QualifiedName* SQLCompiler::findPatternVariableName(
+		const QualifiedName *qName) {
+	if (qName == NULL || qName->name_ == NULL || qName->name_->empty()) {
+		return NULL;
+	}
+
+	return qName;
+}
+
+bool SQLCompiler::findPatternVariableIdEntry(
+		const PatternVarIdMap &map, const char8_t *name, bool caseSensitive) {
+	const PatternVarIdEntry *entry;
+	return findPatternVariableIdEntry(map, name, caseSensitive, entry);
+}
+
+bool SQLCompiler::findPatternVariableIdEntry(
+		const PatternVarIdMap &map, const char8_t *name, bool caseSensitive,
+		const PatternVarIdEntry *&entry) {
+	const util::String &key = normalizeName(alloc_, name);
+	PatternVarIdMap::const_iterator it = map.find(key);
+
+	if (caseSensitive && it != map.end() && it->second.second != name) {
+		it = map.end();
+	}
+
+	entry = (it == map.end() ? NULL : &it->second);
+	return (entry != NULL);
+}
+
+int64_t SQLCompiler::addPatternVariableIdEntry(
+		PatternVarIdMap &map, int64_t &varIdCount, const char8_t *name) {
+	const int64_t newVarId = varIdCount;
+
+	const util::String &key = normalizeName(alloc_, name);
+	const util::String nameStr(name, alloc_);
+	if (!map.insert(
+			std::make_pair(key, PatternVarIdEntry(newVarId, nameStr))).second) {
+		assert(false);
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	}
+
+	varIdCount++;
+	return newVarId;
+}
+
+void SQLCompiler::validatePatternSortKeysSyntax(const ExprList &exprList) {
+	for (ExprList::const_iterator it = exprList.begin(); it != exprList.end(); ++it) {
+		if ((*it)->op_ != SQLType::EXPR_COLUMN) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, *it,
+					"A partition or ordering key in MATCH_RECOGNIZE clause must be a column");
+		}
+	}
+}
+
+void SQLCompiler::validatePatternMatchFunction(const Expr& inExpr, Mode mode) {
+	const Type type = inExpr.op_;
+	const bool onPatternMatch = false;
+	bool measuresOnly;
+	bool implicitlyNavigable;
+	Type rewritableExprType;
+	if (!ProcessorUtils::getPatternMatchExprInfo(
+			type, onPatternMatch, measuresOnly, implicitlyNavigable,
+			rewritableExprType)) {
+		return;
+	}
+
+	switch (mode) {
+	case MODE_PATTERN_VARIABLE:
+	case MODE_PATTERN_MEASURES:
+		break;
+	default:
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &inExpr,
+				"Illegal pattern match function occurrence "
+				"(function=" << SQLType::Coder()(type, "") << ")");
+	}
+
+	if (measuresOnly && mode != MODE_PATTERN_MEASURES) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &inExpr,
+				"The specified function can only appear in the MEASURES clause "
+				"(function=" << SQLType::Coder()(type, "") << ")");
+	}
+
+	{
+		ExprArgsIterator<> it(inExpr);
+		if (it.exists() && it.get().op_ != SQLType::EXPR_COLUMN) {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &inExpr,
+					"Argument type of the specified function must be column expression"
+					"(function=" << SQLType::Coder()(type, "") << ")");
+		}
 	}
 }
 
@@ -7295,6 +7926,7 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 				currentTimeRequired_ = true;
 			}
 		}
+		validatePatternMatchFunction(outExpr, mode);
 	}
 	else if (SQLType::START_AGG < exprType && exprType < SQLType::END_AGG) {
 		outExpr.op_ = exprType;
@@ -7312,23 +7944,8 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 		validateAggrExpr(outExpr, mode);
 	}
 	else if (exprType == SQLType::EXPR_COLUMN) {
-		if (inExpr.autoGenerated_) {
-			outExpr = genColumnExprBase(
-					&plan, &plan.back(), inExpr.inputId_, inExpr.columnId_,
-					NULL);
-		}
-		else {
-			if (inExpr.qName_ == NULL) {
-				assert(false);
-				SQL_COMPILER_THROW_ERROR(
-						GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
-			}
-			resolveColumn(
-					plan, plan.back(), *inExpr.qName_, outExpr, mode,
-					productedNodeId, NULL, NULL);
-			outExpr.sortAscending_ = inExpr.sortAscending_;
-		}
-		setUpColumnExprAttributes(outExpr, aggregated);
+		genColumnExprBySyntaxTree(
+				inExpr, plan, mode, aggregated, productedNodeId, outExpr);
 	}
 	else if (exprType == SQLType::EXPR_ALL_COLUMN) {
 		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &inExpr,
@@ -7496,6 +8113,50 @@ void SQLCompiler::setUpColumnExprAttributes(Expr &outExpr, bool aggregated) {
 	if (aggregated) {
 		outExpr.columnType_ = setColumnTypeNullable(
 				outExpr.columnType_, aggregated);
+	}
+}
+
+void SQLCompiler::genColumnExprBySyntaxTree(
+		const Expr &inExpr, const Plan &plan, Mode mode, bool aggregated,
+		const PlanNodeId *productedNodeId, Expr &outExpr) {
+	assert(inExpr.op_ == SQLType::EXPR_COLUMN);
+	QualifiedName *baseQName = inExpr.qName_;
+	const bool forPattern =
+			(mode == MODE_PATTERN_VARIABLE || mode == MODE_PATTERN_MEASURES);
+
+	if (inExpr.autoGenerated_) {
+		outExpr = genColumnExprBase(
+				&plan, &plan.back(), inExpr.inputId_, inExpr.columnId_,
+				NULL);
+	}
+	else {
+		if (baseQName == NULL) {
+			assert(false);
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+		}
+
+		const QualifiedName *qName;
+		util::LocalUniquePtr<QualifiedName> localQName;
+		if (forPattern) {
+			localQName =
+					UTIL_MAKE_LOCAL_UNIQUE(localQName, QualifiedName, alloc_);
+			localQName->name_ = baseQName->name_;
+			qName = localQName.get();
+		}
+		else {
+			qName = baseQName;
+		}
+
+		resolveColumn(
+				plan, plan.back(), *qName, outExpr, mode,
+				productedNodeId, NULL, NULL);
+		outExpr.sortAscending_ = inExpr.sortAscending_;
+	}
+
+	setUpColumnExprAttributes(outExpr, aggregated);
+	if (forPattern) {
+		outExpr.qName_ = baseQName;
 	}
 }
 
@@ -7895,6 +8556,7 @@ void SQLCompiler::validateAggrExpr(const Expr &inExpr, Mode mode) {
 	case MODE_AGGR_SELECT:
 	case MODE_GROUP_SELECT:
 	case MODE_HAVING:
+	case MODE_PATTERN_MEASURES:
 		break;
 	default:
 		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &inExpr,
@@ -8008,6 +8670,7 @@ void SQLCompiler::betweenToAndTree(const Plan &plan, Expr &expr, Mode mode) {
 void SQLCompiler::splitAggrWindowExprList(
 		GenRAContext &cxt, const ExprList &inExprList, const Plan &plan) {
 	const size_t size = inExprList.size();
+	bool aggrModeFound = false;
 
 	cxt.outExprList_.reserve(size);
 	cxt.aggrExprList_.reserve(size);
@@ -8034,6 +8697,9 @@ void SQLCompiler::splitAggrWindowExprList(
 			}
 			cxt.aggrExprList_.push_back(ALLOC_NEW(alloc_) Expr(
 					genReplacedAggrExpr(plan, inExpr)));
+			const bool aggrMode = findAggrExpr(*inExpr, false);
+			cxt.aggrModeList_.push_back(aggrMode);
+			aggrModeFound |= aggrMode;
 		}
 		else if (findAggrExpr(*inExpr, false)) {
 			cxt.outExprList_.push_back(ALLOC_NEW(alloc_) Expr(
@@ -8043,6 +8709,10 @@ void SQLCompiler::splitAggrWindowExprList(
 			++cxt.aggrExprCount_;
 			cxt.windowExprList_.push_back(ALLOC_NEW(alloc_) Expr(
 					genReplacedAggrExpr(plan, inExpr)));
+
+			const bool aggrMode = true;
+			cxt.aggrModeList_.push_back(aggrMode);
+			aggrModeFound |= aggrMode;
 		}
 		else if (inExpr->op_ == SQLType::EXPR_ALL_COLUMN) {
 			const PlanExprList &allExprList = genAllColumnExpr(
@@ -8068,6 +8738,10 @@ void SQLCompiler::splitAggrWindowExprList(
 
 				Expr *windowExpr = ALLOC_NEW(alloc_) Expr(*aggrExpr);
 				cxt.windowExprList_.push_back(windowExpr);
+
+				const bool aggrMode = false;
+				cxt.aggrModeList_.push_back(aggrMode);
+				aggrModeFound |= aggrMode;
 			}
 		}
 		else {
@@ -8082,8 +8756,17 @@ void SQLCompiler::splitAggrWindowExprList(
 			cxt.aggrExprList_.push_back(columnExpr);
 			Expr *windowExpr = ALLOC_NEW(alloc_) Expr(*columnExpr);
 			cxt.windowExprList_.push_back(windowExpr);
+
+			const bool aggrMode = false;
+			cxt.aggrModeList_.push_back(aggrMode);
+			aggrModeFound |= aggrMode;
 		}
 	}
+
+	if (!cxt.select_.groupByList_) {
+		pullUpAggrWindowExprList(cxt, inExprList, plan, aggrModeFound);
+	}
+
 	assert(cxt.outExprList_.size() == cxt.aggrExprList_.size());
 }
 
@@ -8098,6 +8781,47 @@ SQLCompiler::Expr SQLCompiler::genReplacedAggrExpr(
 	outExpr.columnId_ = REPLACED_AGGR_COLUMN_ID;
 
 	return outExpr;
+}
+
+void SQLCompiler::pullUpAggrWindowExprList(
+		GenRAContext &cxt, const ExprList &inExprList, const Plan &plan,
+		bool aggrModeFound) {
+	assert(cxt.aggrModeList_.size() >= inExprList.size());
+	assert(cxt.outExprList_.size() == cxt.aggrModeList_.size());
+	assert(cxt.aggrExprList_.size() == cxt.aggrModeList_.size());
+	assert(cxt.windowExprList_.size() == cxt.aggrModeList_.size());
+
+	if (!aggrModeFound) {
+		return;
+	}
+
+	ExprList::const_iterator inIt = inExprList.begin();
+	util::Vector<bool>::iterator modeIt = cxt.aggrModeList_.begin();
+	ExprList::iterator outIt = cxt.outExprList_.begin();
+	ExprList::iterator aggrIt = cxt.aggrExprList_.begin();
+	ExprList::iterator windowIt = cxt.windowExprList_.begin();
+
+	for (;
+			inIt != inExprList.end() &&
+			modeIt != cxt.aggrModeList_.end() &&
+			outIt != cxt.outExprList_.end() &&
+			aggrIt != cxt.aggrExprList_.end() &&
+			windowIt != cxt.windowExprList_.end();
+			++inIt,
+			++modeIt,
+			++outIt,
+			++aggrIt,
+			++windowIt) {
+		if ((*aggrIt)->op_ == SQLType::EXPR_COLUMN &&
+				(*outIt)->op_ != SQLType::EXPR_COLUMN) {
+			*outIt = ALLOC_NEW(alloc_) Expr(
+					genReplacedAggrExpr(plan, *inIt));
+			*aggrIt = *inIt;
+			*windowIt = ALLOC_NEW(alloc_) Expr(
+					genReplacedAggrExpr(plan, *inIt));
+			*modeIt = true;
+		}
+	}
 }
 
 bool SQLCompiler::splitSubqueryCond(
@@ -9312,6 +10036,13 @@ bool SQLCompiler::isForInsertOrUpdate(const PlanNode &node) {
 			node.type_ == SQLType::EXEC_UPDATE);
 }
 
+bool SQLCompiler::checkUnboundParameters(const Plan &plan) {
+	if (parameterTypeList_ == NULL) {
+		return false;
+	}
+	return (plan.parameterList_.size() < parameterTypeList_->size());
+}
+
 void SQLCompiler::finalizeScanCostHints(Plan &plan, bool tableCostAffected) {
 	for (PlanNodeList::iterator nodeIt = plan.nodeList_.begin();
 			nodeIt != plan.nodeList_.end(); ++nodeIt) {
@@ -9362,6 +10093,8 @@ void SQLCompiler::applyScanOption(Plan &plan) {
 		return;
 	}
 
+	const bool noCostBased = isLegacyIndexScan(plan);
+
 	for (PlanNodeList::iterator it = plan.nodeList_.begin();
 			it != plan.nodeList_.end(); ++it) {
 		if (it->type_ == SQLType::EXEC_SCAN) {
@@ -9372,6 +10105,11 @@ void SQLCompiler::applyScanOption(Plan &plan) {
 			if (multiIndexScanEnabled_) {
 				it->cmdOptionFlag_ |=
 						PlanNode::Config::CMD_OPT_SCAN_MULTI_INDEX;
+			}
+
+			if (noCostBased) {
+				it->cmdOptionFlag_ |=
+						PlanNode::Config::CMD_OPT_SCAN_NO_COST_BASED;
 			}
 
 			if (hint != NULL) {
@@ -9629,6 +10367,11 @@ SQLPreparedPlan::ProfileKey SQLCompiler::prepareProfileKey(PlanNode &node) {
 	return node.profileKey_;
 }
 
+bool SQLCompiler::isOptimizationDisabled(const Plan &plan) {
+	return (!optimizationOption_->isSomeEnabled() ||
+			checkUnboundParameters(plan));
+}
+
 void SQLCompiler::checkOptimizationUnitSupport(OptimizationUnitType type) {
 	if (!optimizationOption_->isSupported(type) &&
 			!optimizationOption_->isCheckOnly(type)) {
@@ -9637,7 +10380,11 @@ void SQLCompiler::checkOptimizationUnitSupport(OptimizationUnitType type) {
 	}
 }
 
-bool SQLCompiler::isOptimizationUnitEnabled(OptimizationUnitType type) {
+bool SQLCompiler::isOptimizationUnitEnabled(
+		OptimizationUnitType type, bool disabledAll) {
+	if (disabledAll) {
+		return false;
+	}
 	return optimizationOption_->isEnabled(type);
 }
 
@@ -9674,14 +10421,14 @@ SQLCompiler::OptimizationOption SQLCompiler::makeJoinPushDownHintsOption() {
 }
 
 void SQLCompiler::optimize(Plan &plan) {
-	if (!optimizationOption_->isSomeEnabled()) {
+	if (isOptimizationDisabled(plan)) {
 		return;
 	}
 
 	OptimizationContext cxt(*this, plan);
 
 	bool minimizedLast = false;
-	if (isOptimizationUnitEnabled(OPT_SIMPLIFY_SUBQUERY)) {
+	if (cxt.isUnitEnabled(OPT_SIMPLIFY_SUBQUERY)) {
 		{
 			OptimizationUnit unit(cxt, OPT_MINIMIZE_PROJECTION);
 			if (unit(unit() && minimizeProjection(plan, true))) {
@@ -12613,6 +13360,23 @@ int64_t SQLCompiler::getMaxGeneratedRows(const Plan &plan) {
 		return -1;
 	}
 	return static_cast<int64_t>(count);
+}
+
+bool SQLCompiler::isLegacyIndexScan(const Plan &plan) {
+	if (plan.hintInfo_ != NULL) {
+		if (plan.hintInfo_->hasHint(SQLHint::COST_BASED_INDEX_SCAN)) {
+			return false;
+		}
+		if (plan.hintInfo_->hasHint(SQLHint::NO_COST_BASED_INDEX_SCAN)) {
+			return true;
+		}
+	}
+
+	if (compileOption_->isCostBasedIndexScan()) {
+		return false;
+	}
+	return true;
+
 }
 
 bool SQLCompiler::isLegacyJoinReordering(const Plan &plan) {
@@ -18433,7 +19197,7 @@ uint32_t SQLCompiler::getNodeAggregationLevel(const PlanExprList &exprList) {
 }
 
 void SQLCompiler::assignReducedScanCostHints(Plan &plan) {
-	if (optimizationOption_->isSomeEnabled()) {
+	if (!isOptimizationDisabled(plan)) {
 		OptimizationContext cxt(*this, plan);
 
 		{
@@ -18794,7 +19558,7 @@ bool SQLCompiler::findIndexedPredicateSub(
 	}
 
 	if (expr.op_ == SQLType::EXPR_AND) {
-		bool uniqueLocal;
+		bool uniqueLocal = false;
 		bool *uniqueSub = (unique == NULL ? NULL : &uniqueLocal);
 		bool retUnique = false;
 
@@ -18946,6 +19710,11 @@ bool SQLCompiler::isDereferenceableNode(
 
 	if (multiInput && outputList != NULL &&
 			!isDereferenceableExprList(*outputList)) {
+		return false;
+	}
+
+	if (inNode.type_ == SQLType::EXEC_SORT && !inNode.predList_.empty() &&
+			inNode.predList_.front().op_ == SQLType::EXPR_PATTERN_OPTION) {
 		return false;
 	}
 
@@ -22739,7 +23508,8 @@ SQLCompiler::IntegralPartitioner::popGroupFull(ValueType amount) {
 SQLCompiler::OptimizationContext::OptimizationContext(
 		SQLCompiler &compiler, Plan &plan) :
 		compiler_(compiler),
-		plan_(plan) {
+		plan_(plan),
+		disabledAll_(compiler.isOptimizationDisabled(plan)) {
 }
 
 SQLCompiler& SQLCompiler::OptimizationContext::getCompiler() {
@@ -22748,6 +23518,15 @@ SQLCompiler& SQLCompiler::OptimizationContext::getCompiler() {
 
 SQLCompiler::Plan& SQLCompiler::OptimizationContext::getPlan() {
 	return plan_;
+}
+
+bool SQLCompiler::OptimizationContext::isDisabledAll() {
+	return disabledAll_;
+}
+
+bool SQLCompiler::OptimizationContext::isUnitEnabled(
+		OptimizationUnitType type) {
+	return compiler_.isOptimizationUnitEnabled(type, disabledAll_);
 }
 
 const util::NameCoderEntry<SQLCompiler::OptimizationUnitType>
@@ -22788,7 +23567,7 @@ bool SQLCompiler::OptimizationUnit::operator()() {
 
 	compiler.checkOptimizationUnitSupport(type_);
 
-	if (!compiler.isOptimizationUnitEnabled(type_)) {
+	if (!compiler.isOptimizationUnitEnabled(type_, cxt_.isDisabledAll())) {
 		return false;
 	}
 
@@ -22802,7 +23581,7 @@ bool SQLCompiler::OptimizationUnit::operator()() {
 bool SQLCompiler::OptimizationUnit::operator()(bool optimized) {
 	SQLCompiler &compiler = cxt_.getCompiler();
 
-	if (!compiler.isOptimizationUnitEnabled(type_)) {
+	if (!compiler.isOptimizationUnitEnabled(type_, cxt_.isDisabledAll())) {
 		return false;
 	}
 
@@ -22892,6 +23671,7 @@ void SQLCompiler::OptimizationOption::setFlag(
 const SQLCompiler::CompileOption SQLCompiler::CompileOption::EMPTY_OPTION;
 
 SQLCompiler::CompileOption::CompileOption(const CompilerSource *src) :
+		costBasedIndexScan_(false),
 		costBasedJoin_(false),
 		costBasedJoinDriving_(false),
 		indexStatsRequester_(NULL),
@@ -22920,6 +23700,14 @@ void SQLCompiler::CompileOption::setPlanningVersion(
 
 const SQLPlanningVersion& SQLCompiler::CompileOption::getPlanningVersion() const {
 	return planningVersion_;
+}
+
+void SQLCompiler::CompileOption::setCostBasedIndexScan(bool value) {
+	costBasedIndexScan_ = value;
+}
+
+bool SQLCompiler::CompileOption::isCostBasedIndexScan() const {
+	return costBasedIndexScan_;
 }
 
 void SQLCompiler::CompileOption::setCostBasedJoin(bool value) {
@@ -24012,6 +24800,8 @@ SQLHint::Coder::NameTable::NameTable() : entryEnd_(entryList_) {
 	SQL_HINT_CODER_NAME_TABLE_ADD(NO_INDEX_JOIN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(LEADING);
 	SQL_HINT_CODER_NAME_TABLE_ADD(LEGACY_PLAN);
+	SQL_HINT_CODER_NAME_TABLE_ADD(COST_BASED_INDEX_SCAN);
+	SQL_HINT_CODER_NAME_TABLE_ADD(NO_COST_BASED_INDEX_SCAN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(COST_BASED_JOIN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(NO_COST_BASED_JOIN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(COST_BASED_JOIN_DRIVING);
@@ -24276,6 +25066,16 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 			}
 		}
 		break;
+	case SQLHint::COST_BASED_INDEX_SCAN:
+		if (!checkArgCount(hintExpr, 0, false)) {
+			return false;
+		}
+		break;
+	case SQLHint::NO_COST_BASED_INDEX_SCAN:
+		if (!checkArgCount(hintExpr, 0, false)) {
+			return false;
+		}
+		break;
 	case SQLHint::COST_BASED_JOIN:
 		if (!checkArgCount(hintExpr, 0, false)) {
 			return false;
@@ -24353,6 +25153,8 @@ void SQLHintInfo::makeHintMap(const SyntaxTree::ExprList *hintList) {
 						case SQLHint::DISTRIBUTED_POLICY:
 						case SQLHint::TASK_ASSIGNMENT:
 						case SQLHint::LEGACY_PLAN:
+						case SQLHint::COST_BASED_INDEX_SCAN:
+						case SQLHint::NO_COST_BASED_INDEX_SCAN:
 						case SQLHint::COST_BASED_JOIN:
 						case SQLHint::NO_COST_BASED_JOIN:
 						case SQLHint::COST_BASED_JOIN_DRIVING:
@@ -24409,6 +25211,9 @@ void SQLHintInfo::makeHintMap(const SyntaxTree::ExprList *hintList) {
 				++hintMapItr;
 			}
 		}
+		checkExclusiveHints(
+				SQLHint::COST_BASED_INDEX_SCAN,
+				SQLHint::NO_COST_BASED_INDEX_SCAN);
 		checkExclusiveHints(
 				SQLHint::COST_BASED_JOIN, SQLHint::NO_COST_BASED_JOIN);
 		checkExclusiveHints(

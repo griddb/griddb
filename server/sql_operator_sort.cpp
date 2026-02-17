@@ -18,6 +18,7 @@
 #include "sql_operator_sort.h"
 #include "sql_operator_utils.h"
 
+
 const SQLOps::OpRegistrar
 SQLSortOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -30,6 +31,7 @@ void SQLSortOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_WINDOW_RANK_PARTITION, WindowRankPartition>();
 	add<SQLOpTypes::OP_WINDOW_FRAME_PARTITION, WindowFramePartition>();
 	add<SQLOpTypes::OP_WINDOW_MERGE, WindowMerge>();
+	add<SQLOpTypes::OP_WINDOW_MATCH, WindowMatch>();
 
 	addProjection<SQLOpTypes::PROJ_PIPE_FINISH, NonExecutableProjection>();
 	addProjection<SQLOpTypes::PROJ_MULTI_STAGE, NonExecutableProjection>();
@@ -1831,12 +1833,17 @@ SQLSortOps::SortContext::getDigester(bool primary) {
 
 
 void SQLSortOps::Window::compile(OpContext &cxt) const {
+	OpCode srcCode = getCode();
+
+	if (WindowMatch::tryMakeWindowSubPlan(cxt, srcCode)) {
+		return;
+	}
+
 	OpPlan &plan = cxt.getPlan();
 
 	util::StackAllocator &alloc = cxt.getAllocator();
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
-	OpCode srcCode = getCode();
 
 	const SQLValues::CompColumnList *keyList = srcCode.findKeyColumnList();
 	SQLOpUtils::ProjectionPair projections =
@@ -4304,4 +4311,3546 @@ SQLSortOps::WindowMerge::MergeContext::MergeContext() :
 		relativePositionDirection_(-1),
 		relativePositionAmount_(0),
 		positioningReaderProgress_(-1) {
+}
+
+
+void SQLSortOps::WindowMatch::compile(OpContext &cxt) const {
+	cxt.setAllInputSourceType(SQLExprs::ExprCode::INPUT_READER_MULTI);
+	cxt.setReaderRandomAccess(0);
+	Operator::compile(cxt);
+}
+
+void SQLSortOps::WindowMatch::execute(OpContext &cxt) const {
+	MatchContext &matchCxt = prepareMatchContext(cxt);
+
+	TupleListReader *predReader;
+	TupleListReader *keyReader;
+	if (!preparePredicateReaders(cxt, matchCxt, predReader, keyReader)) {
+		return;
+	}
+
+	for (;;) {
+		const bool partTail =
+				isPartitionTail(matchCxt, *predReader, *keyReader);
+
+		if (!matchRow(cxt, matchCxt, partTail)) {
+			return;
+		}
+
+		if (!projectMatchedRows(cxt, matchCxt)) {
+			return;
+		}
+
+		if (!nextPrediateRow(
+				cxt, matchCxt, *predReader, *keyReader, partTail)) {
+			break;
+		}
+	}
+}
+
+bool SQLSortOps::WindowMatch::tryMakeWindowSubPlan(
+		OpContext &cxt, const OpCode &code) {
+	if (!MicroCompiler::isAcceptableWindowPlan(code)) {
+		return false;
+	}
+
+	MicroCompiler compiler(cxt.getAllocator());
+	compiler.makeWindowSubPlan(cxt, code);
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::matchRow(
+		OpContext &cxt, MatchContext &matchCxt, bool partTail) {
+	VariableTable &table = matchCxt.variableTable_;
+	ColumnNavigator &navigator = matchCxt.navigator_;
+
+	if (partTail) {
+		table.setPartitionTail();
+	}
+
+	const VariablePredicateInfo *predInfo;
+	while (table.findMatchingVariable(predInfo)) {
+		if (!navigator.navigate(cxt, table)) {
+			return false;
+		}
+
+		const TupleValue &value = predInfo->expr_->eval(cxt.getExprContext());
+		navigator.clear();
+
+		const bool matched = (
+				!SQLValues::ValueUtils::isNull(value) &&
+				SQLValues::ValueUtils::toBool(value));
+		table.updateMatchingVariable(matched);
+
+		checkMemoryLimit(cxt, matchCxt);
+	}
+
+	checkMemoryLimit(cxt, matchCxt);
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::projectMatchedRows(
+		OpContext &cxt, MatchContext &matchCxt) {
+	VariableTable &table = matchCxt.variableTable_;
+	ColumnNavigator &navigator = matchCxt.navigator_;
+	const bool forAllRows = matchCxt.allRowsPerMatch_;
+
+	NavigationType type;
+	bool matchTail;
+	while (table.prepareProjection(forAllRows, type, matchTail)) {
+		const Projection *proj = matchCxt.findProjectionAt(type);
+		if (proj != NULL) {
+			if (!navigator.navigate(cxt, table)) {
+				return false;
+			}
+
+			proj->project(cxt);
+			navigator.clear();
+		}
+
+		if (matchTail) {
+			cxt.getExprContext().initializeAggregationValues();
+		}
+	}
+
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::preparePredicateReaders(
+		OpContext &cxt, MatchContext &matchCxt, TupleListReader *&predReader,
+		TupleListReader *&keyReader) {
+	predReader = &cxt.getReader(0, IN_PREDICATE);
+	keyReader = &cxt.getReader(0, IN_KEY);
+
+	if (!predReader->exists()) {
+		return false;
+	}
+
+	if (!matchCxt.keyReaderStarted_) {
+		matchCxt.navReaderSet_.setBaseReader(cxt, *predReader);
+		keyReader->next();
+		matchCxt.keyReaderStarted_ = true;
+	}
+
+	if (!keyReader->exists() && !cxt.isAllInputCompleted()) {
+		return false;
+	}
+
+	*cxt.getActiveReaderRef() = predReader;
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::nextPrediateRow(
+		OpContext &cxt, MatchContext &matchCxt, TupleListReader &predReader,
+		TupleListReader &keyReader, bool partTail) {
+	predReader.next();
+
+	if (!predReader.exists()) {
+		return false;
+	}
+
+	keyReader.next();
+
+	if (partTail) {
+		matchCxt.navReaderSet_.clearPositions(cxt, predReader);
+		matchCxt.predPos_ = 0;
+	}
+	else {
+		uint64_t effectiveStartPos;
+		if (matchCxt.variableTable_.resolveMatch(effectiveStartPos)) {
+			matchCxt.navReaderSet_.invalidatePrevPositionRange(
+					cxt, effectiveStartPos);
+		}
+		else {
+			matchCxt.navReaderSet_.prepareNextPositions();
+		}
+		matchCxt.predPos_++;
+	}
+
+	matchCxt.variableTable_.nextMatchingPosition(matchCxt.predPos_);
+
+	if (!keyReader.exists() && !cxt.isAllInputCompleted()) {
+		return false;
+	}
+
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::isPartitionTail(
+		MatchContext &matchCxt, TupleListReader &predReader,
+		TupleListReader &keyReader) {
+	if (!keyReader.exists()) {
+		return true;
+	}
+
+	return (matchCxt.partEq_.get() != NULL &&
+			!(*matchCxt.partEq_)(
+					SQLValues::TupleListReaderSource(predReader),
+					SQLValues::TupleListReaderSource(keyReader)));
+}
+
+void SQLSortOps::WindowMatch::checkMemoryLimit(
+		OpContext &cxt, MatchContext &matchCxt) {
+	SQLValues::VarAllocator &varAlloc = cxt.getValueContext().getVarAllocator();
+	const size_t usage =
+			(varAlloc.getTotalElementSize() - varAlloc.getFreeElementSize());
+	const size_t limit = matchCxt.memoryLimit_;
+	if (usage > limit) {
+		uint64_t searchingRowCount;
+		uint64_t candidateCount;
+		matchCxt.variableTable_.getStats(searchingRowCount, candidateCount);
+
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_PATTERN_MATCH_LIMIT_EXCEEDED,
+				"Pattern match memory limit exceeded ("
+				"usageBytes=" << usage << ", "
+				"limitBytes=" << limit << ", "
+				"searchingRowCount=" << searchingRowCount << ", "
+				"candidateCount=" << candidateCount << ")");
+	}
+}
+
+SQLSortOps::WindowMatch::MatchContext&
+SQLSortOps::WindowMatch::prepareMatchContext(OpContext &cxt) const {
+	if (cxt.getResource(0).isEmpty()) {
+		cxt.getResource(0) = ALLOC_UNIQUE(
+				cxt.getAllocator(), MatchContext, cxt, getCode());
+	}
+
+	MatchContext &matchCxt = cxt.getResource(0).resolveAs<MatchContext>();
+
+	cxt.getExprContext().setWindowState(
+			&matchCxt.variableTable_.getWindowState());
+
+	return matchCxt;
+}
+
+
+SQLSortOps::WindowMatch::MicroCompiler::MicroCompiler(
+		util::StackAllocator &alloc) :
+		alloc_(alloc) {
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isAcceptableWindowPlan(
+		const OpCode &code) {
+	const SQLExprs::Expression *pred = code.getFilterPredicate();
+	return (findPatternOptionExpr(pred) != NULL);
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::makeWindowSubPlan(
+		OpContext &cxt, const OpCode &code) {
+
+	OpPlan &plan = cxt.getPlan();
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	assert(isAcceptableWindowPlan(code));
+
+	const SQLExprs::Expression &basePred =
+			resolvePatternOptionExpr(code.getFilterPredicate());
+	const NavigationProjectionRef &baseProj = makeBaseProjection(builder, code);
+
+	OpCode subCode;
+	subCode.setKeyColumnList(code.findKeyColumnList());
+	subCode.setFilterPredicate(&basePred);
+	subCode.setPipeProjection(&makeSubPlanProjection(
+			builder, baseProj, basePred, cxt.getInputColumnList(0)));
+
+	OpNode &node = plan.createNode(SQLOpTypes::OP_WINDOW_MATCH);
+	node.setCode(subCode);
+	node.addInput(plan.getParentInput(0));
+	plan.linkToAllParentOutput(node);
+}
+
+const SQLExprs::Expression&
+SQLSortOps::WindowMatch::MicroCompiler::predicateToPatternExpr(
+		const SQLExprs::Expression *pred) {
+
+	const SQLExprs::Expression *patternExpr;
+	const SQLExprs::Expression *varListExpr;
+	const SQLExprs::Expression *modeExpr;
+	optionToElementExprs(
+			resolvePatternOptionExpr(pred), patternExpr, varListExpr, modeExpr);
+
+	return *patternExpr;
+}
+
+SQLSortOps::WindowMatch::VariablePredicateMap
+SQLSortOps::WindowMatch::MicroCompiler::makeVariablePredicateMap(
+		const SQLExprs::Expression *pred, const Projection *proj) {
+
+	VariablePredicateMap map(alloc_);
+
+	const SQLExprs::Expression &listExpr = predicateToVariableListExpr(pred);
+
+	{
+		int64_t varId = 0;
+		for (SQLExprs::Expression::Iterator it(listExpr); it.exists(); it.next()) {
+			VariablePredicateInfo &info = map.insert(std::make_pair(
+					varId, VariablePredicateInfo())).first->second;
+			variableToElementExprs(it.get(), &info.name_);
+
+			varId++;
+		}
+	}
+
+	const Projection &refPred = resolveMultiStageSubSubElement(proj, 0, 1, 1);
+	{
+		int64_t varId = -1;
+		for (SQLExprs::Expression::Iterator it(refPred); it.exists(); it.next()) {
+			VariablePredicateInfo &info = map.insert(std::make_pair(
+					varId, VariablePredicateInfo())).first->second;
+			info.expr_ = &it.get();
+			varId++;
+		}
+	}
+
+	return map;
+}
+
+SQLSortOps::WindowMatch::NavigationMap
+SQLSortOps::WindowMatch::MicroCompiler::makeNavigationMap(
+		const SQLExprs::Expression *pred, const Projection *proj) {
+	NavigationMap map(alloc_);
+
+	uint32_t ordinal = 0;
+	NavigationKey key;
+	NavigationProjectionRef cur;
+	NavigationProjectionRef next = firstNavigationProjections(proj);
+
+	while (nextNavigationProjections(ordinal, key, cur, next)) {
+		SQLExprs::Expression::Iterator descIt(*cur.first);
+		SQLExprs::Expression::Iterator assignIt(*cur.second.first);
+		SQLExprs::Expression::Iterator emptyIt(*cur.second.second);
+
+		uint32_t navIndex = 0;
+		while (descIt.exists() && assignIt.exists() && emptyIt.exists()) {
+			if (descIt.get().getCode().getType() != SQLType::EXPR_CONSTANT) {
+				const NavigationInfo &info = resolveNavigationInfo(
+						descIt.get(), assignIt.get(), emptyIt.get(), navIndex,
+						key.first);
+				map.insert(std::make_pair(key, info));
+			}
+
+			descIt.next();
+			assignIt.next();
+			emptyIt.next();
+			navIndex++;
+		}
+		ordinal++;
+	}
+
+	setUpNavigationMapForClassifier(
+			resolvePatternOptionExpr(pred), getNavigableProjections(proj), map);
+	return map;
+}
+
+SQLSortOps::WindowMatch::NavigationProjectionRef
+SQLSortOps::WindowMatch::MicroCompiler::getNavigableProjections(
+		const Projection *proj) {
+
+	const Projection &pipeProj = resolveMultiStageSubSubElement(proj, 0, 1, 0);
+
+	const Projection *pipeOnceProj = &resolveMultiStageElement(&pipeProj, 0);
+	const Projection *pipeEachProj = &resolveMultiStageElement(&pipeProj, 1);
+	const Projection &finishProj = resolveMultiStageElement(proj, 1);
+
+	pipeOnceProj = filterEmptyProjection(pipeOnceProj);
+	pipeEachProj = filterEmptyProjection(pipeEachProj);
+
+	return makeProjectionRefElements(pipeOnceProj, pipeEachProj, &finishProj);
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isAllRowsPerMatch(
+		const SQLExprs::Expression *pred) {
+
+	const SQLExprs::Expression *patternExpr;
+	const SQLExprs::Expression *varListExpr;
+	const SQLExprs::Expression *modeExpr;
+	optionToElementExprs(
+			resolvePatternOptionExpr(pred), patternExpr, varListExpr, modeExpr);
+
+	const int64_t mode = modeExpr->getCode().getValue().get<int64_t>();
+	return (mode & static_cast<int64_t>(
+			SyntaxTree::PATERN_MATCH_ONE_ROW_PER_MATCH)) == 0;
+}
+
+uint32_t SQLSortOps::WindowMatch::MicroCompiler::getNavigationReaderCount(
+		OpContext &cxt, const OpCode &code) {
+	const uint64_t memLimit = getPatternMatchMemoryLimit(code);
+	const uint32_t blockSize =
+			cxt.getReader(0).getTupleList().getInfo().blockSize_;
+
+	const uint64_t countLimit = 1024;
+	return static_cast<uint32_t>(std::min<uint64_t>(
+			std::max<uint64_t>(memLimit, 0) / (blockSize * 2), countLimit));
+}
+
+uint64_t SQLSortOps::WindowMatch::MicroCompiler::getPatternMatchMemoryLimit(
+		const OpCode &code) {
+	const OpConfig *config = code.getConfig();
+
+	const int64_t memLimit = OpConfig::resolve(
+			SQLOpTypes::CONF_PATTERN_MATCH_MEMORY_LIMIT, config);
+	return static_cast<uint64_t>(std::max<int64_t>(memLimit, 0));
+}
+
+const SQLOps::Projection*
+SQLSortOps::WindowMatch::MicroCompiler::getProjectionElement(
+		const NavigationProjectionRef &base, size_t ordinal) {
+	assert(ordinal < 3);
+	return (ordinal == 0 ? base.first :
+			(ordinal == 1 ? base.second.first : base.second.second));
+}
+
+const SQLOps::Projection*&
+SQLSortOps::WindowMatch::MicroCompiler::getProjectionElement(
+		NavigationProjectionRef &base, size_t ordinal) {
+	assert(ordinal < 3);
+	return (ordinal == 0 ? base.first :
+			(ordinal == 1 ? base.second.first : base.second.second));
+}
+
+SQLOps::Projection*&
+SQLSortOps::WindowMatch::MicroCompiler::getProjectionElement(
+		NavigationProjection &base, size_t ordinal) {
+	assert(ordinal < 3);
+	return (ordinal == 0 ? base.first :
+			(ordinal == 1 ? base.second.first : base.second.second));
+}
+
+SQLSortOps::WindowMatch::NavigationProjectionRef
+SQLSortOps::WindowMatch::MicroCompiler::makeBaseProjection(
+		OpCodeBuilder &builder, const OpCode &code) {
+	OpCode groupedCode = code;
+	groupedCode.setPipeProjection(
+			&toGroupedBaseProjection(builder, *code.getPipeProjection()));
+
+	for (bool extra = false;; extra = true) {
+		OpCode subCode = groupedCode;
+
+		if (extra) {
+			Projection &proj =
+					builder.rewriteProjection(*subCode.getPipeProjection());
+			setUpBaseProjectionExtra(builder, proj, true, true);
+			subCode.setPipeProjection(&proj);
+		}
+
+		const SQLOpUtils::ProjectionPair &projPair =
+				builder.arrangeProjections(subCode, false, true, NULL);
+
+		if (projPair.second == NULL) {
+			if (extra) {
+				assert(false);
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+			}
+			continue;
+		}
+
+		if (extra) {
+			setUpBaseProjectionExtra(builder, *projPair.first, false, true);
+			setUpBaseProjectionExtra(builder, *projPair.second, false, false);
+		}
+
+		const SQLOpUtils::ProjectionPair &pulledUp =
+				pullUpBaseProjections(builder, projPair);
+
+		const Projection &splittedOnce =
+				splitBasePipeProjection(builder, *pulledUp.first, true);
+		const Projection &splittedEach =
+				splitBasePipeProjection(builder, *pulledUp.first, false);
+
+		return makeProjectionRefElements(
+				&splittedOnce, &splittedEach, pulledUp.second);
+	}
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::setUpBaseProjectionExtra(
+		OpCodeBuilder &builder, Projection &proj, bool pre, bool forPipe) {
+
+	SQLExprs::ExprFactoryContext &factoryCxt =
+			builder.getExprFactoryContext();
+
+	if (pre) {
+		SQLExprs::Expression::ModIterator it(proj);
+
+		SQLExprs::ExprCode code;
+		code.setType(SQLType::AGG_COUNT_ALL);
+		code.setColumnType(TupleTypes::TYPE_LONG);
+
+		for (; it.exists(); it.next()) {
+		}
+		it.append(factoryCxt.getFactory().create(factoryCxt, code));
+	}
+	else if (forPipe) {
+		assert(proj.getChildCount() == 1);
+		{
+			SQLExprs::Expression::ModIterator it(proj);
+			while (it.exists()) {
+				it.remove();
+			}
+		}
+		arrangeForEmptyProjection(factoryCxt, proj);
+	}
+	else {
+		const size_t count = proj.getChildCount();
+
+		SQLExprs::Expression::ModIterator it(proj);
+		for (size_t i = 1;; i++) {
+			if (i >= count) {
+				it.remove();
+				break;
+			}
+			it.next();
+		}
+		assert(proj.getChildCount() == count - 1);
+	}
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::toGroupedBaseProjection(
+		OpCodeBuilder &builder, const Projection &src) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+	Projection &dest = builder.rewriteProjection(src);
+	arrangeForGroupedBaseExpr(factoryCxt, dest);
+	return dest;
+}
+
+SQLOpUtils::ProjectionPair
+SQLSortOps::WindowMatch::MicroCompiler::pullUpBaseProjections(
+		OpCodeBuilder &builder, const SQLOpUtils::ProjectionPair &src) {
+	BaseExprMap map(alloc_);
+	makePullUpTargetMap(*src.first, map);
+
+	const SQLOpUtils::ProjectionPair dest(
+			&builder.rewriteProjection(*src.first),
+			&builder.rewriteProjection(*src.second));
+	arrangeForPulledUpBaseExpr(builder, *dest.first, true, map);
+	arrangeForPulledUpBaseExpr(builder, *dest.second, false, map);
+	return dest;
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::splitBasePipeProjection(
+		OpCodeBuilder &builder, const Projection &src, bool once) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+	Projection &dest = builder.rewriteProjection(src);
+	arrangeForSplittedBaseExpr(dest, once);
+	arrangeForEmptyProjection(factoryCxt, dest);
+	return dest;
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::arrangeForGroupedBaseExpr(
+		SQLExprs::ExprFactoryContext &factoryCxt, SQLExprs::Expression &expr) {
+	for (SQLExprs::Expression::ModIterator it(expr); it.exists(); it.next()) {
+		const SQLExprs::ExprType type = it.get().getCode().getType();
+		if (SQLExprs::ExprTypeUtils::isAggregation(type)) {
+			continue;
+		}
+
+		if (isNavigationColumn(type) || type == SQLType::EXPR_ID) {
+			SQLExprs::Expression &navExpr = it.get();
+			it.remove();
+
+			SQLExprs::ExprCode code;
+			code.setType(SQLType::AGG_LAST);
+			code.setColumnType(navExpr.getCode().getColumnType());
+			SQLExprs::Expression &sub =
+					factoryCxt.getFactory().create(factoryCxt, code);
+
+			SQLExprs::Expression::ModIterator subIt(sub);
+			subIt.append(navExpr);
+
+			it.insert(sub);
+		}
+		else {
+			arrangeForGroupedBaseExpr(factoryCxt, it.get());
+		}
+	}
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::makePullUpTargetMap(
+		const SQLExprs::Expression &expr, BaseExprMap &map) {
+	for (SQLExprs::Expression::Iterator it(expr); it.exists(); it.next()) {
+		const SQLExprs::ExprType type = it.get().getCode().getType();
+
+		if (type != SQLType::AGG_LAST) {
+			makePullUpTargetMap(it.get(), map);
+			continue;
+		}
+
+		const SQLExprs::Expression *sub = it.get().findChild();
+		if (isEachNavigationExpr(sub) || type == SQLType::EXPR_ID) {
+			map.insert(std::make_pair(
+					it.get().getCode().getAggregationIndex(), sub));
+		}
+	}
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::arrangeForPulledUpBaseExpr(
+		OpCodeBuilder &builder, SQLExprs::Expression &expr, bool forPipe,
+		const BaseExprMap &map) {
+	for (SQLExprs::Expression::ModIterator it(expr); it.exists();) {
+		const SQLExprs::ExprType type = it.get().getCode().getType();
+
+		if (type != (forPipe ? SQLType::AGG_LAST : SQLType::AGG_FIRST)) {
+			if (!forPipe) {
+				arrangeForPulledUpBaseExpr(builder, it.get(), forPipe, map);
+			}
+			it.next();
+			continue;
+		}
+
+		BaseExprMap::const_iterator mapIt =
+				map.find(it.get().getCode().getAggregationIndex());
+		if (mapIt != map.end()) {
+			it.remove();
+			if (forPipe) {
+				if (!it.exists()) {
+					break;
+				}
+			}
+			else {
+				SQLExprs::ExprFactoryContext &factoryCxt =
+						builder.getExprFactoryContext();
+				SQLExprs::Expression &pulledUp =
+						builder.getExprRewriter().rewrite(
+								factoryCxt, *mapIt->second, NULL);
+				it.insert(pulledUp);
+				it.next();
+			}
+		}
+		else {
+			it.next();
+		}
+	}
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::arrangeForSplittedBaseExpr(
+		SQLExprs::Expression &expr, bool once) {
+	for (SQLExprs::Expression::ModIterator it(expr); it.exists();) {
+		const bool forOnceExpr = isPipeOnceBaseExpr(it.get());
+		if (!once != !forOnceExpr) {
+			it.remove();
+			if (!it.exists()) {
+				break;
+			}
+		}
+		else {
+			it.next();
+		}
+	}
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isEachNavigationExpr(
+		const SQLExprs::Expression *expr) {
+	if (expr == NULL) {
+		return false;
+	}
+
+	const SQLExprs::ExprType type = expr->getCode().getType();
+	return (isNavigationColumn(type) && !isNavigationByMatch(type));
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isPipeOnceBaseExpr(
+		const SQLExprs::Expression &expr) {
+	const SQLExprs::ExprType type = expr.getCode().getType();
+	if (isNavigationByMatch(type)) {
+		return true;
+	}
+
+	for (SQLExprs::Expression::Iterator it(expr); it.exists(); it.next()) {
+		if (isPipeOnceBaseExpr(it.get())) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::makeSubPlanProjection(
+		OpCodeBuilder &builder, const NavigationProjectionRef &baseProj,
+		const SQLExprs::Expression &basePred,
+		const SQLValues::TupleColumnList &inColumnList) {
+
+	const bool forPipe = false;
+	const util::Vector<TupleColumnType> *aggrTypeList;
+
+	const PlanNavigationMap &navMap = makePlanNavigationMap(
+			baseProj, basePred, inColumnList, aggrTypeList);
+	const NavigationProjectionRef &navBaseProj =
+			makeNavigableBaseProjection(builder, baseProj, aggrTypeList);
+
+	Projection &totalPipeProj = makeTotalPipeProjection(
+			builder, navMap, navBaseProj, basePred);
+	Projection &finishPefProj = makeRefProjection(
+			builder, navMap, navBaseProj, forPipe, false);
+
+	return builder.createMultiStageProjection(totalPipeProj, finishPefProj);
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::makeTotalPipeProjection(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const NavigationProjectionRef &baseProj,
+		const SQLExprs::Expression &basePred) {
+
+	const bool forPipe = true;
+	const VariableExprMap &varMap = makeVariableExprMap(builder, basePred);
+
+	Projection &pipeOnceRefProj = makeRefProjection(
+			builder, navMap, baseProj, forPipe, true);
+	Projection &pipeEachRefProj = makeRefProjection(
+			builder, navMap, baseProj, forPipe, false);
+
+	Projection &pipeRefProj = builder.createMultiStageProjection(
+			pipeOnceRefProj, pipeEachRefProj);
+	Projection &matchingRefProj = makeMatchingProjection(
+			builder, navMap, baseProj, varMap);
+
+	Projection &navProj = makeNavigationProjection(
+			builder, navMap, baseProj, varMap);
+	Projection &refProj =
+			builder.createMultiStageProjection(pipeRefProj, matchingRefProj);
+
+	return builder.createMultiStageProjection(navProj, refProj);
+}
+
+SQLOps::Projection& SQLSortOps::WindowMatch::MicroCompiler::makeRefProjection(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const NavigationProjectionRef &baseProj, bool forPipe, bool once) {
+
+	Projection &proj = builder.rewriteProjection(*getProjectionElement(
+			baseProj, (forPipe ? (once ? 0 : 1) : 2)));
+	const NavigationKey navKey(
+			(forPipe ? (once ?
+					NAV_PROJECTION_PIPE_ONCE : NAV_PROJECTION_PIPE_EACH) :
+					NAV_PROJECTION_FINISH), -1);
+	setUpArrangedNavigationExpr(builder, navMap, navKey, proj);
+
+	return proj;
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::makeMatchingProjection(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const NavigationProjectionRef &baseProj,
+		const VariableExprMap &varMap) {
+
+	SQLExprs::ExprFactoryContext &factoryCxt =
+			builder.getExprFactoryContext();
+
+	const SQLOps::ProjectionCode &aggrFinishCode =
+			getProjectionElement(baseProj, 2)->getProjectionCode();
+	Projection &proj = builder.createProjection(
+			SQLOpTypes::PROJ_AGGR_PIPE, aggrFinishCode);
+
+	SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+	factoryCxt.setAggregationPhase(true, SQLType::AGG_PHASE_ALL_PIPE);
+
+	SQLExprs::Expression::ModIterator projIt(proj);
+	for (VariableExprMap::const_iterator it = varMap.begin();
+			it != varMap.end(); ++it) {
+		const SQLExprs::Expression *base = it->second;
+
+		SQLExprs::Expression &arranged =
+				builder.getExprRewriter().rewrite(factoryCxt, *base, NULL);
+
+		const NavigationKey navKey(NAV_MATCHING, it->first);
+		setUpArrangedNavigationExpr(builder, navMap, navKey, arranged);
+		projIt.append(arranged);
+	}
+
+	return proj;
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::makeNavigationProjection(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const NavigationProjectionRef &baseProj,
+		const VariableExprMap &varMap) {
+
+	const SQLOps::ProjectionCode baseProjCode =
+			getProjectionElement(baseProj, 1)->getProjectionCode();
+
+	Projection &originalProj = makeNavigationProjectionSub(
+			builder, navMap, baseProjCode, varMap, true, false);
+	Projection &assignProj = makeNavigationProjectionSub(
+			builder, navMap, baseProjCode, varMap, false, false);
+	Projection &emptyProj = makeNavigationProjectionSub(
+			builder, navMap, baseProjCode, varMap, false, true);
+
+	Projection &navigableProj =
+			builder.createMultiStageProjection(assignProj, emptyProj);
+	return builder.createMultiStageProjection(originalProj, navigableProj);
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::makeNavigationProjectionSub(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const SQLOps::ProjectionCode &baseProjCode,
+		const VariableExprMap &varMap, bool original, bool empty) {
+
+	Projection &pipeOnceProj = makeNavigationProjectionSubByKey(
+			builder, navMap, baseProjCode, original, empty,
+			NavigationKey(NAV_PROJECTION_PIPE_ONCE, -1));
+	Projection &pipeEachProj = makeNavigationProjectionSubByKey(
+			builder, navMap, baseProjCode, original, empty,
+			NavigationKey(NAV_PROJECTION_PIPE_EACH, -1));
+	Projection &finishProj = makeNavigationProjectionSubByKey(
+			builder, navMap, baseProjCode, original, empty,
+			NavigationKey(NAV_PROJECTION_FINISH, -1));
+
+	Projection &pipeProj =
+			builder.createMultiStageProjection(pipeOnceProj, pipeEachProj);
+	Projection &refProj =
+			builder.createMultiStageProjection(pipeProj, finishProj);
+
+	Projection *matchingProj = NULL;
+	for (VariableExprMap::const_iterator it = varMap.end();
+			it != varMap.begin();) {
+		const NavigationKey key(NAV_MATCHING, (--it)->first);
+		Projection *proj = &makeNavigationProjectionSubByKey(
+				builder, navMap, baseProjCode, original, empty, key);
+		if (matchingProj != NULL) {
+			proj = &builder.createMultiStageProjection(*proj, *matchingProj);
+		}
+		matchingProj = proj;
+	}
+
+	assert(matchingProj != NULL);
+	return builder.createMultiStageProjection(refProj, *matchingProj);
+}
+
+SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::makeNavigationProjectionSubByKey(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const SQLOps::ProjectionCode &baseProjCode, bool original,
+		bool empty, const NavigationKey &navKey) {
+
+	Projection &proj =
+			builder.createProjection(baseProjCode.getType(), baseProjCode);
+	SQLExprs::Expression::ModIterator projIt(proj);
+
+	SQLExprs::ExprFactoryContext &factoryCxt =
+			builder.getExprFactoryContext();
+
+	SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+	factoryCxt.setAggregationPhase(true, SQLType::AGG_PHASE_ALL_PIPE);
+
+	const PlanNavigationKey planKey(navKey, navigationColumnTopKey());
+	for (PlanNavigationMap::const_iterator it = navMap.lower_bound(planKey);
+			it != navMap.end() && it->first.first == navKey; ++it) {
+		const SQLExprs::Expression *baseExpr = it->second.first;
+		SQLExprs::Expression *expr;
+		if (original) {
+			expr = &builder.getExprRewriter().rewrite(
+					factoryCxt, *baseExpr, NULL);
+		}
+		else {
+			{
+				SQLExprs::ExprCode code;
+				code.setType(SQLType::AGG_LAST);
+				code.setColumnType(baseExpr->getCode().getColumnType());
+				code.setAttributes(
+						SQLExprs::ExprCode::ATTR_ASSIGNED |
+						SQLExprs::ExprCode::ATTR_AGGR_ARRANGED);
+				code.setAggregationIndex(it->second.second);
+				expr = &factoryCxt.getFactory().create(factoryCxt, code);
+			}
+
+			SQLExprs::Expression *subExpr;
+			if (empty) {
+				subExpr = &SQLExprs::ExprRewriter::createEmptyConstExpr(
+						factoryCxt, baseExpr->getCode().getColumnType());
+			}
+			else {
+				const SQLExprs::Expression &subBaseExpr =
+						baseExpr->child().next();
+				if (subBaseExpr.getCode().getType() != SQLType::EXPR_COLUMN) {
+					GS_THROW_USER_ERROR(
+							GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION, "");
+				}
+
+				subExpr = &builder.getExprRewriter().rewrite(
+						factoryCxt, subBaseExpr, NULL);
+			}
+
+			SQLExprs::Expression::ModIterator exprIt(*expr);
+			exprIt.append(*subExpr);
+		}
+		projIt.append(*expr);
+	}
+
+	arrangeForEmptyProjection(factoryCxt, proj);
+	return proj;
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::setUpArrangedNavigationExpr(
+		OpCodeBuilder &builder, const PlanNavigationMap &navMap,
+		const NavigationKey &navKey, SQLExprs::Expression &expr) {
+
+	SQLExprs::ExprFactoryContext &factoryCxt =
+			builder.getExprFactoryContext();
+
+	for (SQLExprs::Expression::ModIterator it(expr); it.exists(); it.next()) {
+		PlanNavigationColumnKey columnKey;
+		if (!findNagvigableColumnKey(it.get(), columnKey)) {
+			setUpArrangedNavigationExpr(builder, navMap, navKey, it.get());
+			continue;
+		}
+
+		PlanNavigationMap::const_iterator navIt =
+				navMap.find(PlanNavigationKey(navKey, columnKey));
+		if (navIt == navMap.end()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		uint32_t attributes = (
+				SQLExprs::ExprCode::ATTR_ASSIGNED |
+				SQLExprs::ExprCode::ATTR_AGGR_ARRANGED);
+		if (navKey.first != NAV_PROJECTION_FINISH) {
+			attributes |= SQLExprs::ExprCode::ATTR_AGGR_FINISH_ALWAYS;
+		}
+
+		SQLExprs::ExprCode code;
+		code.setType(SQLType::AGG_FIRST);
+		code.setColumnType(it.get().getCode().getColumnType());
+		code.setAttributes(attributes);
+		code.setAggregationIndex(navIt->second.second);
+
+		SQLExprs::Expression &subExpr =
+				factoryCxt.getFactory().create(factoryCxt, code);
+
+		it.remove();
+		it.insert(subExpr);
+	}
+}
+
+SQLSortOps::WindowMatch::VariableExprMap
+SQLSortOps::WindowMatch::MicroCompiler::makeVariableExprMap(
+		OpCodeBuilder &builder, const SQLExprs::Expression &basePred) {
+
+	SQLExprs::ExprFactoryContext &factoryCxt =
+			builder.getExprFactoryContext();
+
+	int64_t varId = -1;
+	VariableExprMap map(alloc_);
+	{
+		const SQLExprs::Expression &expr =
+				SQLExprs::ExprRewriter::createEmptyConstExpr(
+						factoryCxt, TupleTypes::TYPE_ANY);
+		map.insert(std::make_pair(varId, &expr));
+	}
+
+	const SQLExprs::Expression &varList =
+			predicateToVariableListExpr(&basePred);
+	for (SQLExprs::Expression::Iterator it(varList); it.exists(); it.next()) {
+		map.insert(std::make_pair(
+				++varId, &variableToElementExprs(it.get(), NULL)));
+	}
+
+	return map;
+}
+
+SQLSortOps::WindowMatch::PlanNavigationMap
+SQLSortOps::WindowMatch::MicroCompiler::makePlanNavigationMap(
+		const NavigationProjectionRef &baseProj,
+		const SQLExprs::Expression &basePred,
+		const SQLValues::TupleColumnList &inColumnList,
+		const util::Vector<TupleColumnType> *&aggrTypeList) {
+
+	const PlanNavigationExprMap navExprMap =
+			makePlanNavigationExprMap(baseProj, basePred);
+	const PlanTypedCountMap typeCounts =
+			makePlanNavigationTypeCounts(navExprMap, inColumnList);
+
+	const util::Vector<TupleColumnType> *baseAggrTypeList =
+			baseProj.first->getProjectionCode().getColumnTypeList();
+
+	aggrTypeList = ALLOC_NEW(alloc_) util::Vector<TupleColumnType>(
+			makeAggregationTypeList(*baseAggrTypeList, typeCounts));
+	return makePlanNavigationMapByCounts(
+			navExprMap, typeCounts, *baseAggrTypeList, inColumnList);
+}
+
+SQLSortOps::WindowMatch::PlanNavigationExprMap
+SQLSortOps::WindowMatch::MicroCompiler::makePlanNavigationExprMap(
+		const NavigationProjectionRef &baseProj,
+		const SQLExprs::Expression &basePred) {
+
+	PlanNavigationExprMap navExprMap(alloc_);
+	{
+		int64_t varId = 0;
+		const SQLExprs::Expression &varList =
+				predicateToVariableListExpr(&basePred);
+		for (SQLExprs::Expression::Iterator it(varList); it.exists(); it.next()) {
+			const SQLExprs::Expression &varPred =
+					variableToElementExprs(it.get(), NULL);
+			setUpPlanNavigationExprMap(
+					NavigationKey(NAV_MATCHING, varId), varPred, navExprMap);
+			varId++;
+		}
+	}
+
+	setUpPlanNavigationExprMap(
+			NavigationKey(NAV_PROJECTION_PIPE_ONCE, -1),
+			*getProjectionElement(baseProj, 0), navExprMap);
+	setUpPlanNavigationExprMap(
+			NavigationKey(NAV_PROJECTION_PIPE_EACH, -1),
+			*getProjectionElement(baseProj, 1), navExprMap);
+	setUpPlanNavigationExprMap(
+			NavigationKey(NAV_PROJECTION_FINISH, -1),
+			*getProjectionElement(baseProj, 2), navExprMap);
+
+	return navExprMap;
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::setUpPlanNavigationExprMap(
+		const NavigationKey &navKey, const SQLExprs::Expression &expr,
+		PlanNavigationExprMap &navExprMap) {
+
+	PlanNavigationColumnKey columnKey;
+	if (findNagvigableColumnKey(expr, columnKey)) {
+		navExprMap.insert(
+				std::make_pair(PlanNavigationKey(navKey, columnKey), &expr));
+		return;
+	}
+
+	for (SQLExprs::Expression::Iterator it(expr); it.exists(); it.next()) {
+		setUpPlanNavigationExprMap(navKey, it.get(), navExprMap);
+	}
+}
+
+SQLSortOps::WindowMatch::PlanTypedCountMap
+SQLSortOps::WindowMatch::MicroCompiler::makePlanNavigationTypeCounts(
+		const PlanNavigationExprMap &navExprMap,
+		const SQLValues::TupleColumnList &inColumnList) {
+
+	PlanTypedCountMap totalMap(alloc_);
+	PlanTypedCountMap subMap(alloc_);
+
+	PlanNavigationExprMap::const_iterator prevIt = navExprMap.end();
+	for (PlanNavigationExprMap::const_iterator it = navExprMap.begin();; ++it) {
+		if (it == navExprMap.end() || (prevIt != navExprMap.end() &&
+				it->first.first != prevIt->first.first)) {
+			for (PlanTypedCountMap::iterator subIt = subMap.begin();
+					subIt != subMap.end(); ++subIt) {
+				uint32_t &total = totalMap[subIt->first];
+				uint32_t &sub = subIt->second;
+
+				total = std::max<uint32_t>(total, sub);
+				sub = 0;
+			}
+			if (it == navExprMap.end()) {
+				break;
+			}
+		}
+
+		const TupleColumnType type =
+				getNavigationBaseColumnType(inColumnList, it->first);
+		subMap[type]++;
+		prevIt = it;
+	}
+
+	return totalMap;
+}
+
+SQLSortOps::WindowMatch::PlanNavigationMap
+SQLSortOps::WindowMatch::MicroCompiler::makePlanNavigationMapByCounts(
+		const PlanNavigationExprMap &navExprMap,
+		const PlanTypedCountMap &typeCounts,
+		const util::Vector<TupleColumnType> &baseAggrTypeList,
+		const SQLValues::TupleColumnList &inColumnList) {
+
+	PlanTypedCountMap offsetMap(alloc_);
+	uint32_t nextOffset = static_cast<uint32_t>(baseAggrTypeList.size());
+	for (PlanTypedCountMap::const_iterator it = typeCounts.begin();
+			it != typeCounts.end(); ++it) {
+		offsetMap.insert(std::make_pair(it->first, nextOffset));
+		nextOffset += it->second;
+	}
+
+	PlanNavigationMap navMap(alloc_);
+	PlanTypedCountMap indexMap(alloc_);
+
+	PlanNavigationExprMap::const_iterator prevIt = navExprMap.end();
+	for (PlanNavigationExprMap::const_iterator it = navExprMap.begin();
+			it != navExprMap.end(); ++it) {
+		if (prevIt == navExprMap.end() ||
+				it->first.first != prevIt->first.first) {
+			indexMap = offsetMap;
+		}
+
+		const TupleColumnType type =
+				getNavigationBaseColumnType(inColumnList, it->first);
+		uint32_t &navIndex = indexMap[type];
+
+		const PlanNavigationValue value(it->second, navIndex);
+		navMap.insert(std::make_pair(it->first, value));
+		navIndex++;
+		prevIt = it;
+	}
+
+	return navMap;
+}
+
+TupleColumnType
+SQLSortOps::WindowMatch::MicroCompiler::getNavigationBaseColumnType(
+		const SQLValues::TupleColumnList &inColumnList,
+		const PlanNavigationKey &key) {
+	const PlanNavigationColumnKey &columnKey = key.second;
+	const uint32_t column = columnKey.first.second;
+	if (column >= inColumnList.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return SQLValues::TypeUtils::toNonNullable(inColumnList[column].type_);
+}
+
+util::Vector<TupleColumnType>
+SQLSortOps::WindowMatch::MicroCompiler::makeAggregationTypeList(
+		const util::Vector<TupleColumnType> &baseAggrTypeList,
+		const PlanTypedCountMap &typeCounts) {
+
+	util::Vector<TupleColumnType> dest(alloc_);
+	dest = baseAggrTypeList;
+
+	for (PlanTypedCountMap::const_iterator it = typeCounts.begin();
+			it != typeCounts.end(); ++it) {
+		const TupleColumnType type =
+				SQLValues::TypeUtils::toNullable(it->first);
+		const size_t count = it->second;
+		dest.insert(dest.end(), count, type);
+	}
+
+	return dest;
+}
+
+SQLSortOps::WindowMatch::NavigationProjectionRef
+SQLSortOps::WindowMatch::MicroCompiler::makeNavigableBaseProjection(
+		OpCodeBuilder &builder, const NavigationProjectionRef &src,
+		const util::Vector<TupleColumnType> *aggrTypeList) {
+
+	NavigationProjection dest;
+	for (size_t i = 0; i < 3; i++) {
+		const Projection *srcProj = getProjectionElement(src, i);
+		Projection *&destProj = getProjectionElement(dest, i);
+
+		destProj = &builder.rewriteProjection(*srcProj);
+		destProj->getProjectionCode().setColumnTypeList(aggrTypeList);
+	}
+
+	return makeProjectionRefElements(
+			getProjectionElement(dest, 0),
+			getProjectionElement(dest, 1),
+			getProjectionElement(dest, 2));
+}
+
+SQLSortOps::WindowMatch::PlanNavigationColumnKey
+SQLSortOps::WindowMatch::MicroCompiler::navigationColumnTopKey() {
+	return PlanNavigationColumnKey(PlanColumnKey(-1, 0), SQLType::START_EXPR);
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::setUpNavigationMapForClassifier(
+		const SQLExprs::Expression &basePred,
+		const NavigationProjectionRef &navProjs, NavigationMap &navMap) {
+	if (!findClassifier(navProjs)) {
+		return;
+	}
+
+	const NavigationKey navKey(NAV_CLASSIFIER, -1);
+	const int64_t varCount = static_cast<int64_t>(
+			predicateToVariableListExpr(&basePred).getChildCount());
+	for (int64_t i = 0; i < varCount; i++) {
+		NavigationInfo info;
+		info.variableId_ = i;
+		navMap.insert(std::make_pair(navKey, info));
+	}
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::findClassifier(
+		const NavigationProjectionRef &navProjs) {
+	return (
+			findClassifierSub(getProjectionElement(navProjs, 0)) ||
+			findClassifierSub(getProjectionElement(navProjs, 1)) ||
+			findClassifierSub(getProjectionElement(navProjs, 2)));
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::findClassifierSub(
+		const SQLExprs::Expression *expr) {
+	if (expr == NULL) {
+		return false;
+	}
+
+	if (expr->getCode().getType() == SQLType::FUNC_CLASSIFIER) {
+		return true;
+	}
+
+	for (SQLExprs::Expression::Iterator it(*expr); it.exists(); it.next()) {
+		if (findClassifierSub(&it.get())) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+SQLSortOps::WindowMatch::NavigationInfo
+SQLSortOps::WindowMatch::MicroCompiler::resolveNavigationInfo(
+		const SQLExprs::Expression &descExpr,
+		const SQLExprs::Expression &assignExpr,
+		const SQLExprs::Expression &emptyExpr, uint32_t navIndex,
+		NavigationType type) {
+
+	PlanNavigationColumnKey columnKey;
+	if (!findNagvigableColumnKey(descExpr, columnKey)) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	NavigationInfo info;
+	info.navigationIndex_ = navIndex;
+	info.variableId_ = columnKey.first.first;
+	info.direction_ = getNavigationDirection(columnKey.second);
+	info.byMatch_ = isNavigationByMatch(columnKey.second);
+	info.assignmentExpr_ = &assignExpr;
+	info.emptyExpr_ = &emptyExpr;
+
+	if (type != NAV_PROJECTION_PIPE_EACH &&
+			info.variableId_ >= 0 && info.direction_ == 0 && !info.byMatch_) {
+		info.direction_ = 1;
+		info.byMatch_ = true;
+	}
+
+	return info;
+}
+
+SQLSortOps::WindowMatch::NavigationProjectionRef
+SQLSortOps::WindowMatch::MicroCompiler::firstNavigationProjections(
+		const Projection *proj) {
+
+	const Projection &base = resolveMultiStageSubElement(proj, 0, 0);
+
+	const Projection &desc = resolveMultiStageElement(&base, 0);
+	const Projection &nav = resolveMultiStageElement(&base, 1);
+
+	const Projection &assign = resolveMultiStageElement(&nav, 0);
+	const Projection &empty = resolveMultiStageElement(&nav, 1);
+
+	return NavigationProjectionRef(
+			&desc, SQLOpUtils::ProjectionRefPair(&assign, &empty));
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::nextNavigationProjections(
+		uint32_t ordinal, NavigationKey &key, NavigationProjectionRef &cur,
+		NavigationProjectionRef &next) {
+	const size_t navElemCount = 3;
+	const uint32_t matchingTopOrdinal = 3;
+
+	if (ordinal < matchingTopOrdinal) {
+		const NavigationType type = (ordinal <= 1 ?
+				(ordinal == 0 ?
+						NAV_PROJECTION_PIPE_ONCE : NAV_PROJECTION_PIPE_EACH) :
+				NAV_PROJECTION_FINISH);
+		key = NavigationKey(type, -1);
+
+		for (size_t i = 0; i < navElemCount; i++) {
+			const Projection *src = getProjectionElement(next, i);
+			const Projection *&dest = getProjectionElement(cur, i);
+
+			dest = (ordinal <= 1 ?
+					&resolveMultiStageSubSubElement(src, 0, 0, ordinal) :
+					&resolveMultiStageSubElement(src, 0, 1));
+			checkNavigationProjection(dest);
+		}
+	}
+	else {
+		const bool top = (ordinal <= matchingTopOrdinal);
+		const int64_t varId =
+				static_cast<int64_t>(ordinal - matchingTopOrdinal) - 1;
+		key = NavigationKey(NAV_MATCHING, varId);
+
+		cur = makeProjectionRefElements(
+				nextMatchingProjection(getProjectionElement(next, 0), top),
+				nextMatchingProjection(getProjectionElement(next, 1), top),
+				nextMatchingProjection(getProjectionElement(next, 2), top));
+
+		if (getProjectionElement(cur, 0) == NULL ||
+				getProjectionElement(cur, 1) == NULL ||
+				getProjectionElement(cur, 2) == NULL) {
+			cur = NavigationProjectionRef();
+			return false;
+		}
+	}
+	return true;
+}
+
+const SQLOps::Projection*
+SQLSortOps::WindowMatch::MicroCompiler::nextMatchingProjection(
+		const Projection *&next, bool top) {
+	const Projection *base = (top ? &resolveMultiStageElement(next, 1) : next);
+
+	const Projection *cur;
+	if (isMultiStageProjection(base)) {
+		cur = &resolveMultiStageElement(base, 0);
+		next = &resolveMultiStageElement(base, 1);
+		checkNavigationProjection(cur);
+	}
+	else {
+		cur = base;
+		next = NULL;
+	}
+	return cur;
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::checkNavigationProjection(
+		const Projection *proj) {
+	if (proj == NULL || proj->getProjectionCode().getType() !=
+			SQLOpTypes::PROJ_AGGR_PIPE) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+const SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::resolveMultiStageElement(
+		const Projection *proj, size_t ordinal) {
+
+	if (!isMultiStageProjection(proj) || ordinal >= proj->getChainCount()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return proj->chainAt(ordinal);
+}
+
+const SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::resolveMultiStageSubElement(
+		const Projection *proj, size_t ordinal1, size_t ordinal2) {
+	return resolveMultiStageElement(
+			&resolveMultiStageElement(proj, ordinal1), ordinal2);
+}
+
+const SQLOps::Projection&
+SQLSortOps::WindowMatch::MicroCompiler::resolveMultiStageSubSubElement(
+		const Projection *proj, size_t ordinal1, size_t ordinal2,
+		size_t ordinal3) {
+	return resolveMultiStageSubElement(
+			&resolveMultiStageElement(proj, ordinal1), ordinal2, ordinal3);
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isMultiStageProjection(
+		const Projection *proj) {
+	return (proj != NULL && proj->getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_MULTI_STAGE);
+}
+
+const SQLOps::Projection*
+SQLSortOps::WindowMatch::MicroCompiler::filterEmptyProjection(
+		const Projection *proj) {
+	if (proj == NULL || (
+			proj->getChildCount() <= 1 &&
+			proj->findChild() != NULL &&
+			proj->child().getCode().getType() == SQLType::EXPR_CONSTANT)) {
+		return NULL;
+	}
+
+	return proj;
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::arrangeForEmptyProjection(
+		SQLExprs::ExprFactoryContext &factoryCxt, Projection &proj) {
+	if (proj.findChild() == NULL) {
+		SQLExprs::Expression::ModIterator projIt(proj);
+		projIt.append(SQLExprs::ExprRewriter::createEmptyConstExpr(
+				factoryCxt, TupleTypes::TYPE_ANY));
+	}
+}
+
+SQLSortOps::WindowMatch::NavigationProjectionRef
+SQLSortOps::WindowMatch::MicroCompiler::makeProjectionRefElements(
+		const Projection *proj1, const Projection *proj2,
+		const Projection *proj3) {
+	return NavigationProjectionRef(
+			proj1, SQLOpUtils::ProjectionRefPair(proj2, proj3));
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::findNagvigableColumnKey(
+		const SQLExprs::Expression &expr,
+		PlanNavigationColumnKey &columnKey) {
+
+	columnKey = navigationColumnTopKey();
+
+	const SQLType::Id type = expr.getCode().getType();
+	if (!isNavigationColumn(type)) {
+		return false;
+	}
+
+	const SQLExprs::Expression &varIdExpr = expr.child();
+	const SQLExprs::Expression &columnExpr = varIdExpr.next();
+	if (columnExpr.getCode().getType() != SQLType::EXPR_COLUMN) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const int64_t refVarId = varIdExpr.getCode().getValue().get<int64_t>();
+	if (refVarId < -1) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const uint32_t column = columnExpr.getCode().getColumnPos();
+	columnKey = PlanNavigationColumnKey(PlanColumnKey(refVarId, column), type);
+
+	return true;
+}
+
+const SQLExprs::Expression&
+SQLSortOps::WindowMatch::MicroCompiler::predicateToVariableListExpr(
+		const SQLExprs::Expression *base) {
+
+	const SQLExprs::Expression *patternExpr;
+	const SQLExprs::Expression *varListExpr;
+	const SQLExprs::Expression *modeExpr;
+	optionToElementExprs(
+			resolvePatternOptionExpr(base),
+			patternExpr, varListExpr, modeExpr);
+
+	return *varListExpr;
+}
+
+const SQLExprs::Expression&
+SQLSortOps::WindowMatch::MicroCompiler::variableToElementExprs(
+		const SQLExprs::Expression &base, const TupleValue **name) {
+	if (base.getCode().getType() != SQLType::EXPR_PATTERN_VARIABLE_DEF) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION, "");
+	}
+
+	const SQLExprs::Expression &nameExpr = base.child();
+	const SQLExprs::Expression &predExpr = nameExpr.next();
+
+	if (name != NULL) {
+		*name = &nameExpr.getCode().getValue();
+	}
+	return predExpr;
+}
+
+void SQLSortOps::WindowMatch::MicroCompiler::optionToElementExprs(
+		const SQLExprs::Expression &base,
+		const SQLExprs::Expression *&patternExpr,
+		const SQLExprs::Expression *&varListExpr,
+		const SQLExprs::Expression *&modeExpr) {
+	if (base.getCode().getType() != SQLType::EXPR_PATTERN_OPTION) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION, "");
+	}
+
+	patternExpr = &base.child();
+	varListExpr = &patternExpr->next();
+	modeExpr = &varListExpr->next();
+}
+
+const SQLExprs::Expression&
+SQLSortOps::WindowMatch::MicroCompiler::resolvePatternOptionExpr(
+		const SQLExprs::Expression *base) {
+	const SQLExprs::Expression *optionExpr = findPatternOptionExpr(base);
+
+	if (optionExpr == NULL) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION, "");
+	}
+
+	return *optionExpr;
+}
+
+const SQLExprs::Expression*
+SQLSortOps::WindowMatch::MicroCompiler::findPatternOptionExpr(
+		const SQLExprs::Expression *base) {
+	if (base == NULL ||
+			base->getCode().getType() != SQLType::EXPR_PATTERN_OPTION) {
+		return NULL;
+	}
+
+	return base;
+}
+
+int32_t SQLSortOps::WindowMatch::MicroCompiler::getNavigationDirection(
+		SQLType::Id exprType) {
+	switch (exprType) {
+	case SQLType::EXPR_PATTERN_PREV:
+		return -1;
+	case SQLType::EXPR_PATTERN_NEXT:
+		return 1;
+	case SQLType::EXPR_PATTERN_FIRST:
+		return -1;
+	case SQLType::EXPR_PATTERN_LAST:
+		return 1;
+	default:
+		assert(exprType == SQLType::EXPR_PATTERN_CURRENT);
+		return 0;
+	}
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isNavigationByMatch(
+		SQLType::Id exprType) {
+	switch (exprType) {
+	case SQLType::EXPR_PATTERN_FIRST:
+	case SQLType::EXPR_PATTERN_LAST:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool SQLSortOps::WindowMatch::MicroCompiler::isNavigationColumn(
+		SQLType::Id exprType) {
+	switch (exprType) {
+	case SQLType::EXPR_PATTERN_CURRENT:
+	case SQLType::EXPR_PATTERN_PREV:
+	case SQLType::EXPR_PATTERN_NEXT:
+	case SQLType::EXPR_PATTERN_FIRST:
+	case SQLType::EXPR_PATTERN_LAST:
+		return true;
+	default:
+		return false;
+	}
+}
+
+
+SQLSortOps::WindowMatch::VariablePredicateInfo::VariablePredicateInfo() :
+		predicateIndex_(0),
+		name_(NULL),
+		expr_(NULL) {
+}
+
+
+SQLSortOps::WindowMatch::NavigationInfo::NavigationInfo() :
+		navigationIndex_(0),
+		variableId_(0),
+		direction_(0),
+		byMatch_(false),
+		assignmentExpr_(NULL),
+		emptyExpr_(NULL) {
+}
+
+
+SQLSortOps::WindowMatch::VariableGroupEntry::VariableGroupEntry() :
+		beginPos_(0),
+		endPos_(0) {
+}
+
+
+SQLSortOps::WindowMatch::MatchEntry::MatchEntry(
+		SQLValues::VarAllocator &varAlloc) :
+		stack_(varAlloc),
+		history_(varAlloc),
+		groupMap_(varAlloc),
+		searchRange_(VariableGroupEntry()),
+		firstPos_(0),
+		matchingVariableId_(-1) {
+}
+
+
+SQLSortOps::WindowMatch::MatchStackElement::MatchStackElement(
+		uint32_t patternId, bool withTailAnchor) :
+		hash_(0),
+		patternId_(patternId),
+		repeat_(0),
+		withTailAnchor_(withTailAnchor) {
+}
+
+
+SQLSortOps::WindowMatch::VariableHistoryElement::VariableHistoryElement() :
+		variableId_(-1),
+		beginPos_(0),
+		endPos_(0) {
+}
+
+
+SQLSortOps::WindowMatch::MatchState::MatchState(
+		SQLValues::VarAllocator &varAlloc) :
+		map_(varAlloc),
+		keyMap_(varAlloc),
+		workingKeys_(varAlloc),
+		prevMatchIt_(map_.end()),
+		curMatchIt_(map_.end()),
+		curStarted_(false),
+		curFinished_(false),
+		varMatching_(false),
+		prevMatched_(false),
+		curMatched_(false),
+		nextKey_(0),
+		searchRange_(VariableGroupEntry()),
+		partitionTail_(false),
+		matchCount_(0) {
+}
+
+
+SQLSortOps::WindowMatch::ProjectionState::ProjectionState(
+		SQLValues::VarAllocator &varAlloc) :
+		matchOrdinal_(0),
+		type_(NAV_NONE),
+		historyIndex_(0),
+		nextPos_(0),
+		history_(varAlloc),
+		groupMap_(varAlloc),
+		searchRange_(VariableGroupEntry()),
+		firstPos_(0) {
+}
+
+
+SQLSortOps::WindowMatch::PatternGraph::PatternGraph(
+		OpContext &cxt, const SQLExprs::Expression &expr) :
+		nodeList_(cxt.getAllocator()) {
+	build(expr, nodeList_);
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::findSub(
+		uint32_t id, bool forChild, uint32_t ordinal,
+		uint32_t &subId) const {
+	subId = std::numeric_limits<uint32_t>::max();
+	const PatternNode &node = getNode(id);
+	const util::Vector<uint32_t> &list = (forChild ? node.child_ : node.following_);
+
+	if (ordinal >= list.size()) {
+		return false;
+	}
+
+	subId = list[ordinal];
+	return true;
+}
+
+uint32_t SQLSortOps::WindowMatch::PatternGraph::getDepth(
+		uint32_t id) const {
+	const PatternCode &code = getCode(id);
+	return code.depth_;
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::findVariable(
+		uint32_t id, int64_t &varId) const {
+	varId = -1;
+	const PatternCode &code = getCode(id);
+
+	if (code.variableId_ < 0) {
+		return false;
+	}
+
+	varId = code.variableId_;
+	return true;
+}
+
+uint64_t SQLSortOps::WindowMatch::PatternGraph::getMinRepeat(
+		uint32_t id) const {
+	const PatternCode &code = getCode(id);
+	return static_cast<uint64_t>(code.minRepeat_);
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::findMaxRepeat(
+		uint32_t id, uint64_t &repeat) const {
+	repeat = std::numeric_limits<uint64_t>::max();
+	const PatternCode &code = getCode(id);
+
+	if (code.maxRepeat_ < 0) {
+		return false;
+	}
+
+	repeat = static_cast<uint64_t>(code.maxRepeat_);
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::getTopAnchor(
+		uint32_t id) const {
+	const PatternCode &code = getCode(id);
+	return code.top_;
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::getTailAnchor(
+		uint32_t id) const {
+	const PatternCode &code = getCode(id);
+	return code.tail_;
+}
+
+const SQLSortOps::WindowMatch::PatternCode&
+SQLSortOps::WindowMatch::PatternGraph::getCode(uint32_t id) const {
+	const PatternNode &node = getNode(id);
+	return node.code_;
+}
+
+const SQLSortOps::WindowMatch::PatternNode&
+SQLSortOps::WindowMatch::PatternGraph::getNode(uint32_t id) const {
+	if (id >= nodeList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return nodeList_[id];
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::build(
+		const SQLExprs::Expression &expr, NodeList &nodeList) {
+	const uint32_t id = newNode(nodeList, NULL);
+	buildSub(expr, id, nodeList);
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::buildSub(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList) {
+	switch (expr.getCode().getType()) {
+	case SQLType::EXPR_PATTERN_VARIABLE:
+		buildVariable(expr, id, nodeList);
+		break;
+	case SQLType::EXPR_PATTERN_REPEAT:
+		buildRepeat(expr, id, nodeList);
+		break;
+	case SQLType::EXPR_PATTERN_ANCHOR:
+		buildAnchor(expr, id, nodeList);
+		break;
+	case SQLType::EXPR_PATTERN_CONCAT:
+		buildConcat(expr, id, nodeList);
+		break;
+	case SQLType::EXPR_PATTERN_OR:
+		buildOr(expr, id, nodeList);
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::buildVariable(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList) {
+	PatternCode &code = nodeList[id].code_;
+	code.variableId_ = expr.child().getCode().getValue().get<int64_t>();
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::buildRepeat(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList) {
+	const uint32_t lastId = prepareStack(expr, id, nodeList, false);
+
+	SQLExprs::Expression::Iterator it(expr);
+
+	const SQLExprs::Expression &subExpr = it.get();
+	it.next();
+	const int64_t min = it.get().getCode().getValue().get<int64_t>();
+	it.next();
+	const int64_t max = it.get().getCode().getValue().get<int64_t>();
+
+	if (min < 0) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	{
+		PatternCode &code = nodeList[lastId].code_;
+		code.minRepeat_ = min;
+		code.maxRepeat_ = max;
+	}
+
+	buildSub(subExpr, lastId, nodeList);
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::buildAnchor(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList) {
+	const uint32_t lastId = prepareStack(expr, id, nodeList, false);
+
+	SQLExprs::Expression::Iterator it(expr);
+
+	const SQLExprs::Expression &subExpr = it.get();
+	it.next();
+	const bool top = SQLValues::ValueUtils::getValue<bool>(
+			it.get().getCode().getValue());
+	it.next();
+	const bool tail = SQLValues::ValueUtils::getValue<bool>(
+			it.get().getCode().getValue());
+
+	{
+		PatternCode &code = nodeList[lastId].code_;
+		code.top_ = top;
+		code.tail_ = tail;
+	}
+
+	buildSub(subExpr, lastId, nodeList);
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::buildConcat(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList) {
+	const uint32_t lastId = prepareStack(expr, id, nodeList, true);
+
+	bool first = true;
+	uint32_t prevId = lastId;
+	for (SQLExprs::Expression::Iterator it(expr); it.exists(); it.next()) {
+		uint32_t curId = prevId;
+		if (!first) {
+			curId = newNode(nodeList, &lastId);
+
+			PatternNode &node = nodeList[curId];
+			PatternNode &prevNode = nodeList[prevId];
+
+			std::swap(node.following_, prevNode.following_);
+			prevNode.following_.push_back(curId);
+		}
+		buildSub(it.get(), curId, nodeList);
+		prevId = curId;
+		first = false;
+	}
+}
+
+void SQLSortOps::WindowMatch::PatternGraph::buildOr(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList) {
+	for (SQLExprs::Expression::Iterator it(expr); it.exists(); it.next()) {
+		const uint32_t curId = newStack(nodeList, id);
+		buildSub(it.get(), curId, nodeList);
+	}
+}
+
+uint32_t SQLSortOps::WindowMatch::PatternGraph::prepareStack(
+		const SQLExprs::Expression &expr, uint32_t id, NodeList &nodeList,
+		bool onlyForMultiElements) {
+	if (!isNewStackRequired(expr, nodeList[id], onlyForMultiElements)) {
+		return id;
+	}
+
+	return newStack(nodeList, id);
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::isNewStackRequired(
+		const SQLExprs::Expression &expr,
+		const PatternNode &node, bool onlyForMultiElements) {
+	if (!isQuantitySpecified(node.code_)) {
+		return false;
+	}
+
+	if (onlyForMultiElements) {
+		SQLExprs::Expression::Iterator it(expr);
+		if (!it.exists()) {
+			return false;
+		}
+		it.next();
+		if (!it.exists()) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::PatternGraph::isQuantitySpecified(
+		const PatternCode &code) {
+	return (
+			code.minRepeat_ != 1 ||
+			code.maxRepeat_ != 1 ||
+			code.top_ ||
+			code.tail_);
+}
+
+uint32_t SQLSortOps::WindowMatch::PatternGraph::newStack(
+		NodeList &nodeList, uint32_t baseId) {
+	const uint32_t newId = newNode(nodeList, &baseId);
+	nodeList[newId].code_.depth_++;
+	nodeList[baseId].child_.push_back(newId);
+	return newId;
+}
+
+uint32_t SQLSortOps::WindowMatch::PatternGraph::newNode(
+		NodeList &nodeList, const uint32_t *baseId) {
+	const uint32_t newId = static_cast<uint32_t>(nodeList.size());
+
+	util::StackAllocator *alloc = nodeList.get_allocator().base();
+	nodeList.push_back(PatternNode(*alloc));
+
+	if (baseId != NULL) {
+		const uint32_t depth = nodeList[*baseId].code_.depth_;
+		nodeList[newId].code_.depth_ = depth;
+	}
+
+	return newId;
+}
+
+
+SQLSortOps::WindowMatch::PatternCode::PatternCode() :
+		depth_(0),
+		variableId_(-1),
+		minRepeat_(1),
+		maxRepeat_(1),
+		top_(false),
+		tail_(false) {
+}
+
+
+SQLSortOps::WindowMatch::PatternNode::PatternNode(util::StackAllocator &alloc) :
+		following_(alloc),
+		child_(alloc) {
+}
+
+
+SQLSortOps::WindowMatch::VariableTable::VariableTable(
+		OpContext &cxt, const PatternGraph *patternGraph,
+		const VariablePredicateMap *predMap, const NavigationMap *navMap) :
+		varAlloc_(cxt.getValueContext().getVarAllocator()),
+		patternGraph_(patternGraph),
+		predMap_(predMap),
+		navMap_(navMap),
+		varIdsList_(makeVariableIdsList(cxt.getAllocator(), *navMap)),
+		match_(varAlloc_),
+		proj_(varAlloc_),
+		navList_(varAlloc_) {
+}
+
+void SQLSortOps::WindowMatch::VariableTable::nextMatchingPosition(
+		uint64_t pos) {
+	{
+		const uint64_t expectedPos = (
+				match_.partitionTail_ ? 0 : match_.searchRange_.endPos_ + 1);
+		if (expectedPos != pos) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+	}
+
+	if (match_.partitionTail_) {
+		clearAll();
+	}
+	else {
+		const uint64_t nextPos = match_.searchRange_.endPos_ + 1;
+		if (match_.prevMatched_) {
+			const uint64_t matchCount = resolveMatchCount(nextPos);
+			prepareNextMatchingPosition();
+			match_.searchRange_.beginPos_ = nextPos;
+			match_.matchCount_ = matchCount;
+		}
+		else {
+			prepareNextMatchingPosition();
+		}
+		match_.searchRange_.endPos_ = nextPos;
+	}
+	navList_.clear();
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::prepareProjection(
+		bool forAllRows, NavigationType &type, bool &matchTail) {
+	bool posTail = true;
+	for (;;) {
+		if (proj_.nextPos_ < proj_.searchRange_.endPos_) {
+			proj_.nextPos_++;
+			posTail = (proj_.nextPos_ >= proj_.searchRange_.endPos_);
+			break;
+		}
+
+		switch (proj_.type_) {
+		case NAV_PROJECTION_PIPE_ONCE:
+			proj_.type_ = NAV_PROJECTION_PIPE_EACH;
+			break;
+		case NAV_PROJECTION_PIPE_EACH:
+			proj_.type_ = NAV_PROJECTION_FINISH;
+			break;
+		default:
+			proj_.type_ = NAV_NONE;
+			break;
+		}
+
+		if (proj_.type_ == NAV_NONE) {
+			MatchEntryIterator entryIt = match_.map_.end();
+
+			const uint32_t limit = (isMatched() ? 2 : 0);
+			while (proj_.matchOrdinal_ < limit) {
+				const uint32_t ordinal = ++proj_.matchOrdinal_;
+
+				if (ordinal == 1 && match_.prevMatched_) {
+					entryIt = match_.prevMatchIt_;
+				}
+				else if (ordinal == 2 && match_.curMatched_) {
+					entryIt = match_.curMatchIt_;
+				}
+
+				if (entryIt != match_.map_.end()) {
+					break;
+				}
+			}
+
+			if (entryIt == match_.map_.end()) {
+				break;
+			}
+
+			proj_.type_ = NAV_PROJECTION_PIPE_ONCE;
+			proj_.history_ = entryIt->second.history_;
+			setUpProjectionVariableGroups(proj_.history_, proj_.groupMap_);
+
+			proj_.searchRange_ = entryIt->second.searchRange_;
+			proj_.firstPos_ = entryIt->second.firstPos_;
+		}
+
+		const bool lastOnly =
+				(proj_.type_ == NAV_PROJECTION_PIPE_ONCE ||
+				(proj_.type_ == NAV_PROJECTION_FINISH && !forAllRows));
+		if (lastOnly) {
+			proj_.historyIndex_ =
+					proj_.history_.size() - (proj_.history_.empty() ? 0 : 1);
+			proj_.nextPos_ = proj_.searchRange_.endPos_ -
+					(proj_.firstPos_ >= proj_.searchRange_.endPos_ ? 0 : 1);
+		}
+		else {
+			proj_.historyIndex_ = 0;
+			proj_.nextPos_ = proj_.firstPos_;
+		}
+	}
+
+	navList_.clear();
+	type = proj_.type_;
+	matchTail = (proj_.type_ == NAV_PROJECTION_FINISH && posTail);
+
+	if (proj_.type_ == NAV_NONE) {
+		return false;
+	}
+
+	applyWindowState();
+	return true;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::setPartitionTail() {
+	if (match_.curStarted_ || isMatched()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	match_.partitionTail_ = true;
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::findMatchingVariable(
+		const VariablePredicateInfo *&predInfo) {
+	predInfo = NULL;
+
+	if (updateMatchingState()) {
+		return false;
+	}
+
+	if (!match_.varMatching_ || match_.workingKeys_.empty()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	MatchEntryIterator entryIt = match_.workingKeys_.begin()->second;
+	const int64_t varId = entryIt->second.matchingVariableId_;
+	if (varId < 0) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	predInfo = &resolveVariablePredicateInfo(varId);
+	applyWindowState();
+	return true;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::updateMatchingVariable(
+		bool matched) {
+	if (!match_.varMatching_ || match_.workingKeys_.empty()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	match_.varMatching_ = false;
+
+	MatchEntryIterator entryIt = match_.workingKeys_.begin()->second;
+	if (!matched) {
+		eraseMatchWorkingKey(entryIt);
+		return;
+	}
+
+	MatchEntry &entry = entryIt->second;
+
+	uint64_t &entryEndPos = entry.searchRange_.endPos_;
+	int64_t &varId = entry.matchingVariableId_;
+
+	if (varId < 0 || entryEndPos != match_.searchRange_.endPos_ ||
+			entry.stack_.empty()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const VariableIdSet &idSet = varIdsList_[NAV_NONE];
+	if (idSet.find(varId) != idSet.end()) {
+		VariableHistory &history = entry.history_;
+		if (!history.empty() &&
+				history.back().variableId_ == varId &&
+				history.back().endPos_ == entryEndPos) {
+			history.back().endPos_++;
+		}
+		else {
+			VariableHistoryElement elem;
+			elem.variableId_ = varId;
+			elem.beginPos_ = entryEndPos;
+			elem.endPos_ = entryEndPos + 1;
+			history.push_back(elem);
+		}
+	}
+
+	entryEndPos++;
+	varId = -1;
+	repeatMatchStack(entryIt);
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::findNavigationColumn(
+		uint32_t ordinal, NavigationKey &key, uint32_t &navIndex,
+		NavigationPosition &pos) {
+	navIndex = std::numeric_limits<uint32_t>::max();
+	pos = NavigationPosition();
+
+	const LocatedNavigationList &navList = prepareNavigationList(key);
+
+	if (ordinal >= navList.size()) {
+		return false;
+	}
+
+	const LocatedNavigationInfo &info = navList[ordinal];
+	navIndex = info.second->navigationIndex_;
+	pos = info.first;
+	return true;
+}
+
+SQLExprs::WindowState&
+SQLSortOps::WindowMatch::VariableTable::getWindowState() {
+	return windowState_;
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::resolveMatch(
+		uint64_t &effectiveStartPos) {
+	effectiveStartPos = match_.searchRange_.beginPos_;
+
+	if (!updateMatchingState()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	if (!isMatched()) {
+		return false;
+	}
+
+	if (match_.curMatchIt_ == match_.map_.end()) {
+		effectiveStartPos = match_.searchRange_.endPos_ + 1;
+	}
+	else {
+		effectiveStartPos =
+				match_.curMatchIt_->second.searchRange_.beginPos_;
+	}
+	return true;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::getStats(
+		uint64_t &searchingRowCount, uint64_t &candidateCount) {
+	searchingRowCount =
+			match_.searchRange_.endPos_ - match_.searchRange_.beginPos_ + 1;
+	candidateCount = match_.map_.size();
+}
+
+void SQLSortOps::WindowMatch::VariableTable::clearAll() {
+	prepareNextMatchingPosition();
+
+	match_.searchRange_ = VariableGroupEntry();
+	match_.partitionTail_ = false;
+	match_.matchCount_ = 0;
+	match_.nextKey_ = 0;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::prepareNextMatchingPosition() {
+	const bool inheritable = (!match_.partitionTail_ && !match_.prevMatched_);
+
+	match_.prevMatchIt_ =
+			(match_.partitionTail_ ? match_.map_.end() : match_.curMatchIt_);
+	match_.curMatchIt_ = match_.map_.end();
+
+	match_.workingKeys_.clear();
+
+	setUpNextWorkingKeys(
+			varAlloc_, match_.prevMatchIt_, patternGraph_, inheritable,
+			match_.keyMap_, match_.workingKeys_);
+	setUpNextMatchEntries(
+			match_.prevMatchIt_, match_.partitionTail_, match_.workingKeys_,
+			match_.map_);
+
+	match_.curStarted_ = false;
+	match_.curFinished_ = false;
+	match_.varMatching_ = false;
+
+	match_.prevMatched_ = false;
+	match_.curMatched_ = false;
+
+	proj_ = ProjectionState(varAlloc_);
+}
+
+void SQLSortOps::WindowMatch::VariableTable::setUpNextWorkingKeys(
+		SQLValues::VarAllocator &varAlloc, MatchEntryIterator prevMatchIt,
+		const PatternGraph *patternGraph, bool inheritable,
+		UnorderedMatchKeyMap &keyMap, OrderedMatchKeyMap &workingKeys) {
+	if (inheritable) {
+		PatternStackPathMap pathMap(varAlloc);
+
+		for (UnorderedMatchKeyMap::iterator it = keyMap.begin();
+				it != keyMap.end(); ++it) {
+			const uint64_t key = it->first.second;
+			MatchEntryIterator entryIt = it->second;
+
+			if (entryIt == prevMatchIt || entryIt->second.stack_.empty()) {
+				continue;
+			}
+
+			bool acceptable = true;
+
+			if (isReachedMatchEntry(patternGraph, entryIt)) {
+				const PatternStackPath &path =
+						getStackPath(varAlloc, entryIt->second.stack_);
+				PatternStackPathMap::iterator pathIt = pathMap.find(path);
+
+				if (pathIt == pathMap.end()) {
+					pathMap.insert(std::make_pair(path, entryIt));
+				}
+				else if (isPriorMatchEntry(entryIt, pathIt->second)) {
+					workingKeys.erase(pathIt->second->first);
+					pathIt->second = entryIt;
+				}
+				else {
+					acceptable = false;
+				}
+			}
+
+			if (acceptable) {
+				workingKeys.insert(std::make_pair(key, entryIt));
+			}
+		}
+	}
+
+	keyMap.clear();
+}
+
+void SQLSortOps::WindowMatch::VariableTable::setUpNextMatchEntries(
+		MatchEntryIterator prevMatchIt, bool partitionTail,
+		const OrderedMatchKeyMap &workingKeys, MatchEntryMap &map) {
+	if (partitionTail) {
+		map.clear();
+		return;
+	}
+
+	for (MatchEntryIterator it = map.begin(); it != map.end();) {
+		MatchEntryIterator next = it;
+		++next;
+		if (it != prevMatchIt &&
+				workingKeys.find(it->first) == workingKeys.end()) {
+			map.erase(it);
+		}
+		it = next;
+	}
+}
+
+void SQLSortOps::WindowMatch::VariableTable::addInitialMatchEntry() {
+	const uint32_t patternId = 0;
+
+	MatchEntry entry(varAlloc_);
+	entry.stack_.push_back(newMatchStackElement(patternId));
+	entry.searchRange_ = match_.searchRange_;
+	entry.firstPos_ = match_.searchRange_.endPos_;
+
+	if (match_.prevMatchIt_ != match_.map_.end()) {
+		entry.searchRange_.beginPos_ = entry.searchRange_.endPos_;
+	}
+
+	addMatchEntry(entry);
+}
+
+void SQLSortOps::WindowMatch::VariableTable::setUpProjectionVariableGroups(
+		const VariableHistory &history, LocatedVariableGroupMap &groupMap) {
+	groupMap.clear();
+	const LocatedVariableGroupList initialList(0, VariableGroupList(varAlloc_));
+
+	for (VariableHistory::const_iterator it = history.begin();
+			it != history.end(); ++it) {
+		const VariableHistoryElement &elem = *it;
+		LocatedVariableGroupList &locatedList = groupMap.insert(std::make_pair(
+				elem.variableId_, initialList)).first->second;
+		VariableGroupList &list = locatedList.second;
+		if (!list.empty() && list.back().endPos_ == elem.beginPos_) {
+			list.back().endPos_ = elem.endPos_;
+		}
+		else {
+			VariableGroupEntry entry;
+			entry.beginPos_ = elem.beginPos_;
+			entry.endPos_ = elem.endPos_;
+			list.push_back(entry);
+		}
+	}
+}
+
+void SQLSortOps::WindowMatch::VariableTable::applyWindowState() {
+	assert(!isMatched() || proj_.nextPos_ > 0);
+	const uint64_t lastPos = (isMatched() ?
+			proj_.nextPos_ - 1 : match_.searchRange_.beginPos_);
+
+	windowState_.partitionValueCount_ =
+			static_cast<int64_t>(resolveMatchCount(lastPos));
+	windowState_.variableName_ = resolveVariableName(lastPos);
+}
+
+uint64_t SQLSortOps::WindowMatch::VariableTable::resolveMatchCount(
+		uint64_t startPos) {
+	uint64_t projectingMatchCount = 0;
+
+	if (isMatched()) {
+		if (match_.prevMatched_) {
+			projectingMatchCount++;
+		}
+
+		if (match_.curMatched_ &&
+				match_.curMatchIt_ != match_.map_.end() &&
+				match_.curMatchIt_->second.firstPos_ <= startPos) {
+			projectingMatchCount++;
+		}
+	}
+	else {
+		OrderedMatchKeyMap::iterator it = match_.workingKeys_.begin();
+		if (it != match_.workingKeys_.end() &&
+				it->second->second.firstPos_ <= startPos) {
+			projectingMatchCount++;
+		}
+	}
+
+	return match_.matchCount_ + projectingMatchCount;
+}
+
+const TupleValue* SQLSortOps::WindowMatch::VariableTable::resolveVariableName(
+		uint64_t pos) {
+	if (!isMatched() || varIdsList_[NAV_CLASSIFIER].empty()) {
+		return NULL;
+	}
+
+	const VariableHistory &history = proj_.history_;
+	size_t &i = proj_.historyIndex_;
+
+	while (i > 0 && i < history.size() && pos < history[i].beginPos_) {
+		i--;
+	}
+	while (i + 1 < history.size() && pos >= history[i].endPos_) {
+		i++;
+	}
+
+	if (i >= history.size()) {
+		return NULL;
+	}
+
+	const VariableHistoryElement &elem = history[i];
+	if (!(elem.beginPos_ <= pos && pos < elem.endPos_)) {
+		return NULL;
+	}
+
+	return resolveVariablePredicateInfo(elem.variableId_).name_;
+}
+
+const SQLSortOps::WindowMatch::LocatedNavigationList&
+SQLSortOps::WindowMatch::VariableTable::prepareNavigationList(
+		NavigationKey &key) {
+	const MatchEntry *matchEntry;
+	uint64_t curPos;
+	key = resolveNavigationKey(matchEntry, curPos);
+
+	if (!navList_.empty()) {
+		return navList_;
+	}
+
+	for (NavigationMap::const_iterator it = navMap_->lower_bound(key);
+			it != navMap_->end() && it->first == key; ++it) {
+		const NavigationInfo *info = &it->second;
+		const int64_t refVarId = info->variableId_;
+
+		const VariableGroupEntry &group =
+				resolveNavigationGroup(matchEntry, *info, refVarId, curPos);
+		const NavigationPosition &navPos =
+				resolveNavigationPosition(*info, group, curPos);
+
+		navList_.push_back(std::make_pair(navPos, info));
+	}
+	std::sort(navList_.begin(), navList_.end());
+
+	return navList_;
+}
+
+SQLSortOps::WindowMatch::NavigationKey
+SQLSortOps::WindowMatch::VariableTable::resolveNavigationKey(
+		const MatchEntry *&matchEntry, uint64_t &curPos) {
+	matchEntry = NULL;
+
+	if (proj_.matchOrdinal_ == 0) {
+		if (isMatched() || !match_.varMatching_) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		MatchEntryIterator entryIt = match_.workingKeys_.begin()->second;
+		matchEntry = &entryIt->second;
+		if (matchEntry->matchingVariableId_ < 0) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		curPos = match_.searchRange_.endPos_;
+		return NavigationKey(NAV_MATCHING, matchEntry->matchingVariableId_);
+	}
+	else {
+		if (!isMatched() || proj_.matchOrdinal_ > 2) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		curPos = proj_.nextPos_ - 1;
+		return NavigationKey(proj_.type_, -1);
+	}
+}
+
+SQLSortOps::WindowMatch::VariableGroupEntry
+SQLSortOps::WindowMatch::VariableTable::resolveNavigationGroup(
+		const MatchEntry *matchEntry, const NavigationInfo &info,
+		int64_t refVarId, uint64_t curPos) {
+	VariableGroupEntry searchRange =
+			(matchEntry == NULL ? proj_.searchRange_ : match_.searchRange_);
+
+	const VariableGroupEntry *baseGroup;
+	if (matchEntry == NULL) {
+		if (info.byMatch_) {
+			if (refVarId < 0) {
+				baseGroup = NULL;
+			}
+			else {
+				const LocatedVariableGroupList &locatedList =
+						resolveLocatedVariableGroupList(refVarId);
+				const VariableGroupList &list = locatedList.second;
+				if (info.direction_ < 0) {
+					baseGroup = &list.front();
+				}
+				else {
+					baseGroup = &list.back();
+				}
+			}
+		}
+		else {
+			if (refVarId < 0 || info.direction_ != 0) {
+				baseGroup = &searchRange;
+			}
+			else {
+				LocatedVariableGroupList &locatedList =
+						resolveLocatedVariableGroupList(refVarId);
+				uint32_t &loc = locatedList.first;
+				const VariableGroupList &list = locatedList.second;
+
+				while (loc > 0 && loc < list.size() &&
+						curPos < list[loc].beginPos_) {
+					loc--;
+				}
+				while (loc + 1 < list.size() && curPos >= list[loc].endPos_) {
+					loc++;
+				}
+
+				if (loc >= list.size()) {
+					baseGroup = NULL;
+				}
+				else {
+					baseGroup = &list[loc];
+				}
+			}
+		}
+	}
+	else {
+		if (info.byMatch_ || info.direction_ > 0) {
+			baseGroup = NULL;
+		}
+		else if (refVarId >= 0) {
+			VariableGroupMap::const_iterator it =
+					matchEntry->groupMap_.find(refVarId);
+			if (it == matchEntry->groupMap_.end()) {
+				baseGroup = NULL;
+			}
+			else {
+				baseGroup = &it->second;
+			}
+		}
+		else {
+			searchRange.endPos_++;
+			baseGroup = &searchRange;
+		}
+	}
+
+	if (baseGroup == NULL) {
+		return VariableGroupEntry();
+	}
+
+	VariableGroupEntry group = *baseGroup;
+	if (!info.byMatch_ && info.direction_ < 0 &&
+			group.beginPos_ <= searchRange.endPos_) {
+		group.beginPos_ = std::min(group.beginPos_, searchRange.beginPos_);
+	}
+	return group;
+}
+
+SQLSortOps::WindowMatch::NavigationPosition
+SQLSortOps::WindowMatch::VariableTable::resolveNavigationPosition(
+		const NavigationInfo &info, const VariableGroupEntry &group,
+		uint64_t curPos) {
+	uint64_t pos = 0;
+	bool empty = true;
+	if (group.beginPos_ < group.endPos_) {
+		if (info.byMatch_) {
+			pos = (info.direction_ < 0 ? group.beginPos_ : group.endPos_ - 1);
+			empty = false;
+		}
+		else if (curPos > 0 || info.direction_ >= 0) {
+			const uint64_t navPos = curPos +
+					(info.direction_ == 0 ? 0 : (info.direction_ < 0 ? -1 : 1));
+			if (group.beginPos_ <= navPos && navPos < group.endPos_) {
+				pos = navPos;
+				empty = false;
+			}
+		}
+	}
+
+	return NavigationPosition(pos, empty);
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::updateMatchingState() {
+	if (match_.curFinished_) {
+		return true;
+	}
+
+	if (!match_.curStarted_) {
+		addInitialMatchEntry();
+		match_.curStarted_ = true;
+	}
+	navList_.clear();
+
+	while (!match_.workingKeys_.empty()) {
+		MatchEntryIterator entryIt = match_.workingKeys_.begin()->second;
+
+		bool currentAllowed;
+		bool followingAllowed;
+		if (!checkNextPattern(entryIt, currentAllowed, followingAllowed)) {
+			continue;
+		}
+
+		bool working;
+		if (!applyVariablePattern(
+				entryIt, currentAllowed, followingAllowed, working)) {
+			if (working) {
+				match_.varMatching_ = true;
+				return false;
+			}
+			continue;
+		}
+
+		applyNextPattern(entryIt, currentAllowed, followingAllowed);
+	}
+
+	assignMatchResult();
+	return true;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::assignMatchResult() {
+	match_.prevMatched_ =
+			(match_.prevMatchIt_ != match_.map_.end() &&
+			(match_.curMatchIt_ == match_.map_.end() ||
+					match_.prevMatchIt_->second.firstPos_ !=
+					match_.curMatchIt_->second.firstPos_));
+	match_.curMatched_ =
+			(match_.curMatchIt_ != match_.map_.end() && match_.partitionTail_);
+
+	match_.curFinished_ = true;
+	navList_.clear();
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::isMatched() {
+	return (match_.prevMatched_ || match_.curMatched_);
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::checkNextPattern(
+		MatchEntryIterator entryIt, bool &currentAllowed,
+		bool &followingAllowed) {
+	currentAllowed = true;
+	followingAllowed = true;
+
+	const MatchEntry &entry = entryIt->second;
+	const MatchStackElement &stackElem = entry.stack_.back();
+
+	const uint32_t patternId = stackElem.patternId_;
+	const uint64_t repeat = stackElem.repeat_;
+
+	if (patternGraph_->getTopAnchor(patternId)) {
+		if (entry.firstPos_ != 0) {
+			eraseMatchWorkingKey(entryIt);
+			return false;
+		}
+	}
+
+	const uint64_t min = patternGraph_->getMinRepeat(patternId);
+	if (repeat < min) {
+		followingAllowed = false;
+	}
+
+	uint64_t max;
+	if (patternGraph_->findMaxRepeat(patternId, max)) {
+		if (repeat > max) {
+			currentAllowed = false;
+			followingAllowed = false;
+		}
+		else if (repeat >= max) {
+			currentAllowed = false;
+		}
+	}
+	return true;
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::applyVariablePattern(
+		MatchEntryIterator entryIt, bool currentAllowed, bool followingAllowed,
+		bool &working) {
+	working = true;
+
+	if (!currentAllowed) {
+		return true;
+	}
+
+	MatchEntry &entry = entryIt->second;
+	const uint32_t patternId = entry.stack_.back().patternId_;
+
+	int64_t varId;
+	if (!patternGraph_->findVariable(patternId, varId)) {
+		return true;
+	}
+
+	if (entry.searchRange_.endPos_ > match_.searchRange_.endPos_) {
+		if (followingAllowed) {
+			MatchEntryIterator it = addMatchEntry(entryIt->second);
+			completeMatchEntryWorking(it);
+			return true;
+		}
+		else {
+			completeMatchEntryWorking(entryIt);
+			working = false;
+			return false;
+		}
+	}
+	else if (entry.searchRange_.endPos_ == match_.searchRange_.endPos_) {
+		entry.matchingVariableId_ = varId;
+		return false;
+	}
+	else {
+		return true;
+	}
+}
+
+void SQLSortOps::WindowMatch::VariableTable::applyNextPattern(
+		MatchEntryIterator entryIt, bool currentAllowed, bool followingAllowed) {
+	MatchEntry &entry = entryIt->second;
+	const uint32_t patternId = entry.stack_.back().patternId_;
+	const bool withTailAnchor = entry.stack_.back().withTailAnchor_;
+	const size_t depth = entry.stack_.size();
+
+	util::LocalUniquePtr<MatchEntry> prevEntry;
+	bool updated = false;
+
+	for (uint32_t ordinal = 0, subId; patternGraph_->findSub(
+			patternId, true, ordinal, subId); ordinal++) {
+		if (currentAllowed) {
+			pushMatchStack(entryIt, subId, prevEntry);
+			updated = true;
+		}
+	}
+
+	bool followingFound = false;
+	for (uint32_t ordinal = 0, subId; patternGraph_->findSub(
+			patternId, false, ordinal, subId); ordinal++) {
+		if (followingAllowed) {
+			forwardMatchStack(entryIt, subId, prevEntry);
+			updated = true;
+		}
+		followingFound = true;
+	}
+
+	if (followingAllowed && !followingFound) {
+		if (depth > 1) {
+			popMatchStack(entryIt, prevEntry);
+			updated = true;
+		}
+		else if (!withTailAnchor || (match_.partitionTail_ &&
+				entry.searchRange_.endPos_ == match_.searchRange_.endPos_ + 1)) {
+			MatchEntryIterator it = popMatchStack(entryIt, prevEntry);
+			completeMatchEntryWorking(it);
+			updated = true;
+		}
+	}
+
+	if (!updated) {
+		eraseMatchWorkingKey(entryIt);
+	}
+}
+
+void SQLSortOps::WindowMatch::VariableTable::completeMatchEntryWorking(
+		MatchEntryIterator entryIt) {
+	bool matchUpdatable;
+	MatchEntryIterator it = reduceMatchEntry(entryIt, matchUpdatable);
+
+	eraseMatchWorkingKey(it);
+
+	if (matchUpdatable) {
+		match_.curMatchIt_ = it;
+	}
+}
+
+void SQLSortOps::WindowMatch::VariableTable::repeatMatchStack(
+		MatchEntryIterator entryIt) {
+	MatchEntry &entry = entryIt->second;
+	entry.stack_.back().repeat_++;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::forwardMatchStack(
+		MatchEntryIterator entryIt, uint32_t patternId,
+		util::LocalUniquePtr<MatchEntry> &prevEntry) {
+	MatchEntryIterator it = prepareMatchEntry(entryIt, &prevEntry);
+	MatchEntry &entry = it->second;
+	entry.stack_.back() = newMatchStackElement(patternId);
+}
+
+void SQLSortOps::WindowMatch::VariableTable::pushMatchStack(
+		MatchEntryIterator entryIt, uint32_t patternId,
+		util::LocalUniquePtr<MatchEntry> &prevEntry) {
+	MatchEntryIterator it = prepareMatchEntry(entryIt, &prevEntry);
+	MatchEntry &entry = it->second;
+	updateMatchStackHash(entry.stack_);
+	entry.stack_.push_back(newMatchStackElement(patternId));
+}
+
+SQLSortOps::WindowMatch::MatchEntryIterator
+SQLSortOps::WindowMatch::VariableTable::popMatchStack(
+		MatchEntryIterator entryIt,
+		util::LocalUniquePtr<MatchEntry> &prevEntry) {
+	MatchEntryIterator it = prepareMatchEntry(entryIt, &prevEntry);
+	MatchStack &stack = it->second.stack_;
+
+	const bool withTailAnchor = stack.back().withTailAnchor_;
+	stack.pop_back();
+
+	if (!stack.empty()) {
+		stack.back().withTailAnchor_ = withTailAnchor;
+		repeatMatchStack(it);
+	}
+
+	return it;
+}
+
+SQLSortOps::WindowMatch::MatchStackElement
+SQLSortOps::WindowMatch::VariableTable::newMatchStackElement(
+		uint32_t patternId) {
+	const bool withTailAnchor = patternGraph_->getTailAnchor(patternId);
+	return MatchStackElement(patternId, withTailAnchor);
+}
+
+SQLSortOps::WindowMatch::MatchEntryIterator
+SQLSortOps::WindowMatch::VariableTable::prepareMatchEntry(
+		MatchEntryIterator entryIt,
+		util::LocalUniquePtr<MatchEntry> *prevEntry) {
+	if (prevEntry == NULL) {
+		return entryIt;
+	}
+
+	if (prevEntry->get() == NULL) {
+		*prevEntry =
+				UTIL_MAKE_LOCAL_UNIQUE(*prevEntry, MatchEntry, entryIt->second);
+		return entryIt;
+	}
+	else {
+		return addMatchEntry(MatchEntry(**prevEntry));
+	}
+}
+
+SQLSortOps::WindowMatch::MatchEntryIterator
+SQLSortOps::WindowMatch::VariableTable::addMatchEntry(
+		const MatchEntry &src) {
+	MatchEntryIterator it =
+			match_.map_.insert(std::make_pair(match_.nextKey_, src)).first;
+	match_.nextKey_++;
+	match_.workingKeys_.insert(std::make_pair(it->first, it));
+	return it;
+}
+
+SQLSortOps::WindowMatch::MatchEntryIterator
+SQLSortOps::WindowMatch::VariableTable::reduceMatchEntry(
+		MatchEntryIterator entryIt, bool &matchUpdatable) {
+	MatchEntry &entry = entryIt->second;
+	matchUpdatable = entry.stack_.empty();
+
+	const uint32_t hash = updateMatchStackHash(entry.stack_);
+	MatchEntryIterator anotherIt;
+	if (findSameMatchEntry(hash, entry, anotherIt)) {
+		MatchEntryIterator priorIt;
+		MatchEntryIterator reducingIt;
+
+		if (isPriorMatchEntry(anotherIt, entryIt)) {
+			if (match_.curMatchIt_ == entryIt) {
+				match_.curMatchIt_ = anotherIt;
+			}
+			priorIt = anotherIt;
+			reducingIt = entryIt;
+		}
+		else {
+			priorIt = entryIt;
+			reducingIt = anotherIt;
+		}
+
+		match_.keyMap_.erase(MatchHashKey(hash, reducingIt->first));
+		eraseMatchWorkingKey(reducingIt);
+		match_.map_.erase(reducingIt);
+		return priorIt;
+	}
+
+	if (entry.stack_.empty() &&
+			match_.curMatchIt_ != match_.map_.end() &&
+			isPriorMatchEntry(match_.curMatchIt_, entryIt)) {
+		matchUpdatable = false;
+		return entryIt;
+	}
+
+	match_.keyMap_.insert(std::make_pair(
+			MatchHashKey(hash, entryIt->first), entryIt));
+	return entryIt;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::eraseMatchWorkingKey(
+		MatchEntryIterator entryIt) {
+	match_.workingKeys_.erase(entryIt->first);
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::findSameMatchEntry(
+		uint32_t hash, const MatchEntry &entry, MatchEntryIterator &foundIt) {
+	foundIt = match_.map_.end();
+
+	MatchHashKey hashKey(hash, 0);
+	UnorderedMatchKeyMap::const_iterator it =
+			match_.keyMap_.lower_bound(hashKey);
+	for (; it != match_.keyMap_.end() &&
+			it->first.first == hashKey.first; ++it) {
+		if (isSameStack(it->second->second.stack_, entry.stack_)) {
+			foundIt = it->second;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::isSameStack(
+		const MatchStack &stack1, const MatchStack &stack2) {
+	if (stack1.size() != stack2.size()) {
+		return false;
+	}
+
+	MatchStack::const_iterator it1 = stack1.end();
+	MatchStack::const_iterator it2 = stack2.end();
+
+	while (it1 != stack1.begin() && it2 != stack2.begin()) {
+		if (isSameStackElement(*(--it1), *(--it2))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::isSameStackElement(
+		const MatchStackElement &elem1, const MatchStackElement &elem2) {
+	return (
+			elem1.hash_ == elem2.hash_ &&
+			elem1.patternId_ == elem2.patternId_ &&
+			elem1.repeat_ == elem2.repeat_ &&
+			!elem1.withTailAnchor_ == !elem2.withTailAnchor_);
+}
+
+uint32_t SQLSortOps::WindowMatch::VariableTable::updateMatchStackHash(
+		MatchStack &stack) {
+	if (stack.empty()) {
+		return 0;
+	}
+
+	const MatchStackElement &elem = stack.back();
+
+	uint32_t hash;
+	hash = (stack.size() < 2 ?
+			SQLValues::ValueUtils::fnv1aHashInit() :
+			stack[stack.size() - 2].hash_);
+	hash = SQLValues::ValueUtils::fnv1aHashIntegral(
+			hash, static_cast<int64_t>(elem.patternId_));
+	hash = SQLValues::ValueUtils::fnv1aHashIntegral(
+			hash, static_cast<int64_t>(elem.repeat_));
+	hash = SQLValues::ValueUtils::fnv1aHashIntegral(
+			hash, (elem.withTailAnchor_ ? 1 : 0));
+
+	stack.back().hash_ = hash;
+	return hash;
+}
+
+SQLSortOps::WindowMatch::PatternStackPath
+SQLSortOps::WindowMatch::VariableTable::getStackPath(
+		SQLValues::VarAllocator &varAlloc, const MatchStack &stack) {
+	PatternStackPath path(varAlloc);
+	for (MatchStack::const_iterator it = stack.begin(); it != stack.end(); ++it) {
+		path.push_back(it->patternId_);
+	}
+	return path;
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::isPriorMatchEntry(
+		const MatchEntryIterator &it1, const MatchEntryIterator &it2) {
+	if (it1->second.firstPos_ != it2->second.firstPos_) {
+		return (it1->second.firstPos_ < it2->second.firstPos_);
+	}
+
+	if (it1->second.searchRange_.endPos_ != it2->second.searchRange_.endPos_) {
+		return (it1->second.searchRange_.endPos_ >
+				it2->second.searchRange_.endPos_);
+	}
+
+	return (it1->first < it2->first);
+}
+
+bool SQLSortOps::WindowMatch::VariableTable::isReachedMatchEntry(
+		const PatternGraph *patternGraph, MatchEntryIterator entryIt) {
+	const MatchStack &stack = entryIt->second.stack_;
+	if (stack.empty()) {
+		return false;
+	}
+
+	bool multiRepeatFound = false;
+	for (MatchStack::const_iterator it = stack.begin(); it != stack.end(); ++it) {
+		const bool forChild = false;
+		const uint32_t ordinal = 0;
+		uint32_t subId;
+		if (patternGraph->findSub(it->patternId_, forChild, ordinal, subId)) {
+			return false;
+		}
+		else if (it->repeat_ < patternGraph->getMinRepeat(it->patternId_)) {
+			return false;
+		}
+
+		uint64_t repeat;
+		if (patternGraph->findMaxRepeat(it->patternId_, repeat) &&
+				repeat > 1) {
+			if (multiRepeatFound) {
+				return false;
+			}
+			multiRepeatFound = true;
+		}
+	}
+
+	return true;
+}
+
+SQLSortOps::WindowMatch::LocatedVariableGroupList&
+SQLSortOps::WindowMatch::VariableTable::resolveLocatedVariableGroupList(
+		int64_t refVarId) {
+	LocatedVariableGroupMap::iterator it = proj_.groupMap_.find(refVarId);
+
+	if (it == proj_.groupMap_.end()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return it->second;
+}
+
+const SQLSortOps::WindowMatch::VariablePredicateInfo&
+SQLSortOps::WindowMatch::VariableTable::resolveVariablePredicateInfo(
+		int64_t refVarId) {
+	VariablePredicateMap::const_iterator it = predMap_->find(refVarId);
+
+	if (it == predMap_->end()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return it->second;
+}
+
+SQLSortOps::WindowMatch::VariableIdsList
+SQLSortOps::WindowMatch::VariableTable::makeVariableIdsList(
+		util::StackAllocator &alloc, const NavigationMap &navMap) {
+	const NavigationType typeList[] = {
+			NAV_NONE,
+			NAV_MATCHING,
+			NAV_PROJECTION_PIPE_ONCE,
+			NAV_PROJECTION_PIPE_EACH,
+			NAV_PROJECTION_FINISH,
+			NAV_CLASSIFIER
+	};
+	const size_t typeCount = sizeof(typeList) / sizeof(*typeList);
+
+	VariableIdsList list(typeCount, VariableIdSet(alloc), alloc);
+	for (size_t i = 0 ; i < typeCount; i++) {
+		const NavigationType type = typeList[i];
+		const size_t index = static_cast<size_t>(type);
+		assert(index < list.size());
+		makeVariableIdSet(navMap, type, list[index]);
+	}
+
+	return list;
+}
+
+void SQLSortOps::WindowMatch::VariableTable::makeVariableIdSet(
+		const NavigationMap &navMap, NavigationType type,
+		VariableIdSet &idSet) {
+	if (type == NAV_NONE) {
+		makeVariableIdSetSub(navMap, NAV_PROJECTION_PIPE_ONCE, idSet);
+		makeVariableIdSetSub(navMap, NAV_PROJECTION_PIPE_EACH, idSet);
+		makeVariableIdSetSub(navMap, NAV_PROJECTION_FINISH, idSet);
+		makeVariableIdSetSub(navMap, NAV_CLASSIFIER, idSet);
+	}
+	else {
+		makeVariableIdSetSub(navMap, type, idSet);
+	}
+}
+
+void SQLSortOps::WindowMatch::VariableTable::makeVariableIdSetSub(
+		const NavigationMap &navMap, NavigationType baseType,
+		VariableIdSet &idSet) {
+	NavigationMap::const_iterator it =
+			navMap.lower_bound(NavigationKey(baseType, -1));
+	for (; it != navMap.end() && it->first.first == baseType; ++it) {
+		const int64_t varId = it->second.variableId_;
+		if (varId >= 0) {
+			idSet.insert(varId);
+		}
+	}
+}
+
+
+SQLSortOps::WindowMatch::NavigationReaderEntry::NavigationReaderEntry() :
+		position_(0),
+		subIndex_(0),
+		navigated_(false),
+		preserved_(false) {
+}
+
+
+SQLSortOps::WindowMatch::NavigationReaderSet::NavigationReaderSet(
+		OpContext &cxt, uint32_t maxReaderCount) :
+		readerList_(makeReaderList(cxt.getAllocator(), maxReaderCount)),
+		firstNavigablePosition_(0),
+		firstPositionNavigated_(false),
+		activeReaderCount_(0),
+		posSet_(cxt.getValueContext().getVarAllocator()),
+		distanceSet_(cxt.getValueContext().getVarAllocator()),
+		prevOnlySet_(cxt.getValueContext().getVarAllocator()),
+		unusedSet_(cxt.getValueContext().getVarAllocator()) {
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::setBaseReader(
+		OpContext &cxt, TupleListReader &baseReader) {
+	if (readerList_.empty() || firstNavigablePosition_ != 0 ||
+			activeReaderCount_ != 0) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	activeReaderCount_ = static_cast<uint32_t>(readerList_.size());
+
+	const uint64_t firstPos = 0;
+	clearPositionsDetail(cxt, firstPos, &baseReader, readerList_.end());
+}
+
+bool SQLSortOps::WindowMatch::NavigationReaderSet::navigateReader(
+		OpContext &cxt, uint64_t pos, TupleListReader *&reader) {
+
+	if (!navigateFirstPosition(cxt)) {
+		return false;
+	}
+
+	NavigationReaderIterator it;
+	return navigateReaderDetail(cxt, pos, reader, it);
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::prepareNextPositions() {
+	NavigationReaderIterator it = readerList_.begin();
+	NavigationReaderIterator end = it + activeReaderCount_;
+	for (; it != end; ++it) {
+		if (it->preserved_) {
+			continue;
+		}
+
+		NavigationReaderRefSet::iterator setIt = prevOnlySet_.find(it);
+		if (setIt == prevOnlySet_.end()) {
+			if (it->navigated_) {
+				prevOnlySet_.insert(it);
+			}
+		}
+		else {
+			prevOnlySet_.erase(setIt);
+			unusedSet_.insert(it);
+		}
+		it->navigated_ = false;
+	}
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::invalidatePrevPositionRange(
+		OpContext &cxt, uint64_t nextPos) {
+	LocatedNavigationReaderSet::iterator setIt =
+			posSet_.lower_bound(std::make_pair(nextPos, readerList_.begin()));
+
+	if (setIt == posSet_.end() || setIt->first > nextPos) {
+		if (setIt == posSet_.begin()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		--setIt;
+	}
+
+	NavigationReaderIterator baseIt = setIt->second;
+	if (nextPos < baseIt->position_) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	clearPositionsDetail(cxt, nextPos, NULL, baseIt);
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::clearPositions(
+		OpContext &cxt, TupleListReader &baseReader) {
+	const uint64_t firstPos = 0;
+	clearPositionsDetail(cxt, firstPos, &baseReader, readerList_.end());
+}
+
+bool SQLSortOps::WindowMatch::NavigationReaderSet::navigateFirstPosition(
+		OpContext &cxt) {
+	if (firstPositionNavigated_) {
+		return true;
+	}
+
+	TupleListReader *reader;
+	NavigationReaderIterator it;
+	if (!navigateReaderDetail(cxt, firstNavigablePosition_, reader, it)) {
+		return false;
+	}
+
+	firstPositionNavigated_ = true;
+	it->preserved_ = true;
+	return true;
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::clearPositionsDetail(
+		OpContext &cxt, uint64_t firstPos, TupleListReader *baseReader,
+		NavigationReaderIterator baseIt) {
+	firstNavigablePosition_ = firstPos;
+	firstPositionNavigated_ = false;
+	posSet_.clear();
+	distanceSet_.clear();
+	prevOnlySet_.clear();
+	unusedSet_.clear();
+
+	NavigationReaderIterator it = readerList_.begin();
+	NavigationReaderIterator end = it + activeReaderCount_;
+	for (; it != end; ++it) {
+		if (baseReader == NULL) {
+			inheritLocatedReader(cxt, baseIt, it);
+		}
+		else {
+			applyLocatedReader(cxt, it, firstPos, *baseReader);
+		}
+
+		it->navigated_ = false;
+		it->preserved_ = false;
+
+		unusedSet_.insert(it);
+		addDistanceEntry(it);
+		posSet_.insert(std::make_pair(it->position_, it));
+	}
+}
+
+bool SQLSortOps::WindowMatch::NavigationReaderSet::navigateReaderDetail(
+		OpContext &cxt, uint64_t pos, TupleListReader *&reader,
+		NavigationReaderIterator &it) {
+	reader = NULL;
+	it = prepareNavigableEntry(cxt, pos);
+
+	TupleListReader &curReader = cxt.getReader(0, it->subIndex_);
+	if (it->position_ > pos) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	bool done = false;
+	for (;;) {
+		if (cxt.checkSuspended()) {
+			break;
+		}
+		else if (it->position_ >= pos) {
+			done = true;
+			break;
+		}
+
+		if (!curReader.exists()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		curReader.next();
+		it->position_++;
+	}
+
+	applyNavigatedEntry(it, done);
+	if (!curReader.exists() || (done && it->position_ != pos)) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	reader = &curReader;
+	return done;
+}
+
+SQLSortOps::WindowMatch::NavigationReaderIterator
+SQLSortOps::WindowMatch::NavigationReaderSet::prepareNavigableEntry(
+		OpContext &cxt, uint64_t pos) {
+	LocatedNavigationReaderSet::iterator it =
+			posSet_.lower_bound(std::make_pair(pos, readerList_.begin()));
+
+	if (it == posSet_.end() || it->first > pos) {
+		if (it == posSet_.begin()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		--it;
+	}
+
+	NavigationReaderIterator entryIt = it->second;
+	if (it->first != pos || entryIt->preserved_) {
+		return popLeastUseEntry(cxt, entryIt);
+	}
+
+	removeDistanceEntry(entryIt);
+	posSet_.erase(it);
+
+	return entryIt;
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::applyNavigatedEntry(
+		NavigationReaderIterator it, bool done) {
+	if (done && !it->navigated_) {
+		prevOnlySet_.erase(it);
+		unusedSet_.erase(it);
+		it->navigated_ = true;
+	}
+
+	addDistanceEntry(it);
+	posSet_.insert(std::make_pair(it->position_, it));
+}
+
+SQLSortOps::WindowMatch::NavigationReaderIterator
+SQLSortOps::WindowMatch::NavigationReaderSet::popLeastUseEntry(
+		OpContext &cxt, NavigationReaderIterator baseIt) {
+	NavigationReaderIterator end = readerList_.end();
+	NavigationReaderIterator it = end;
+
+	bool reuse = true;
+	do {
+		if (!unusedSet_.empty()) {
+			it = *unusedSet_.begin();
+			break;
+		}
+
+		if (activeReaderCount_ < readerList_.size()) {
+			it = readerList_.begin() + activeReaderCount_;
+			unusedSet_.insert(it);
+			activeReaderCount_++;
+			reuse = false;
+			break;
+		}
+
+		LocatedNavigationReaderSet::iterator setIt = distanceSet_.begin();
+		if (setIt != distanceSet_.end() && setIt->second->preserved_) {
+			++setIt;
+		}
+
+		if (setIt == distanceSet_.end()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		it = setIt->second;
+	}
+	while (false);
+
+	if (reuse) {
+		removeDistanceEntry(it);
+		posSet_.erase(std::make_pair(it->position_, it));
+	}
+
+	inheritLocatedReader(cxt, baseIt, it);
+	return it;
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::addDistanceEntry(
+		NavigationReaderIterator it) {
+	NavigationReaderIterator preceding;
+	NavigationReaderIterator following;
+	const std::pair<bool, bool> found = findNearEntry(it, preceding, following);
+	if (found.second) {
+		if (found.first) {
+			distanceSet_.erase(
+					std::make_pair(distanceof(preceding, following), following));
+		}
+		distanceSet_.insert(
+				std::make_pair(distanceof(it, following), following));
+	}
+
+
+	if (found.first) {
+		distanceSet_.insert(std::make_pair(distanceof(preceding, it), it));
+	}
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::removeDistanceEntry(
+		NavigationReaderIterator it) {
+	NavigationReaderIterator preceding;
+	NavigationReaderIterator following;
+	const std::pair<bool, bool> found = findNearEntry(it, preceding, following);
+	if (found.first) {
+		distanceSet_.erase(std::make_pair(distanceof(preceding, it), it));
+	}
+
+	if (found.second) {
+		distanceSet_.erase(
+				std::make_pair(distanceof(it, following), following));
+		if (found.first) {
+			distanceSet_.insert(
+					std::make_pair(distanceof(preceding, following), following));
+		}
+	}
+}
+
+std::pair<bool, bool>
+SQLSortOps::WindowMatch::NavigationReaderSet::findNearEntry(
+		NavigationReaderIterator baseIt, NavigationReaderIterator &preceding,
+		NavigationReaderIterator &following) {
+	const NavigationReaderIterator end = readerList_.end();
+
+	preceding = end;
+	following = end;
+
+	LocatedNavigationReaderSet::iterator it = posSet_.lower_bound(
+			std::make_pair(baseIt->position_, readerList_.begin()));
+	if (it != posSet_.begin()) {
+		LocatedNavigationReaderSet::iterator sub = it;
+		--sub;
+		preceding = sub->second;
+	}
+
+	if (it != posSet_.end()) {
+		LocatedNavigationReaderSet::iterator sub = it;
+		if (sub->second == baseIt) {
+			++sub;
+		}
+		if (sub != posSet_.end()) {
+			following = sub->second;
+		}
+	}
+
+	return std::make_pair((preceding != end), (following != end));
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::inheritLocatedReader(
+		OpContext &cxt, NavigationReaderIterator src,
+		NavigationReaderIterator dest) {
+	checkReaderIterator(src);
+
+	if (src == dest) {
+		return;
+	}
+
+	const uint64_t pos = src->position_;
+	TupleListReader &baseRadaer = cxt.getReader(0, src->subIndex_);
+
+	applyLocatedReader(cxt, dest, pos, baseRadaer);
+}
+
+void SQLSortOps::WindowMatch::NavigationReaderSet::applyLocatedReader(
+		OpContext &cxt, NavigationReaderIterator it, uint64_t pos,
+		TupleListReader &baseReader) {
+	checkReaderIterator(it);
+
+	if (!baseReader.exists()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	TupleListReader &reader = cxt.getReader(0, it->subIndex_);
+	reader.assign(baseReader);
+	it->position_ = pos;
+}
+
+uint64_t SQLSortOps::WindowMatch::NavigationReaderSet::distanceof(
+		NavigationReaderIterator preceding, NavigationReaderIterator following) {
+	checkReaderIterator(preceding);
+	checkReaderIterator(following);
+
+	if (following->position_ < preceding->position_) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return (following->position_ - preceding->position_);
+}
+void SQLSortOps::WindowMatch::NavigationReaderSet::checkReaderIterator(
+		NavigationReaderIterator it) {
+	if (it < readerList_.begin() || it >= readerList_.end()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+SQLSortOps::WindowMatch::NavigationReaderList
+SQLSortOps::WindowMatch::NavigationReaderSet::makeReaderList(
+		util::StackAllocator &alloc, uint32_t count) {
+	const uint32_t resolvedCount = std::max<uint32_t>(count, 2);
+
+	NavigationReaderList list(alloc);
+	while (list.size() < resolvedCount) {
+		NavigationReaderEntry entry;
+		entry.subIndex_ =
+				IN_NAVIGATION_START + static_cast<uint32_t>(list.size());
+		list.push_back(entry);
+	}
+
+	return list;
+}
+
+
+SQLSortOps::WindowMatch::ColumnNavigator::ColumnNavigator(
+		OpContext &cxt, const NavigationMap &navMap,
+		NavigationReaderSet &readerSet) :
+		readerSet_(readerSet),
+		assignmentExprMap_(makeExpressionMap(cxt.getAllocator(), navMap, true)),
+		emptyExprMap_(makeExpressionMap(cxt.getAllocator(), navMap, false)),
+		ordinal_ (0) {
+}
+
+bool SQLSortOps::WindowMatch::ColumnNavigator::navigate(
+		OpContext &cxt, VariableTable &variableTable) {
+	NavigationKey key;
+	uint32_t navIndex;
+	NavigationPosition pos;
+	for (; variableTable.findNavigationColumn(
+			ordinal_, key, navIndex, pos); ordinal_++) {
+		const bool forAssignment = !pos.second;
+		if (forAssignment) {
+			TupleListReader *&reader = *cxt.getActiveReaderRef();
+			if (!readerSet_.navigateReader(cxt, pos.first, reader)) {
+				return false;
+			}
+		}
+
+		const SQLExprs::Expression &expr =
+				resolveExpression(key, forAssignment, navIndex);
+		if (forAssignment) {
+			expr.eval(cxt.getExprContext());
+		}
+		else {
+			cxt.getDefaultAggregationTupleRef()->setNull(
+					cxt.getDefaultAggregationTupleSet()->getTotalColumnList()[
+							expr.getCode().getAggregationIndex()]);
+		}
+	}
+	return true;
+}
+
+void SQLSortOps::WindowMatch::ColumnNavigator::clear() {
+	ordinal_ = 0;
+}
+
+const SQLExprs::Expression&
+SQLSortOps::WindowMatch::ColumnNavigator::resolveExpression(
+		const NavigationKey &key, bool forAssignment, uint32_t navIndex) {
+	const NavigationExprMap &map =
+			(forAssignment ? assignmentExprMap_: emptyExprMap_);
+	NavigationExprMap::const_iterator it = map.find(key);
+
+	do {
+		if (it == map.end()) {
+			break;
+		}
+
+		const NavigationExprList &list = it->second;
+		if (navIndex >= list.size()) {
+			break;
+		}
+
+		const SQLExprs::Expression *expr = list[navIndex];
+		if (expr == NULL) {
+			break;
+		}
+
+		return *expr;
+	}
+	while (false);
+
+	assert(false);
+	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+}
+
+SQLSortOps::WindowMatch::NavigationExprMap
+SQLSortOps::WindowMatch::ColumnNavigator::makeExpressionMap(
+		util::StackAllocator &alloc, const NavigationMap &navMap,
+		bool forAssignment) {
+	NavigationExprMap exprMap(alloc);
+
+	for (NavigationMap::const_iterator it = navMap.begin();
+			it != navMap.end(); ++it) {
+		const NavigationKey &key = it->first;
+
+		NavigationExprList &list = exprMap.insert(
+				std::make_pair(key, NavigationExprList(alloc))).first->second;
+
+		const NavigationInfo &info = it->second;
+		const size_t navIndex = info.navigationIndex_;
+		list.resize(std::max(list.size(), navIndex + 1), NULL);
+		list[navIndex] =
+				(forAssignment ? info.assignmentExpr_ : info.emptyExpr_);
+	}
+
+	return exprMap;
+}
+
+
+SQLSortOps::WindowMatch::MatchContext::MatchContext(
+		OpContext &cxt, const OpCode &code) :
+		compiler_(cxt.getAllocator()),
+		predMap_(compiler_.makeVariablePredicateMap(
+				code.getFilterPredicate(), code.getPipeProjection())),
+		navMap_(compiler_.makeNavigationMap(
+				code.getFilterPredicate(), code.getPipeProjection())),
+		patternGraph_(cxt, MicroCompiler::predicateToPatternExpr(
+				code.getFilterPredicate())),
+		variableTable_(cxt, &patternGraph_, &predMap_, &navMap_),
+		navReaderSet_(cxt, MicroCompiler::getNavigationReaderCount(cxt, code)),
+		navigator_(cxt, navMap_, navReaderSet_),
+		proj_(MicroCompiler::getNavigableProjections(code.getPipeProjection())),
+		memoryLimit_(MicroCompiler::getPatternMatchMemoryLimit(code)),
+		allRowsPerMatch_(
+				MicroCompiler::isAllRowsPerMatch(code.getFilterPredicate())),
+		keyReaderStarted_(false),
+		predPos_(0) {
+	const SQLValues::CompColumnList *keyColumnList = code.findKeyColumnList();
+	if (keyColumnList != NULL && !keyColumnList->empty()) {
+		partEq_ = UTIL_MAKE_LOCAL_UNIQUE(
+				partEq_, TupleEq, cxt.getAllocator(),
+				SQLValues::TupleComparator(
+						*keyColumnList, &cxt.getVarContext(), false));
+	}
+}
+
+const SQLOps::Projection*
+SQLSortOps::WindowMatch::MatchContext::findProjectionAt(NavigationType type) {
+	switch (type) {
+	case NAV_PROJECTION_PIPE_ONCE:
+		return MicroCompiler::getProjectionElement(proj_, 0);
+	case NAV_PROJECTION_PIPE_EACH:
+		return MicroCompiler::getProjectionElement(proj_, 1);
+	default:
+		assert(type == NAV_PROJECTION_FINISH);
+		return MicroCompiler::getProjectionElement(proj_, 2);
+	}
 }
