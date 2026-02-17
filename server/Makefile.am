@@ -228,16 +228,6 @@ NEWSQL_SOURCES = \
 $(QP_SOURCES)\
 $(libdir)/ebb/ebb_request_parser.c \
 $(libdir)/sha2/sha2.c \
-$(libdir)/uuid/uuid/clear.c \
-$(libdir)/uuid/uuid/compare.c \
-$(libdir)/uuid/uuid/copy.c \
-$(libdir)/uuid/uuid/gen_uuid.c \
-$(libdir)/uuid/uuid/isnull.c \
-$(libdir)/uuid/uuid/pack.c \
-$(libdir)/uuid/uuid/parse.c \
-$(libdir)/uuid/uuid/unpack.c \
-$(libdir)/uuid/uuid/unparse.c \
-$(libdir)/uuid/uuid/uuid_time.c \
 $(srcdir)/zlib_utils.cpp \
 $(srcdir)/array_processor.cpp \
 $(srcdir)/authentication.cpp \
@@ -399,28 +389,61 @@ $(sqlitedebugopt) \
 NEWSQL_LDADD = \
 $(QP_LDADD) \
 $(utildir)/libutil.a \
-$(libdir)/MessagePack/libmsgpack.a \
-$(libdir)/zstd/lib/libzstd.a \
 -lpthread -lrt -ldl -lstdc++ -lz \
 $(sqliteworkdir)/libsqlite3.a
 
 NEWSQL_INCLUDES = \
 -I$(srcdir) \
 -I$(utildir) \
--I$(libdir)/MessagePack/include \
--I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
 -I$(libdir)/fletcher32_simd \
 -I$(libdir)/sha2 \
--I$(libdir)/uuid \
 -I$(srcdir)/tr-cpp \
 -I$(sqliteworkdir) \
 -I$(sqlitedir)/src \
--I$(libdir)/zstd/lib \
 -I$(newsqlincdir)
 
 NEWSQL_LDFLAG = \
 -rdynamic
+
+if USE_SYSTEM_UUID
+NEWSQL_LDADD += @UUID_LIBS@
+NEWSQL_CPPFLAGS += @UUID_CFLAGS@
+else
+NEWSQL_SOURCES += \
+$(libdir)/uuid/uuid/clear.c \
+$(libdir)/uuid/uuid/compare.c \
+$(libdir)/uuid/uuid/copy.c \
+$(libdir)/uuid/uuid/gen_uuid.c \
+$(libdir)/uuid/uuid/isnull.c \
+$(libdir)/uuid/uuid/pack.c \
+$(libdir)/uuid/uuid/parse.c \
+$(libdir)/uuid/uuid/unpack.c \
+$(libdir)/uuid/uuid/unparse.c \
+$(libdir)/uuid/uuid/uuid_time.c
+
+NEWSQL_INCLUDES += \
+-I$(libdir)/uuid
+endif
+
+if USE_SYSTEM_ZSTD
+NEWSQL_LDADD += @ZSTD_LIBS@
+NEWSQL_CPPFLAGS += @ZSTD_CFLAGS@
+else
+NEWSQL_LDADD += $(libdir)/zstd/lib/libzstd.a
+NEWSQL_INCLUDES += -I$(libdir)/zstd/lib
+endif
+
+if USE_SYSTEM_MSGPACK
+else
+NEWSQL_LDADD += $(libdir)/MessagePack/libmsgpack.a
+NEWSQL_INCLUDES += -I$(libdir)/MessagePack/include
+endif
+
+if USE_SYSTEM_PICOJSON
+else
+NEWSQL_INCLUDES += -I$(libdir)/picojson/include
+endif
 
 gsserver_SOURCES = $(NEWSQL_SOURCES)
 gsserver_CPPFLAGS = $(NEWSQL_CPPFLAGS) $(NEWSQL_INCLUDES)
