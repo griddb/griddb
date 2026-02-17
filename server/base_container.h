@@ -1225,12 +1225,14 @@ protected:
 		}
 		ChunkKey chunkKey = MAX_CHUNK_KEY;
 		ExpireIntervalCategoryId expireCategoryId = DataStoreV4::DataAffinityUtils::calcExpireIntervalCategoryId(duration);
-		if (baseTime + duration + EXPIRE_MARGIN >
-			baseTime) {
-			uint64_t roundingBitNum = DataStoreV4::DataAffinityUtils::getExpireTimeRoundingBitNum(expireCategoryId);
-			chunkKey = DataStoreV4::DataAffinityUtils::convertTimestamp2ChunkKey(
-				baseTime + duration + EXPIRE_MARGIN,
-				roundingBitNum, true);
+		int64_t val = baseTime + duration;
+		if ((val >= 0) && (val < MAX_TIMESTAMP)) {
+			val = val + EXPIRE_MARGIN;
+			if ((val >= 0) && (val < MAX_TIMESTAMP)) {
+				uint64_t roundingBitNum = DataStoreV4::DataAffinityUtils::getExpireTimeRoundingBitNum(expireCategoryId);
+				chunkKey = DataStoreV4::DataAffinityUtils::convertTimestamp2ChunkKey(
+					val, roundingBitNum, true);
+			}
 		}
 		return chunkKey;
 	}
