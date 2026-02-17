@@ -129,6 +129,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V5.6 Release Notes](docs/GridDB-5.6-CE-RELEASE_NOTES.md)
   - [V5.7 Release Notes](docs/GridDB-5.7-CE-RELEASE_NOTES.md)
   - [V5.8 Release Notes](docs/GridDB-5.8-CE-RELEASE_NOTES.md)
+  - [V5.9 Release Notes](docs/GridDB-5.9-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
