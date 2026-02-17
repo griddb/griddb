@@ -75,6 +75,7 @@ public:
 			int32_t level, const util::DateTime &dateTime,
 			const char8_t *data, size_t size) = 0;
 	virtual void getHistory(std::vector<u8string> &history) = 0;
+	virtual void reloadOption();
 	virtual void flush() = 0;
 	virtual void close() = 0;
 };
@@ -103,6 +104,7 @@ public:
 	virtual void handleTraceFailure(const char8_t *formattingString);
 
 	virtual void escapeControlChars(NormalOStringStream &oss);
+	virtual void appendRecordSeparator(NormalOStringStream &oss);
 	static bool isControlChar(char8_t ch);
 
 protected:
@@ -119,6 +121,22 @@ protected:
 	virtual bool formatCause(std::ostream &stream, const TraceRecord &record,
 			const char8_t *separator);
 };
+
+namespace detail {
+struct FileTraceOption {
+	explicit FileTraceOption(TraceHandler &traceHandler);
+
+	u8string name_;
+	u8string baseDir_;
+	u8string suffix_;
+
+	uint64_t maxFileSize_;
+	uint32_t maxFileCount_;
+
+	TraceOption::RotationMode rotationMode_;
+	TraceHandler *traceHandler_;
+};
+} 
 
 class TraceManager;
 
@@ -187,6 +205,8 @@ public:
 
 	void setRotationFileName(const char8_t *name);
 
+	void setRotationFileSuffix(const char8_t *suffix);
+
 	void setMaxRotationFileSize(int32_t maxRotationFileSize);
 
 	void setMaxRotationFileCount(int32_t maxRotationFileCount);
@@ -198,6 +218,10 @@ public:
 	void getHistory(std::vector<u8string> &history);
 
 	void flushAll();
+
+	void apply(Tracer &tracer);
+
+	TraceManager& getSubManager(const char8_t *name);
 
 	static TraceManager& getInstance();
 
@@ -211,27 +235,35 @@ protected:
 
 private:
 	typedef std::map<u8string, Tracer*> TracerMap;
+	typedef std::map<u8string, TraceManager*> ManagerMap;
 
 	TraceManager(const TraceManager&);
 	TraceManager& operator=(const TraceManager&);
 
+	void setUpSubManager(LockGuard<Mutex>&, TraceManager &subManager) const;
+	void setOutputTypeInternal(
+			LockGuard<Mutex>&, TraceOption::OutputType outputType);
+
 	TraceWriter* getDefaultWriter(TraceOption::OutputType type);
+	void updateFileTraceOption(LockGuard<Mutex>&);
+
+	template<typename T>
+	static void clearMap(std::map<u8string, T*> &map) throw();
 
 	Mutex mutex_;
 
-	TraceWriter *filesWriter_;
+	ManagerMap subManagerMap_;
+	bool asSubManager_;
+
+	UTIL_UNIQUE_PTR<TraceWriter> filesWriter_;
 	TraceFormatter defaultFormatter_;
 	TracerMap tracerMap_;
 
 	TraceOption::OutputType outputType_;
 	TraceFormatter *formatter_;
-	int32_t minOutputLevel_;
-	u8string rotationFilesDirectory_;
-	u8string rotationFileName_;
-	uint64_t maxRotationFileSize_;
-	uint32_t maxRotationFileCount_;
-	TraceOption::RotationMode rotationMode_;
 	UTIL_UNIQUE_PTR<detail::ProxyTraceHandler> proxyTraceHandler_;
+	detail::FileTraceOption fileTraceOption_;
+	int32_t minOutputLevel_;
 };
 
 namespace detail {
@@ -241,35 +273,28 @@ struct TraceUtil {
 
 class FileTraceWriter : public TraceWriter {
 public:
-	FileTraceWriter(
-			const char8_t *name, const char8_t *baseDir,
-			uint64_t maxFileSize, uint32_t maxFileCount,
-			TraceOption::RotationMode rotationMode,
-			TraceHandler &tracerHandler, bool prepareFileFirst = true);
+	FileTraceWriter(const FileTraceOption *optionRef, bool prepareFileFirst);
 	virtual ~FileTraceWriter();
 	virtual void write(
 			int32_t level, const util::DateTime &dateTime,
 			const char8_t *data, size_t size);
 	virtual void getHistory(std::vector<u8string> &history);
+	virtual void reloadOption();
 	virtual void flush();
 	virtual void close();
 
 private:
 	bool prepareFile(
 			int32_t level, const util::DateTime &dateTime, size_t appendingSize);
-
-	u8string name_;
-	u8string baseDir_;
+	FileTraceOption acceptOption(const FileTraceOption &src);
 
 	Mutex mutex_;
 	NamedFile lastFile_;
 	util::DateTime lastDate_;
 
-	uint64_t maxFileSize_;
-	uint32_t maxFileCount_;
-	TraceOption::RotationMode rotationMode_;
+	const FileTraceOption *optionRef_;
+	FileTraceOption option_;
 
-	TraceHandler &traceHandler_;
 	size_t reentrantCount_;
 };
 
@@ -322,9 +347,13 @@ public:
 
 	void setProxy(TraceHandler *proxy);
 
+	void apply(ProxyTraceHandler &another);
+
 	virtual void startStream();
 
 private:
+	TraceHandler* getProxy();
+
 	RWLock rwLock_;
 	TraceHandler *proxy_;
 };

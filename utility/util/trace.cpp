@@ -36,11 +36,17 @@
 
 namespace util {
 
+
 TraceHandler::~TraceHandler() {
 }
 
+
 TraceWriter::~TraceWriter() {
 }
+
+void TraceWriter::reloadOption() {
+}
+
 
 TraceRecord::TraceRecord() :
 		hostName_(NULL),
@@ -53,6 +59,7 @@ TraceRecord::TraceRecord() :
 		cause_(NULL),
 		causeInHandling_(NULL) {
 }
+
 
 TraceFormatter::~TraceFormatter() {
 }
@@ -131,6 +138,10 @@ void TraceFormatter::escapeControlChars(NormalOStringStream &oss) {
 			}
 		}
 	}
+}
+
+void TraceFormatter::appendRecordSeparator(NormalOStringStream &oss) {
+	oss << std::endl;
 }
 
 bool TraceFormatter::isControlChar(char8_t ch) {
@@ -263,23 +274,28 @@ struct NoDigitChecker {
 };
 }
 
+
+FileTraceOption::FileTraceOption(TraceHandler &traceHandler) :
+		name_(""),
+		baseDir_("log"),
+		suffix_(".log"),
+		maxFileSize_(1024 * 1024),
+		maxFileCount_(10),
+		rotationMode_(TraceOption::ROTATION_SEQUENTIAL),
+		traceHandler_(&traceHandler) {
+}
+
+
 FileTraceWriter::FileTraceWriter(
-		const char8_t *name, const char8_t *baseDir,
-		uint64_t maxFileSize, uint32_t maxFileCount,
-		TraceOption::RotationMode rotationMode,
-		TraceHandler &tracerHandler, bool prepareFileFirst) :
-		name_(strlen(name) == 0 ? "log" : name),
-		baseDir_(baseDir),
+		const FileTraceOption *optionRef, bool prepareFileFirst) :
 		mutex_(UTIL_MUTEX_RECURSIVE),
-		maxFileSize_(maxFileSize),
-		maxFileCount_(maxFileCount),
-		rotationMode_(rotationMode),
-		traceHandler_(tracerHandler),
+		optionRef_(optionRef),
+		option_(acceptOption(*optionRef)),
 		reentrantCount_(0) {
 	if (prepareFileFirst) {
 		prepareFile(TraceOption::LEVEL_INFO, DateTime::now(false), 0);
 		try {
-			traceHandler_.startStream();
+			option_.traceHandler_->startStream();
 		}
 		catch (...) {
 		}
@@ -306,7 +322,7 @@ void FileTraceWriter::write(
 		} counter(reentrantCount_);
 
 		try {
-			traceHandler_.startStream();
+			option_.traceHandler_->startStream();
 		}
 		catch (...) {
 			try {
@@ -357,6 +373,14 @@ void FileTraceWriter::getHistory(std::vector<u8string> &history) {
 	}
 }
 
+void FileTraceWriter::reloadOption() {
+	LockGuard<Mutex> guard(mutex_);
+	if (!lastFile_.isClosed()) {
+		lastFile_.close();
+	}
+	option_ = acceptOption(*optionRef_);
+}
+
 void FileTraceWriter::flush() {
 	LockGuard<Mutex> guard(mutex_);
 	if (!lastFile_.isClosed()) {
@@ -374,24 +398,25 @@ bool FileTraceWriter::prepareFile(
 	(void) level;
 
 	if (!lastFile_.isClosed() &&
-			static_cast<uint64_t>(lastFile_.tell()) + appendingSize <= maxFileSize_ &&
+			static_cast<uint64_t>(lastFile_.tell()) + appendingSize <=
+					option_.maxFileSize_ &&
 			lastDate_ != util::DateTime::INITIAL_UNIX_TIME &&
 			dateTime.getDifference(
 					lastDate_, util::DateTime::FIELD_DAY_OF_MONTH) <= 0) {
 		return false;
 	}
 
-	const char8_t *const suffix = ".log";
+	const char8_t *const suffix = option_.suffix_.c_str();
 
 	if (lastFile_.isClosed()) {
-		FileSystem::createDirectoryTree(baseDir_.c_str());
+		FileSystem::createDirectoryTree(option_.baseDir_.c_str());
 	}
 	else {
 		lastFile_.close();
 	}
 
 	u8string lastPath;
-	if (rotationMode_ == TraceOption::ROTATION_DAILY) {
+	if (option_.rotationMode_ == TraceOption::ROTATION_DAILY) {
 		u8string baseName;
 		{
 			int32_t year, month, monthDay, hour, minute, second, milliSecond;
@@ -402,7 +427,7 @@ bool FileTraceWriter::prepareFile(
 			NormalOStringStream oss;
 			oss.fill('0');
 			oss <<
-					name_ << "-" <<
+					option_.name_ << "-" <<
 					std::setw(4) << year <<
 					std::setw(2) << month <<
 					std::setw(2) << monthDay;
@@ -415,15 +440,15 @@ bool FileTraceWriter::prepareFile(
 		util::NormalSortedList< Info, std::greater<Info> > list;
 
 		uint32_t nextSubNum = 0;
-		Directory directory(baseDir_.c_str());
+		Directory directory(option_.baseDir_.c_str());
 		for (u8string fileName; directory.nextEntry(fileName);) {
 
-			if (fileName.find(name_) != 0) {
+			if (fileName.find(option_.name_) != 0) {
 				continue;
 			}
 
 			const u8string::iterator beginIt = fileName.begin();
-			u8string::iterator lastIt = beginIt + name_.size();
+			u8string::iterator lastIt = beginIt + option_.name_.size();
 			if (lastIt == fileName.end() || *lastIt != '-') {
 				continue;
 			}
@@ -469,11 +494,13 @@ bool FileTraceWriter::prepareFile(
 			list.insert(info);
 		}
 
-		while (!list.empty() && list.size() >= maxFileCount_ && maxFileCount_ > 0) {
+		while (!list.empty() &&
+				list.size() >= option_.maxFileCount_ &&
+				option_.maxFileCount_ > 0) {
 			const Info &info = *(list.end() - 1);
 			NormalOStringStream oss;
 			oss.fill('0');
-			oss << name_ << "-" << std::setw(dateSize) << info.first;
+			oss << option_.name_ << "-" << std::setw(dateSize) << info.first;
 			if (info.second > 0) {
 				oss << "-" << info.second;
 			}
@@ -481,7 +508,7 @@ bool FileTraceWriter::prepareFile(
 
 			u8string path;
 			FileSystem::createPath(
-					baseDir_.c_str(), oss.str().c_str(), path);
+					option_.baseDir_.c_str(), oss.str().c_str(), path);
 			try {
 				FileSystem::removeFile(path.c_str());
 			}
@@ -498,12 +525,13 @@ bool FileTraceWriter::prepareFile(
 			}
 			oss << suffix;
 			FileSystem::createPath(
-					baseDir_.c_str(), oss.str().c_str(), lastPath);
+					option_.baseDir_.c_str(), oss.str().c_str(), lastPath);
 		}
 	}
 	else {
 		FileSystem::createPath(
-				baseDir_.c_str(), (name_ + suffix).c_str(), lastPath);
+				option_.baseDir_.c_str(), (option_.name_ + suffix).c_str(),
+				lastPath);
 
 		bool rotate;
 		if (FileSystem::exists(lastPath.c_str())) {
@@ -516,13 +544,14 @@ bool FileTraceWriter::prepareFile(
 		if (rotate) {
 			u8string oldPath;
 			u8string newPath;
-			for (uint32_t i = maxFileCount_; i > 0; i--) {
+			for (uint32_t i = option_.maxFileCount_; i > 0; i--) {
 				oldPath.swap(newPath);
 				if (i > 1) {
 					NormalOStringStream oss;
-					oss << name_ << "-" << (i - 1) << suffix;
+					oss << option_.name_ << "-" << (i - 1) << suffix;
 					FileSystem::createPath(
-							baseDir_.c_str(), oss.str().c_str(), newPath);
+							option_.baseDir_.c_str(), oss.str().c_str(),
+							newPath);
 				}
 				else {
 					newPath = lastPath;
@@ -539,6 +568,15 @@ bool FileTraceWriter::prepareFile(
 
 	return true;
 }
+
+FileTraceOption FileTraceWriter::acceptOption(const FileTraceOption &src) {
+	FileTraceOption dest = src;
+	if (dest.name_.empty()) {
+		dest.name_ = "log";
+	}
+	return dest;
+}
+
 
 StdTraceWriter::~StdTraceWriter() {
 }
@@ -574,6 +612,7 @@ StdTraceWriter& StdTraceWriter::getForStdErr() {
 	static StdTraceWriter instance(stderr);
 	return instance;
 }
+
 
 ChainTraceWriter::ChainTraceWriter(
 		UTIL_UNIQUE_PTR<TraceWriter> writer1,
@@ -612,6 +651,7 @@ ChainTraceWriter& ChainTraceWriter::getForStdOutAndStdErr() {
 	return instance;
 }
 
+
 ProxyTraceHandler::ProxyTraceHandler() : proxy_(NULL) {
 }
 
@@ -623,6 +663,11 @@ void ProxyTraceHandler::setProxy(TraceHandler *proxy) {
 	proxy_ = proxy;
 }
 
+void ProxyTraceHandler::apply(ProxyTraceHandler &another) {
+	TraceHandler *proxy = getProxy();
+	another.setProxy(proxy);
+}
+
 void ProxyTraceHandler::startStream() {
 	LockGuard<RWLock::ReadLock> guard(rwLock_.getReadLock());
 	if (proxy_ != NULL) {
@@ -630,7 +675,13 @@ void ProxyTraceHandler::startStream() {
 	}
 }
 
+TraceHandler* ProxyTraceHandler::getProxy() {
+	LockGuard<RWLock::WriteLock> guard(rwLock_.getWriteLock());
+	return proxy_;
+}
+
 } 
+
 
 void Tracer::put(
 		int32_t level,
@@ -666,7 +717,7 @@ void Tracer::put(
 		NormalOStringStream oss;
 		formatter->format(oss, record);
 		formatter->escapeControlChars(oss);
-		oss << std::endl;
+		formatter->appendRecordSeparator(oss);
 
 		TraceWriter *writer = writer_;
 		if (writer != NULL) {
@@ -715,7 +766,12 @@ Tracer::Tracer(
 		minOutputLevel_(0) {
 }
 
+
 Tracer& TraceManager::resolveTracer(const char8_t *name) {
+	if (asSubManager_) {
+		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION, "");
+	}
+
 
 	LockGuard<Mutex> guard(mutex_);
 	TracerMap::iterator it = tracerMap_.find(name);
@@ -723,19 +779,14 @@ Tracer& TraceManager::resolveTracer(const char8_t *name) {
 		return *it->second;
 	}
 
-	Tracer *tracer = UTIL_NEW Tracer(
-			name, getDefaultWriter(outputType_), defaultFormatter_);
+	UTIL_UNIQUE_PTR<Tracer> tracer(UTIL_NEW Tracer(
+			name, getDefaultWriter(outputType_), defaultFormatter_));
+
 	tracer->formatter_ = formatter_;
 	tracer->setMinOutputLevel(minOutputLevel_);
-	try {
-		tracerMap_.insert(std::make_pair(name, tracer));
-	}
-	catch (...) {
-		delete tracer;
-		throw;
-	}
+	tracerMap_.insert(std::make_pair(name, tracer.get()));
 
-	return *tracer;
+	return *tracer.release();
 }
 
 Tracer* TraceManager::getTracer(const char8_t *name) {
@@ -760,31 +811,11 @@ void TraceManager::getAllTracers(std::vector<Tracer*> &tracerList) {
 
 void TraceManager::setOutputType(TraceOption::OutputType outputType) {
 	LockGuard<Mutex> guard(mutex_);
-	TraceWriter *oldWriter = getDefaultWriter(outputType_);
-	if (outputType == TraceOption::OUTPUT_ROTATION_FILES &&
-			filesWriter_ == NULL) {
-		filesWriter_ = UTIL_NEW detail::FileTraceWriter(
-				rotationFileName_.c_str(), rotationFilesDirectory_.c_str(),
-				maxRotationFileSize_, maxRotationFileCount_, rotationMode_,
-				*proxyTraceHandler_, false);
-	}
-
-	TraceWriter *newWriter = getDefaultWriter(outputType);
-	if (oldWriter != NULL && oldWriter != newWriter) {
-		oldWriter->close();
-	}
-
-	for (TracerMap::iterator i = tracerMap_.begin();
-			i != tracerMap_.end(); ++i) {
-		i->second->writer_ = newWriter;
-	}
-
-	outputType_ = outputType;
+	setOutputTypeInternal(guard, outputType);
 }
 
 void TraceManager::resetFileWriter() {
-	delete filesWriter_;
-	filesWriter_ = NULL;
+	filesWriter_.reset();
 }
 
 void TraceManager::setFormatter(TraceFormatter *formatter) {
@@ -809,52 +840,43 @@ void TraceManager::setMinOutputLevel(int32_t minOutputLevel) {
 
 void TraceManager::setRotationFilesDirectory(const char8_t *directory) {
 	LockGuard<Mutex> guard(mutex_);
-	if (filesWriter_ != NULL) {
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Rotation file writer has already been created");
-	}
-	rotationFilesDirectory_ = directory;
+	fileTraceOption_.baseDir_ = directory;
+	updateFileTraceOption(guard);
 }
 
 const char8_t* TraceManager::getRotationFilesDirectory() {
-	return rotationFilesDirectory_.c_str();
+	return fileTraceOption_.baseDir_.c_str();
 }
 
 void TraceManager::setRotationFileName(const char8_t *name) {
 	LockGuard<Mutex> guard(mutex_);
-	if (filesWriter_ != NULL) {
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Rotation file writer has already been created");
-	}
-	rotationFileName_ = name;
+	fileTraceOption_.name_ = name;
+	updateFileTraceOption(guard);
+}
+
+void TraceManager::setRotationFileSuffix(const char8_t *suffix) {
+	LockGuard<Mutex> guard(mutex_);
+	fileTraceOption_.suffix_ = suffix;
+	updateFileTraceOption(guard);
 }
 
 void TraceManager::setMaxRotationFileSize(int32_t maxRotationFileSize) {
 	LockGuard<Mutex> guard(mutex_);
-	if (filesWriter_ != NULL) {
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Rotation file writer has already been created");
-	}
-	maxRotationFileSize_ = maxRotationFileSize;
+	fileTraceOption_.maxFileSize_ = maxRotationFileSize;
+	updateFileTraceOption(guard);
 }
 
 void TraceManager::setMaxRotationFileCount(int32_t maxRotationFileCount) {
 	LockGuard<Mutex> guard(mutex_);
-	if (filesWriter_ != NULL) {
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Rotation file writer has already been created");
-	}
-	maxRotationFileCount_ = maxRotationFileCount;
+	fileTraceOption_.maxFileCount_ = maxRotationFileCount;
+	updateFileTraceOption(guard);
 }
 
 void TraceManager::setRotationMode(
 		TraceOption::RotationMode rotationMode) {
 	LockGuard<Mutex> guard(mutex_);
-	if (filesWriter_ != NULL) {
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Rotation file writer has already been created");
-	}
-	rotationMode_ = rotationMode;
+	fileTraceOption_.rotationMode_ = rotationMode;
+	updateFileTraceOption(guard);
 }
 
 void TraceManager::setTraceHandler(TraceHandler *traceHandler) {
@@ -877,48 +899,32 @@ void TraceManager::flushAll() {
 	}
 }
 
+void TraceManager::apply(Tracer &tracer) {
+	LockGuard<Mutex> guard(mutex_);
+	tracer.writer_ = getDefaultWriter(outputType_);
+	tracer.formatter_ = formatter_;
+}
+
+TraceManager& TraceManager::getSubManager(const char8_t *name) {
+	LockGuard<Mutex> guard(mutex_);
+
+	if (asSubManager_) {
+		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION, "");
+	}
+
+	const u8string key = name;
+	TraceManager *&sub = subManagerMap_[key];
+	if (sub == NULL) {
+		sub = UTIL_NEW TraceManager();
+		setUpSubManager(guard, *sub);
+	}
+
+	return *sub;
+}
+
 TraceManager& TraceManager::getInstance() {
 	static TraceManager instance;
 	return instance;
-}
-
-TraceManager::TraceManager() :
-		filesWriter_(NULL),
-		outputType_(TraceOption::OUTPUT_STDERR),
-		formatter_(&defaultFormatter_),
-		minOutputLevel_(0),
-		rotationFilesDirectory_("log"),
-		maxRotationFileSize_(1024 * 1024),
-		maxRotationFileCount_(10),
-		rotationMode_(TraceOption::ROTATION_SEQUENTIAL),
-		proxyTraceHandler_(UTIL_NEW detail::ProxyTraceHandler()) {
-}
-
-TraceManager::~TraceManager() try {
-	delete filesWriter_;
-	for (TracerMap::iterator i = tracerMap_.begin();
-			i != tracerMap_.end(); ++i) {
-		delete i->second;
-	}
-}
-catch (...) {
-}
-
-TraceWriter* TraceManager::getDefaultWriter(TraceOption::OutputType type) {
-	switch (type) {
-	case TraceOption::OUTPUT_ROTATION_FILES:
-		return filesWriter_;
-	case TraceOption::OUTPUT_STDOUT:
-		return &detail::StdTraceWriter::getForStdOut();
-	case TraceOption::OUTPUT_STDERR:
-		return &detail::StdTraceWriter::getForStdErr();
-	case TraceOption::OUTPUT_STDOUT_AND_STDERR:
-		return &detail::ChainTraceWriter::getForStdOutAndStdErr();
-	case TraceOption::OUTPUT_NONE:
-		return NULL;
-	default:
-		return NULL;
-	}
 }
 
 const char8_t* TraceManager::outputLevelToString(int32_t minOutputLevel) {
@@ -953,6 +959,88 @@ bool TraceManager::stringToOutputLevel(const std::string &level, int32_t &output
 		return false;
 	}
 	return true;
+}
+
+TraceManager::TraceManager() :
+		asSubManager_(false),
+		outputType_(TraceOption::OUTPUT_STDERR),
+		formatter_(&defaultFormatter_),
+		proxyTraceHandler_(UTIL_NEW detail::ProxyTraceHandler()),
+		fileTraceOption_(*proxyTraceHandler_),
+		minOutputLevel_(0) {
+}
+
+void TraceManager::setUpSubManager(
+		LockGuard<Mutex> &guard, TraceManager &subManager) const {
+	subManager.asSubManager_ = true;
+	subManager.formatter_ = formatter_;
+
+	proxyTraceHandler_->apply(*subManager.proxyTraceHandler_);
+	subManager.fileTraceOption_ = fileTraceOption_;
+	subManager.fileTraceOption_.traceHandler_ =
+			subManager.proxyTraceHandler_.get();
+
+	subManager.minOutputLevel_ = minOutputLevel_;
+	subManager.setOutputTypeInternal(guard, outputType_);
+}
+
+void TraceManager::setOutputTypeInternal(
+		LockGuard<Mutex>&, TraceOption::OutputType outputType) {
+	TraceWriter *oldWriter = getDefaultWriter(outputType_);
+	if (outputType == TraceOption::OUTPUT_ROTATION_FILES &&
+			filesWriter_.get() == NULL) {
+		filesWriter_.reset(
+				UTIL_NEW detail::FileTraceWriter(&fileTraceOption_, false));
+	}
+
+	TraceWriter *newWriter = getDefaultWriter(outputType);
+	if (oldWriter != NULL && oldWriter != newWriter) {
+		oldWriter->close();
+	}
+
+	for (TracerMap::iterator i = tracerMap_.begin();
+			i != tracerMap_.end(); ++i) {
+		i->second->writer_ = newWriter;
+	}
+
+	outputType_ = outputType;
+}
+
+TraceManager::~TraceManager() {
+	clearMap(subManagerMap_);
+	clearMap(tracerMap_);
+}
+
+TraceWriter* TraceManager::getDefaultWriter(TraceOption::OutputType type) {
+	switch (type) {
+	case TraceOption::OUTPUT_ROTATION_FILES:
+		return filesWriter_.get();
+	case TraceOption::OUTPUT_STDOUT:
+		return &detail::StdTraceWriter::getForStdOut();
+	case TraceOption::OUTPUT_STDERR:
+		return &detail::StdTraceWriter::getForStdErr();
+	case TraceOption::OUTPUT_STDOUT_AND_STDERR:
+		return &detail::ChainTraceWriter::getForStdOutAndStdErr();
+	case TraceOption::OUTPUT_NONE:
+		return NULL;
+	default:
+		return NULL;
+	}
+}
+
+void TraceManager::updateFileTraceOption(LockGuard<Mutex>&) {
+	if (filesWriter_.get() != NULL) {
+		filesWriter_->reloadOption();
+	}
+}
+
+template<typename T>
+void TraceManager::clearMap(std::map<u8string, T*> &map) throw() {
+	for (typename std::map<u8string, T*>::iterator it = map.begin();
+			it != map.end(); ++it) {
+		delete it->second;
+	}
+	map.clear();
 }
 
 namespace detail {

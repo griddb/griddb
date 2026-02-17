@@ -2228,6 +2228,8 @@ static AllocatorManager::Initializer g_allocatorManagerInitializer;
 class AllocatorLimitter {
 public:
 	class Scope;
+	class ConfigScope;
+
 	struct Stats;
 
 	AllocatorLimitter(const AllocatorInfo &info, AllocatorLimitter *parent);
@@ -2236,6 +2238,7 @@ public:
 	Stats getStats();
 
 	void setLimit(size_t size);
+	void setEssential(size_t size);
 	void setFailOnExcess(bool enabled);
 
 	size_t acquire(
@@ -2261,20 +2264,26 @@ private:
 			const AllocatorLimitter *requester);
 	void releaseLocal(size_t size);
 
+	bool isForceAcquireAllowed(size_t minimum, bool force);
+
 	size_t getLocalAvailableSize();
 	size_t getLocalUsageSize();
 	void updatePeakUsageSize();
 
 	const AllocatorLimitter& resolveRequester(const AllocatorLimitter *base);
 	bool resolveFailOnExcess(
-			const AllocatorLimitter *requester, bool acquiringForcibly);
+			const AllocatorLimitter *requester, bool forceAcquirable);
 
 	void errorNewLimit(const AllocatorInfo &info, size_t newLimit);
 	size_t errorAcquisition(const AllocatorInfo &info, size_t required);
 
+	bool enableFailOnExcessScoped();
+	void disableFailOnExcessScoped();
+
 	const AllocatorInfo info_;
 	AllocatorLimitter *parent_;
 	size_t limit_;
+	size_t essential_;
 	size_t acquired_;
 	size_t reserved_;
 	size_t peakUsage_;
@@ -2298,6 +2307,18 @@ private:
 	AllocatorLimitter *orgLimitter_;
 	void *allocator_;
 	UnbindFunc unbinder_;
+};
+
+class AllocatorLimitter::ConfigScope {
+public:
+	explicit ConfigScope(AllocatorLimitter &limitter);
+	~ConfigScope();
+
+	void enableFailOnExcess();
+
+private:
+	AllocatorLimitter &limitter_;
+	bool failOnExcessScoped_;
 };
 
 struct AllocatorLimitter::Stats {
