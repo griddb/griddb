@@ -29,7 +29,15 @@ build_griddb() {
     local os=$1
     cd griddb/
     case $os in
-        $CENTOS | $OPENSUSE | $UBUNTU | $ROCKYLINUX)
+        $CENTOS | $OPENSUSE | $ROCKYLINUX)
+            # Build GridDB server
+            ./bootstrap.sh
+            ./configure
+            make
+        ;;
+        $UBUNTU)
+            export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+            export PATH=$JAVA_HOME/bin:$PATH
             # Build GridDB server
             ./bootstrap.sh
             ./configure
