@@ -6,6 +6,6 @@ ENV DEBIAN_FRONTEND noninteractive
 # Install dependency
 RUN set -eux \
     && apt-get update -y \
-    && apt-get install -y debhelper libz-dev default-jdk \
+    && apt-get install -y debhelper libz-dev openjdk-8-jdk \
                           ant tcl rsync zip python3 systemd \
     && apt-get clean all
