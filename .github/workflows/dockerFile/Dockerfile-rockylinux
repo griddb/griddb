@@ -3,5 +3,5 @@ FROM rockylinux:9.3
 # Install dependency other
 RUN set -eux \
     && yum install -y python3 automake make gcc gcc-c++ \
-                      java ant zlib-devel tcl zip rpm-build rsync procps-ng systemd \
+                      java-1.8.0-openjdk-devel ant-openjdk8 zlib-devel tcl zip rpm-build rsync procps-ng systemd \
     && yum clean all
