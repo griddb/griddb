@@ -117,6 +117,7 @@ public:
 	static bool isV4OId(OId oId);
 	int64_t getV5ChunkId(DSGroupId groupId, ChunkId v4ChunkId);
 	void updateStoreObjectUseStats();
+	void updateProfileCounter();
 	const ChunkManagerStats& getChunkManagerStats();
 
 	inline uint32_t getChunkSize() const {
@@ -603,6 +604,10 @@ inline ObjectType ObjectManagerV4::getObjectType(uint8_t* objectAddr) const {
 
 inline void ObjectManagerV4::updateStoreObjectUseStats() {
 	chunkManager_->updateStoreObjectUseStats();
+}
+
+inline void ObjectManagerV4::updateProfileCounter() {
+	chunkManager_->updateProfileCounter();
 }
 
 inline ChunkCategoryId ObjectManagerV4::getChunkCategoryNum() const {

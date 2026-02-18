@@ -412,6 +412,9 @@ typedef int64_t ssize_t;
 #	endif
 #endif 
 
+#ifndef _WIN32
+#define UTIL_WIN32_API_CALL __stdcall
+#endif
 
 #ifndef UTIL_UTF8_CHAR_DEFINED
 typedef char char8_t;

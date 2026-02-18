@@ -60,7 +60,8 @@ const int32_t SQLService::SQL_V4_1_0_MSG_VERSION = 3;
 const int32_t SQLService::SQL_V5_5_MSG_VERSION = 4;
 const int32_t SQLService::SQL_V5_6_MSG_VERSION = 5;
 const int32_t SQLService::SQL_V5_8_MSG_VERSION = 6;
-const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_8_MSG_VERSION;
+const int32_t SQLService::SQL_V5_9_MSG_VERSION = 7;
+const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_9_MSG_VERSION;
 const bool SQLService::SQL_MSG_BACKWARD_COMPATIBLE = false;
 
 static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
@@ -69,7 +70,9 @@ static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
 		0 /* sentinel */
 };
 
-const int32_t SQLService::DEFAULT_RESOURCE_CONTROL_LEVEL = 2;
+const int32_t SQLService::MAX_RESOURCE_CONTROL_LEVEL = 3;
+const int32_t SQLService::DEFAULT_RESOURCE_CONTROL_LEVEL =
+		MAX_RESOURCE_CONTROL_LEVEL;
 
 template<typename S>
 void SQLGetContainerHandler::InMessage::decode(S &in) {
@@ -788,9 +791,6 @@ SQLService::SQLService(
 			EventEngine::HANDLING_PARTITION_SERIALIZED);
 
 		ee_.setHandler(EXECUTE_JOB, executeHandler_);
-		ee_.setHandler(CONTROL_JOB, controlHandler_);
-		ee_.setHandlingMode(CONTROL_JOB,
-			EventEngine::HANDLING_IMMEDIATE);
 		ee_.setHandler(CHECK_TIMEOUT_JOB, resourceCheckHandler_);
 		ee_.setHandler(REQUEST_CANCEL, resourceCheckHandler_);
 		ee_.setHandlingMode(CHECK_TIMEOUT_JOB,
@@ -818,7 +818,7 @@ SQLService::SQLService(
 		ConfigTable* tmpTable = const_cast<ConfigTable*>(&config);
 		config_.setUpConfigHandler(this, *tmpTable);
 
-		setUpMemoryLimits();
+		setUpInitialMemoryLimits();
 
 	}
 	catch (std::exception& e) {
@@ -985,6 +985,7 @@ void SQLService::initialize(const ManagerSet& mgrSet) {
 void SQLService::start() {
 	try {
 		ee_.start();
+		executionManager_->getJobManager()->start();
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "SQL service start failed");
@@ -996,6 +997,7 @@ void SQLService::start() {
 */
 void SQLService::shutdown() {
 	ee_.shutdown();
+	executionManager_->getJobManager()->shutdown();
 }
 
 /*!
@@ -1003,6 +1005,7 @@ void SQLService::shutdown() {
 */
 void SQLService::waitForShutdown() {
 	ee_.waitForShutdown();
+	executionManager_->getJobManager()->waitForShutdown();
 }
 
 /*!
@@ -1242,11 +1245,6 @@ void SQLRequestHandler::operator ()(EventContext& ec, Event& ev) {
 		}
 
 		executionManager_->setRequestedConnectionEnv(request, connOption);
-
-		util::AllocatorLimitter::Scope limitterScope(
-				workMemoryLimitter_, alloc);
-		util::AllocatorLimitter::Scope varLimitterScope(
-				workMemoryLimitter_, ec.getVariableSizeAllocator());
 
 		switch (request.requestType_) {
 		case REQUEST_TYPE_QUERY:
@@ -1760,22 +1758,49 @@ void SQLCancelHandler::operator ()(EventContext& ec, Event& ev) {
 		decodeValue(in, execId);
 		StatementHandler::decodeUUID<util::ByteStream<util::ArrayInStream>>(in, cancelClientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 		decodeValue(in, cancelClientId.sessionId_);
+		try {
+			if (in.base().remaining()) {
+				uint8_t flag;
+				in >> flag;
+				if (flag == 1) {
+					isClientCancel = true;
+				}
+			}
+		}
+		catch (std::exception& e) {
+		}
 
 		SQLExecutionManager::Latch latch(cancelClientId, executionManager_);
 		SQLExecution* execution = latch.get();
 		if (execution) {
-			JobId jobId;
-			execution->getContext().getCurrentJobId(jobId);
-			if (!isClientCancel) {
-				GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
-					"Call cancel by node failure, jobId=" << jobId);
+			if (jobManager_->isPriorityJobActivated()) {
+				JobId jobId(cancelClientId, execId);
+				execution->getContext().getCurrentJobId(jobId);
+				if (!isClientCancel) {
+					GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
+						"Call cancel by node failure, jobId=" << jobId);
+				}
+				else {
+					GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
+						"Call cancel by client, jobId=" << jobId);
+				}
+				jobManager_->cancel(ec, jobId, true);
+				execution->cancel(ec, execId);
 			}
 			else {
-				GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
-					"Call cancel by client, jobId=" << jobId);
+				JobId jobId;
+				execution->getContext().getCurrentJobId(jobId);
+				if (!isClientCancel) {
+					GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
+						"Call cancel by node failure, jobId=" << jobId);
+				}
+				else {
+					GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
+						"Call cancel by client, jobId=" << jobId);
+				}
+				jobManager_->cancel(ec, jobId, true);
+				execution->cancel(ec, execId);
 			}
-			jobManager_->cancel(ec, jobId, true);
-			execution->cancel(ec, execId);
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_CANCELLED,
@@ -1844,15 +1869,8 @@ void NoSQLSyncReceiveHandler::operator ()(EventContext& ec, Event& ev) {
 			jobId.clientId_ = targetClientId;
 			jobId.execId_ = request.optional_.get<Options::JOB_EXEC_ID>();
 			jobId.versionId_ = request.optional_.get<Options::JOB_VERSION>();
-			JobManager::Latch latch(jobId, "NoSQLSyncReceiveHandler::operator", jobManager_);
-			Job* job = latch.get();
-			if (job) {
-				job->receiveNoSQLResponse(
-					ec, dest, status, request.optional_.get<Options::SUB_CONTAINER_ID>());
-			}
-			else {
-				return;
-			}
+			jobManager_->receiveNoSQLResponse(
+					ec, dest, status, jobId, request.optional_.get<Options::SUB_CONTAINER_ID>());
 		}
 		else {
 			SQLExecutionManager::Latch latch(targetClientId, executionManager_);
@@ -1974,7 +1992,17 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		setUnit(ConfigTable::VALUE_UNIT_SIZE_MB).
 		setMin(0).
 		setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_JOB_ESSENTIAL_MEMORY_LIMIT, INT32).
+		setUnit(ConfigTable::VALUE_UNIT_SIZE_MB).
+		setMin(0).
+		setDefault(0);
 
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_JOB_NODE_TIMEOUT, INT32).
+		setUnit(ConfigTable::VALUE_UNIT_DURATION_S).
+		setMin(0).
+		setDefault(0);
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_NOSQL_FAILOVER_TIMEOUT, INT32).
 		setUnit(ConfigTable::VALUE_UNIT_DURATION_S).
@@ -2025,6 +2053,10 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SQL_PLAN_VERSION, STRING).
 		setDefault("");
 
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_COST_BASED_INDEX_SCAN, BOOL).
+		setDefault(true);
+
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SQL_COST_BASED_JOIN, BOOL).
 		setDefault(true);
 
@@ -2035,6 +2067,19 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT, BOOL).
 		setDefault(true);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_INDEX_SCAN_COST_RATE, DOUBLE)
+		.setDefault(-1.0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_RANGE_SCAN_COST_RATE, DOUBLE)
+		.setDefault(-1.0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_BLOCK_SCAN_COUNT_RATE, DOUBLE)
+		.setDefault(-1.0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_PATTERN_MATCH_MEMORY_LIMIT_RATE, DOUBLE)
+		.setDefault(-1.0);
 
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_TABLE_CACHE_LOAD_DUMP_LIMIT_TIME, INT32).
@@ -2071,15 +2116,34 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		.setMin(0)
 		.setDefault(4);
 	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_STORE_USE_LIMIT_RATE, DOUBLE)
+		.setMin(0)
+		.setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL, INT32)
 		.setMin(0)
-		.setMax(2)
+		.setMax(MAX_RESOURCE_CONTROL_LEVEL)
 		.setDefault(0);
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT, INT32).
 		setUnit(ConfigTable::VALUE_UNIT_SIZE_MB).
 		setMin(0).
 		setDefault(0);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_MONITORING_MEMORY_RATE, DOUBLE)
+		.setMin(0)
+		.setMax(1)
+		.setDefault(0.5);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_MONITORING_STORE_RATE, DOUBLE)
+		.setMin(0)
+		.setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_MONITORING_NETWORK_RATE, DOUBLE)
+		.setMin(0)
+		.setMax(1)
+		.setDefault(0);
 }
 
 /*!
@@ -2225,9 +2289,6 @@ bool SQLService::StatUpdator::operator()(StatTable& stat) {
 	stat.set(STAT_TABLE_PERF_SQL_NUM_CONNECTION, numConnection);
 
 	util::AllocatorLimitter::Stats stats = svc.totalMemoryLimitter_->getStats();
-	if (!stats.failOnExcess_) {
-		stats.limit_ = 0;
-	}
 	stat.set(STAT_TABLE_PERF_SQL_TOTAL_MEMORY, stats.usage_);
 	stat.set(STAT_TABLE_PERF_SQL_PEAK_TOTAL_MEMORY, stats.peakUsage_);
 	stat.set(STAT_TABLE_PERF_SQL_TOTAL_MEMORY_LIMIT, stats.limit_);
@@ -2899,13 +2960,12 @@ bool checkExpiredContainer(
 		ContainerId containerId,
 		TablePartitioningInfo<util::StackAllocator>& partitioningInfo,
 		PartitionTable* pt,
-		const DataStoreConfig& dsConfig) {
+		const DataStoreConfig& dsConfig, SQLExecutionManager* executionManager) {
 	UNUSED_VARIABLE(dsConfig);
 
 	if (!partitioningInfo.isTableExpiration()) {
 		return false;
 	}
-
 	int64_t currentTime = ec.getHandlerStartTime().getUnixTime();
 
 	util::Vector<NodeAffinityNumber> affinityNumberList(alloc);
@@ -3025,6 +3085,9 @@ bool checkExpiredContainer(
 					partitioningInfo.activeContainerCount_--;
 				}
 			}
+		}
+		if (affinityPosList.size() > 0) {
+			executionManager->setExpiredContainerCount(affinityPosList.size());
 		}
 		return true;
 	}
@@ -3215,7 +3278,8 @@ void UpdateContainerStatusHandler::operator()(
 		partitioningInfo.init();
 
 		if (category == TABLE_PARTITIONING_CHECK_EXPIRED) {
-			const DataStoreConfig* dsConfig = sqlService_->getExecutionManager()->getManagerSet()->dsConfig_;
+			SQLExecutionManager* executionManager = resourceSet_->execMgr_;
+			const DataStoreConfig* dsConfig = executionManager->getManagerSet()->dsConfig_;
 			updatePartitioningInfo = checkExpiredContainer(
 				alloc,
 				ec,
@@ -3224,7 +3288,8 @@ void UpdateContainerStatusHandler::operator()(
 				keyStoreValue.containerId_,
 				partitioningInfo,
 				partitionTable_,
-				*dsConfig);
+				*dsConfig,
+				executionManager);
 
 			if (!updatePartitioningInfo) {
 				return;
@@ -4114,13 +4179,27 @@ void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& con
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT, *this);
 	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_COST_BASED_INDEX_SCAN, *this);
+	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING, *this);
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT, *this);
 	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_INDEX_SCAN_COST_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_RANGE_SCAN_COST_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_BLOCK_SCAN_COUNT_RATE, *this);
+	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_PATTERN_MATCH_MEMORY_LIMIT_RATE, *this);
+	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_ENABLE_PROFILER, *this);
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_ENABLE_JOB_MEMORY_CHECK_INTERVAL_COUNT, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_JOB_ESSENTIAL_MEMORY_LIMIT, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_JOB_NODE_TIMEOUT, *this);
 
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_TABLE_CACHE_EXPIRED_TIME, *this);
@@ -4146,11 +4225,23 @@ void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& con
 	configTable.setParamHandler(
 			CONFIG_TABLE_SQL_TOTAL_MEMORY_LIMIT, *this);
 	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_STORE_MEMORY_LIMIT, *this);
+	configTable.setParamHandler(
 			CONFIG_TABLE_SQL_WORK_MEMORY_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_STORE_USE_LIMIT_RATE, *this);
 	configTable.setParamHandler(
 			CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT, *this);
 	configTable.setParamHandler(
 			CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_MONITORING_MEMORY_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_MONITORING_STORE_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_TXN_MONITORING_STORE_RATE, *this);
+	configTable.setParamHandler(
+			CONFIG_TABLE_SQL_MONITORING_NETWORK_RATE, *this);
 }
 
 void SQLService::Config::operator()(
@@ -4183,12 +4274,24 @@ void SQLService::Config::operator()(
 		sqlSvc_->setJobMemoryLimit(ConfigTable::megaBytesToBytes(
 			static_cast<uint32_t>(value.get<int32_t>())));
 		break;
+	case CONFIG_TABLE_SQL_JOB_ESSENTIAL_MEMORY_LIMIT:
+		sqlSvc_->setJobEssentialMemoryLimit(ConfigTable::megaBytesToBytes(
+			static_cast<uint32_t>(value.get<int32_t>())));
+		break;
+	case CONFIG_TABLE_SQL_JOB_NODE_TIMEOUT:
+		sqlSvc_->setJobNodeTimeout(value.get<int32_t>());
+		break;
+
 	case CONFIG_TABLE_SQL_NOSQL_FAILOVER_TIMEOUT:
 		sqlSvc_->setNoSQLFailoverTimeout(value.get<int32_t>());
 		break;
 	case CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT:
 		sqlSvc_->getExecutionManager()->getSQLConfig().
 			setPartitioningRowKeyConstraint(value.get<bool>());
+		break;
+	case CONFIG_TABLE_SQL_COST_BASED_INDEX_SCAN:
+		sqlSvc_->getExecutionManager()->getSQLConfig().setCostBasedIndexScan(
+				value.get<bool>());
 		break;
 	case CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING:
 		sqlSvc_->getExecutionManager()->getSQLConfig().setCostBasedJoinDriving(
@@ -4197,6 +4300,18 @@ void SQLService::Config::operator()(
 	case CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT:
 		sqlSvc_->getExecutionManager()->getSQLConfig().setCostBasedJoin(
 				value.get<bool>());
+		break;
+	case CONFIG_TABLE_SQL_INDEX_SCAN_COST_RATE:
+		sqlSvc_->setIndexScanCostRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_RANGE_SCAN_COST_RATE:
+		sqlSvc_->setRangeScanCostRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_BLOCK_SCAN_COUNT_RATE:
+		sqlSvc_->setBlockScanCountRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_PATTERN_MATCH_MEMORY_LIMIT_RATE:
+		sqlSvc_->setPatternMatchMemoryLimitRate(value.get<double>());
 		break;
 	case CONFIG_TABLE_SQL_TABLE_CACHE_EXPIRED_TIME:
 		sqlSvc_->setTableSchemaExpiredTime(value.get<int32_t>());
@@ -4218,14 +4333,38 @@ void SQLService::Config::operator()(
 		sqlSvc_->setTotalMemoryLimit(ConfigTable::megaBytesToBytes(
 			static_cast<uint32_t>(std::max(value.get<int32_t>(), 0))));
 		break;
+	case CONFIG_TABLE_SQL_STORE_MEMORY_LIMIT:
+		sqlSvc_->setStoreMemoryLimit(ConfigTable::megaBytesToBytes(
+			static_cast<uint32_t>(std::max(value.get<int32_t>(), 0))));
+		break;
 	case CONFIG_TABLE_SQL_WORK_MEMORY_RATE:
 		sqlSvc_->setWorkMemoryLimitRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_STORE_USE_LIMIT_RATE:
+		sqlSvc_->getExecutionManager()->getJobManager()->
+				setSqlStoreLimitRate(value.get<double>());
 		break;
 	case CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT:
 		sqlSvc_->setFailOnTotalMemoryLimit(value.get<bool>());
 		break;
 	case CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL:
 		sqlSvc_->setResourceControlLevel(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_SQL_MONITORING_MEMORY_RATE:
+		sqlSvc_->getExecutionManager()->getJobManager()->
+				setMonitoringMemoryRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_MONITORING_STORE_RATE:
+		sqlSvc_->getExecutionManager()->getJobManager()->
+				setMonitoringSqlStoreRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_TXN_MONITORING_STORE_RATE:
+		sqlSvc_->getExecutionManager()->getJobManager()->
+				setMonitoringDataStoreRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_SQL_MONITORING_NETWORK_RATE:
+		sqlSvc_->getExecutionManager()->getJobManager()->
+				setMonitoringNetworkRate(value.get<double>());
 		break;
 	}
 }
@@ -4237,44 +4376,123 @@ void SQLService::checkActiveStatus() {
 	checkNodeStatus();
 }
 
+void SQLService::applyMonitoringConfig(ConfigTable &config) {
+	setJobEssentialMemoryLimit(ConfigTable::megaBytesToBytes(
+			config.getUInt32(CONFIG_TABLE_SQL_JOB_ESSENTIAL_MEMORY_LIMIT)));
+
+	JobManager *jobMgr = getExecutionManager()->getJobManager();
+
+	jobMgr->setJobNodeTimeout(
+			config.get<int32_t>(CONFIG_TABLE_SQL_JOB_NODE_TIMEOUT));
+
+	jobMgr->setMonitoringMemoryTotal(resolveTotalMemoryLimit());
+
+	jobMgr->setMonitoringMemoryRate(
+			config.get<double>(CONFIG_TABLE_SQL_MONITORING_MEMORY_RATE));
+	jobMgr->setMonitoringSqlStoreRate(
+			config.get<double>(CONFIG_TABLE_SQL_MONITORING_STORE_RATE));
+	jobMgr->setMonitoringDataStoreRate(
+			config.get<double>(CONFIG_TABLE_TXN_MONITORING_STORE_RATE));
+	jobMgr->setMonitoringNetworkRate(
+			config.get<double>(CONFIG_TABLE_SQL_MONITORING_NETWORK_RATE));
+
+	jobMgr->setFailOnMemoryExcess(failOnTotalMemoryLimit_);
+	jobMgr->setSqlStoreLimitRate(
+			config.get<double>(CONFIG_TABLE_SQL_STORE_USE_LIMIT_RATE));
+
+	SystemService *sysSvc = getExecutionManager()->getManagerSet()->sysSvc_;
+	sysSvc->applySqlMonitoringConfig(config);
+}
+
+void SQLService::setStoreMemoryLimit(uint64_t limit) {
+	storeMemoryLimit_ = limit;
+
+	JobManager *jobMgr = getExecutionManager()->getJobManager();
+	jobMgr->setMonitoringSqlStoreTotal(limit);
+
+	applyTotalMemoryLimit(true);
+}
+
+void SQLService::setJobEssentialMemoryLimit(uint64_t limit) {
+	JobManager *jobMgr = getExecutionManager()->getJobManager();
+	jobMgr->setJobEssentialMemoryLimit(limit);
+}
+
+void SQLService::setJobNodeTimeout(int32_t timeoutSeconds) {
+	JobManager *jobMgr = getExecutionManager()->getJobManager();
+	jobMgr->setJobNodeTimeout(timeoutSeconds);
+}
+
+void SQLService::setIndexScanCostRate(double rate) {
+	getExecutionManager()->getSQLConfig().setIndexScanCostRate(rate);
+}
+
+void SQLService::setRangeScanCostRate(double rate) {
+	getExecutionManager()->getSQLConfig().setRangeScanCostRate(rate);
+}
+
+void SQLService::setBlockScanCountRate(double rate) {
+	getExecutionManager()->getSQLConfig().setBlockScanCountRate(rate);
+}
+
+void SQLService::setPatternMatchMemoryLimitRate(double rate) {
+	getExecutionManager()->getSQLConfig().setPatternMatchMemoryLimitRate(rate);
+}
+
+void SQLService::handleLegacyJobContol(EventContext &ec, Event &ev) {
+	controlHandler_(ec, ev);
+}
+
 void SQLService::setTotalMemoryLimit(uint64_t limit) {
 	totalMemoryLimit_ = limit;
-	applyTotalMemoryLimit();
+	applyTotalMemoryLimit(true);
 }
 
 void SQLService::setWorkMemoryLimitRate(double rate) {
 	workMemoryLimitRate_ = doubleToBits(rate);
-	applyTotalMemoryLimit();
+	applyTotalMemoryLimit(true);
 }
 
 void SQLService::setFailOnTotalMemoryLimit(bool enabled) {
 	failOnTotalMemoryLimit_ = enabled;
-	applyFailOnTotalMemoryLimit();
+	applyFailOnTotalMemoryLimit(true);
 }
 
 void SQLService::setResourceControlLevel(int32_t level) {
 	resourceControlLevel_ = level;
-	applyFailOnTotalMemoryLimit();
+	applyFailOnTotalMemoryLimit(true);
+	getExecutionManager()->getJobManager()->updateResourceControlLevel(level);
 }
 
-void SQLService::setUpMemoryLimits() {
-	applyTotalMemoryLimit();
-	applyFailOnTotalMemoryLimit();
+void SQLService::setUpInitialMemoryLimits() {
+	applyTotalMemoryLimit(false);
+	applyFailOnTotalMemoryLimit(false);
 }
 
-void SQLService::applyTotalMemoryLimit() {
+void SQLService::applyTotalMemoryLimit(bool monitoring) {
 	const uint64_t totalLimit = resolveTotalMemoryLimit();
 
 	util::AllocatorLimitter *limitter = getTotalMemoryLimitter();
 	assert(limitter != NULL);
 	limitter->setLimit(totalLimit);
+
+	if (monitoring) {
+		getExecutionManager()->getJobManager()->setMonitoringMemoryTotal(
+				resolveTotalMemoryLimit());
+	}
 }
 
-void SQLService::applyFailOnTotalMemoryLimit() {
+void SQLService::applyFailOnTotalMemoryLimit(bool monitoring) {
 	const int32_t level = resolveResourceControlLevel();
 	const bool enabled = failOnTotalMemoryLimit_;
 	const bool enabledActual = enabled && isTotalMemoryLimittable(level);
+
 	workMemoryLimitter_.setFailOnExcess(enabledActual);
+
+	if (monitoring) {
+		getExecutionManager()->getJobManager()->setFailOnMemoryExcess(
+				enabledActual);
+	}
 
 	if (enabled && !enabledActual) {
 		GS_THROW_USER_ERROR(

@@ -341,7 +341,7 @@ class DDLProcessor : public SQLProcessor {
 public:
 
 	struct AckContainerInfo {
-		AckContainerInfo() : containerId_(-1), pId_(-1), stmtId_(0)
+		AckContainerInfo() : containerId_(-1), pId_(-1), stmtId_(0), sessionId_(0)
 			, ptRev_(0), nodeId_(-1), masterNodeId_(-1), pos_(0)
 		{}
 		ContainerId containerId_;

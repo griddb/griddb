@@ -513,7 +513,7 @@ SQLContainerImpl::CursorImpl::prepareFullScan(
 	sc = &indexSc.tree();
 
 	RowIdFilter *rowIdFilter = checkRowIdFilter(txn, *container, true);
-	scanner = tryCreateScanner(cxt, proj, *container, rowIdFilter);
+	scanner = tryCreateScanner(cxt, proj, *container, rowIdFilter, true);
 
 	ColumnIdList &columnList = indexSc.columnList();
 	columnList.clear();
@@ -586,7 +586,7 @@ SQLContainerImpl::CursorImpl::prepareRangeScan(
 		return TYPE_NO_ROWS;
 	}
 
-	scanner = tryCreateScanner(cxt, proj, *container, rowIdFilter);
+	scanner = tryCreateScanner(cxt, proj, *container, rowIdFilter, false);
 	result = &baseResult;
 
 	return getRowsTargetType(*container);
@@ -656,30 +656,22 @@ SQLContainerImpl::CursorImpl::prepareIndexSearch(
 	IndexConditionCursor &condCursor =
 			prepareIndexConditionCursor(condList, cursorInitialized);
 
-	if (cursorInitialized && container != NULL) {
-		OIdTable &oIdTable = accessor_.prepareOIdTable(*container);
-		setUpOIdTable(cxt, oIdTable, condList);
+	if (cursorInitialized) {
+		if (container != NULL) {
+			OIdTable &oIdTable = accessor_.prepareOIdTable(*container);
+			setUpOIdTable(cxt, oIdTable, condList);
+		}
+		clearPartialExecutionProgress(cxt);
 	}
 
 	IndexInfoList &infoList = sc->indexInfoList();
 	ColumnIdList &columnList = sc->columnList();
 
 	size_t pos;
-	IndexTargetType targetType;
-	for (;; condCursor.next()) {
-		if (condCursor.exists()) {
-			pos = condCursor.getCurrentPosition();
-			targetType = acceptIndexCondition(
-					cxt, container, infoList, condList, pos, columnList);
-			if (targetType == TYPE_NO_INDEX) {
-				condCursor.setNextPosition(
-						pos + SQLExprs::IndexSelector::nextCompositeConditionDistance(
-								condList.begin() + pos, condList.end()));
-				continue;
-			}
-			break;
-		}
-		condCursor.close();
+	const IndexTargetType targetType = resolveTargetIndexCondition(
+			cxt, container, infoList, condList, condCursor, sc, columnList,
+			pos);
+	if (targetType == TYPE_NO_INDEX) {
 		sc = NULL;
 		return TYPE_NO_INDEX;
 	}
@@ -757,12 +749,14 @@ bool SQLContainerImpl::CursorImpl::finishIndexSearch(
 	}
 
 	updatePartialExecutionSize(cxt, done);
+	profileIndexScanCriterion(cxt, done);
 	return continuable;
 }
 
 ContainerRowScanner* SQLContainerImpl::CursorImpl::tryCreateScanner(
 		OpContext &cxt, const Projection &proj,
-		const BaseContainer &container, RowIdFilter *rowIdFilter) {
+		const BaseContainer &container, RowIdFilter *rowIdFilter,
+		bool interruptible) {
 
 	ContainerRowScanner *&scanner = data_.scanner_;
 	util::LocalUniquePtr<UpdatorList> &updatorList = data_.updatorList_;
@@ -780,9 +774,14 @@ ContainerRowScanner* SQLContainerImpl::CursorImpl::tryCreateScanner(
 					cxt.getValueContext().getVarAllocator());
 		}
 		scanner = &ScannerHandlerFactory::getInstance().create(
-				cxt, *this, accessor_, proj, rowIdFilter);
+				cxt, *this, accessor_, proj, rowIdFilter, interruptible);
 		cxt.setUpExprContext();
 	}
+
+	if (scanner->isInterruptionEnabled()) {
+		accessor_.prepareInterruptionHandler().bind(cxt, *scanner);
+	}
+
 	updateAllContextRef(cxt);
 	updateScanner(cxt, false);
 	return scanner;
@@ -813,6 +812,8 @@ void SQLContainerImpl::CursorImpl::clearScanner() {
 	if (updatorList.get() != NULL) {
 		updatorList->clear();
 	}
+
+	accessor_.clearInterruptionHandler();
 }
 
 void SQLContainerImpl::CursorImpl::preparePartialSearch(
@@ -905,12 +906,38 @@ bool SQLContainerImpl::CursorImpl::finishPartialSearch(
 		resultSet.incrementExecCount();
 	}
 
+	updatePartialExecutionProgress(cxt, sc, forIndex, finished);
+
 	accessor_.prepareUpdateRowIdHandler(txn, container, resultSet);
 
 	resultSet.incrementReturnCount();
 	accessor_.activateResultSetPreserving(resultSet);
 
 	return finished;
+}
+
+void SQLContainerImpl::CursorImpl::clearPartialExecutionProgress(
+		OpContext &cxt) {
+	const TaskProgressKey key = accessor_.getLocation().id_;
+	cxt.getExtContext().setProgress(key, NULL);
+}
+
+void SQLContainerImpl::CursorImpl::updatePartialExecutionProgress(
+		OpContext &cxt, BtreeSearchContext &sc, bool forIndex,
+		bool finished) {
+	if (forIndex) {
+		return;
+	}
+
+	const TaskProgressKey key = accessor_.getLocation().id_;
+	const TaskProgressValue *value = NULL;
+
+	if (!finished && sc.getSuspendKeySize() == sizeof(value)) {
+		const void *addr = sc.getSuspendKey();
+		value = static_cast<const TaskProgressValue*>(addr);
+	}
+
+	cxt.getExtContext().setProgress(key, value);
 }
 
 void SQLContainerImpl::CursorImpl::updatePartialExecutionSize(
@@ -1012,6 +1039,54 @@ void SQLContainerImpl::CursorImpl::applyRangeScanResultProfile(
 			}
 			profiler->addHitCount(count, onMvcc);
 		}
+	}
+}
+
+SQLContainerImpl::CursorImpl::IndexTargetType
+SQLContainerImpl::CursorImpl::resolveTargetIndexCondition(
+		OpContext &cxt, BaseContainer *container, IndexInfoList &infoList,
+		const SQLExprs::IndexConditionList &condList,
+		IndexConditionCursor &condCursor, IndexSearchContext *sc,
+		ColumnIdList &columnList, size_t &pos) {
+	for (;; condCursor.next()) {
+		if (!condCursor.exists()) {
+			condCursor.close();
+			sc = NULL;
+			return TYPE_NO_INDEX;
+		}
+
+		pos = condCursor.getCurrentPosition();
+		const IndexTargetType targetType = acceptIndexCondition(
+				cxt, container, infoList, condList, pos, columnList);
+		if (targetType == TYPE_NO_INDEX) {
+			condCursor.setNextPosition(
+					pos + SQLExprs::IndexSelector::nextCompositeConditionDistance(
+							condList.begin() + pos, condList.end()));
+			continue;
+		}
+
+		ResultSet &resultSet = accessor_.resolveResultSet();
+		if (!accessor_.getLocation().noCostBased_ &&
+				!condCursor.isCostResolved() &&
+				resultSet.isPartialExecuteSuspend()) {
+			size_t selectedPos;
+			if (!selectIndexByCost(
+					cxt, container, condList, pos, selectedPos)) {
+				condCursor.close();
+				setIndexLost(cxt);
+				return TYPE_NO_INDEX;
+			}
+			if (pos != selectedPos) {
+				condCursor.setNextPosition(selectedPos);
+				condCursor.next();
+				condCursor.setNextPosition(
+						pos + SQLExprs::IndexSelector::nextOrConditionDistance(
+								condList.begin() + pos, condList.end()));
+			}
+			condCursor.setCostResolved();
+		}
+
+		return targetType;
 	}
 }
 
@@ -1152,6 +1227,177 @@ void SQLContainerImpl::CursorImpl::applyIndexResultProfile(
 	}
 }
 
+bool SQLContainerImpl::CursorImpl::selectIndexByCost(
+		OpContext &cxt, BaseContainer *container,
+		const SQLExprs::IndexConditionList &targetCondList, size_t basePos,
+		size_t &selectedPos) {
+	selectedPos = std::numeric_limits<size_t>::max();
+
+	const size_t endPos =
+			SQLExprs::IndexSelector::nextOrConditionDistance(
+					targetCondList.begin() + basePos, targetCondList.end());
+
+	const int64_t fullScanCost = estimateFullScanCost(container);
+
+	int64_t lowestCost = -1;
+	for (size_t pos = basePos; pos < endPos;) {
+		const int64_t cost =
+				estimateIndexScanCost(cxt, container, targetCondList, pos);
+		profileIndexScanCost(cxt, pos, cost);
+
+		if (cost >= 0 && cost <= fullScanCost &&
+				(lowestCost < 0 || cost < lowestCost)) {
+			lowestCost = cost;
+			selectedPos = pos;
+		}
+		pos += SQLExprs::IndexSelector::nextCompositeConditionDistance(
+				targetCondList.begin() + pos, targetCondList.end());
+	}
+
+	const bool selected = (lowestCost >= 0);
+	accessor_.setLastCriterion((selected ?
+			SQLOpTypes::CRITERION_INDEX_COST_SMALL :
+			SQLOpTypes::CRITERION_INDEX_COST_LARGE));
+
+	profileFullScanCost(cxt, fullScanCost);
+	return selected;
+}
+
+int64_t SQLContainerImpl::CursorImpl::estimateFullScanCost(
+		BaseContainer *container) {
+	const uint64_t fullScanSize = container->getRowNum();
+	return static_cast<int64_t>(fullScanSize);
+}
+
+int64_t SQLContainerImpl::CursorImpl::estimateIndexScanCost(
+		OpContext &cxt, BaseContainer *container,
+		const SQLExprs::IndexConditionList &targetCondList, size_t pos) {
+	TransactionContext &txn = resolveTransactionContext();
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	IndexInfoList infoList(alloc);
+	ColumnIdList columnList(alloc);
+	const IndexTargetType targetType = acceptIndexCondition(
+			cxt, container, infoList, targetCondList, pos, columnList);
+	if (targetType == TYPE_NO_INDEX) {
+		return -1;
+	}
+
+	SearchContextPool scPool(alloc, alloc);
+	BtreeSearchContext sc(alloc, columnList);
+	sc.setPool(&scPool);
+
+	util::Vector<ContainerColumnType> condTypeList(alloc);
+
+	SQLExprs::IndexConditionList::const_iterator condBegin =
+			targetCondList.begin() + pos;
+
+	const size_t condCount =
+			SQLExprs::IndexSelector::nextCompositeConditionDistance(
+					condBegin, targetCondList.end());
+	SQLExprs::IndexConditionList::const_iterator condEnd =
+			condBegin + condCount;
+
+	setUpConditionColumnTypeList(
+			*container, condBegin, condEnd, condTypeList);
+	sc.setColumnIds(columnList);
+
+	setUpSearchContext(txn, condBegin, condEnd, condTypeList, sc);
+
+	return resolveIndexScanTotalCost(
+			cxt, container, container->estimateIndexSearchSize(txn, sc));
+}
+
+int64_t SQLContainerImpl::CursorImpl::resolveIndexScanTotalCost(
+		OpContext &cxt, BaseContainer *container, int64_t baseCost) {
+	double indexScanCostRate;
+	double rangeScanCostRate;
+	double blockCountRate;
+	cxt.getExtContext().getIndexScanCostConfig(
+			indexScanCostRate, rangeScanCostRate, blockCountRate);
+
+	const double base = static_cast<double>(baseCost);
+
+	const double rowCount = static_cast<double>(container->getRowNum());
+	const double rowSize =
+			static_cast<double>(container->getRowFixedColumnSize());
+
+	ObjectManagerV4 &objectManager =
+			CursorAccessorImpl::resolveObjectManager(*container);
+	const double blockSize = static_cast<double>(objectManager.getChunkSize());
+
+	const double estimatedBlockCount =
+			std::floor(blockCountRate * rowCount * rowSize / blockSize);
+
+	const double blockCountPerBase = estimatedBlockCount / base;
+	const double blockBase = (base / rowCount) / blockCountPerBase;
+	const double blockExp =
+			-(std::log(estimatedBlockCount) / std::log(blockCountPerBase));
+
+	const double estimatedBlockRead = std::pow(blockBase, blockExp);
+
+	const double indexScanCost =
+			indexScanCostRate * static_cast<double>(baseCost);
+	const double rangeScanCost =
+			rangeScanCostRate * estimatedBlockRead * (blockSize / rowSize);
+
+	return static_cast<int64_t>(indexScanCost + rangeScanCost);
+}
+
+void SQLContainerImpl::CursorImpl::profileIndexScanCost(
+		OpContext &cxt, size_t pos, int64_t cost) {
+	IndexProfiler *profiler = cxt.getIndexProfiler(getIndexOrdinal(pos));
+
+	if (profiler != NULL) {
+		profiler->addCost(cost);
+	}
+}
+
+void SQLContainerImpl::CursorImpl::profileFullScanCost(
+		OpContext &cxt, int64_t cost) {
+	IndexProfiler *profiler = cxt.getIndexProfiler(getNoIndexOrdinal());
+
+	if (profiler != NULL) {
+		profiler->addNoIndexCondition();
+		profiler->addCost(cost);
+	}
+}
+
+void SQLContainerImpl::CursorImpl::profileIndexScanCriterion(
+		OpContext &cxt, bool done) {
+	if (!done) {
+		return;
+	}
+
+	SQLOps::OpProfilerEntry *profiler = cxt.getProfiler();
+	if (profiler == NULL) {
+		return;
+	}
+
+	const SQLExprs::IndexSelector &selector = accessor_.getIndexSelection();
+
+	const SQLOpTypes::PlannigCriterion lastCriterion = accessor_.getLastCriterion();
+	if (lastCriterion != SQLOpTypes::END_CRITERION) {
+		profiler->addCriterion(lastCriterion);
+	}
+	else if (selector.isSelected()) {
+		if (selector.isUnique()) {
+			profiler->addCriterion(SQLOpTypes::CRITERION_SYNTAX);
+		}
+		else {
+			profiler->addCriterion(SQLOpTypes::CRITERION_INDEX_HIT);
+		}
+	}
+	else {
+		profiler->addCriterion(SQLOpTypes::CRITERION_SYNTAX);
+	}
+
+	if (lastCriterion != SQLOpTypes::CRITERION_INDEX_COST_LARGE &&
+			accessor_.isIndexLost()) {
+		profiler->addCriterion(SQLOpTypes::CRITERION_INDEX_NONE);
+	}
+}
+
 SQLContainerImpl::OIdTableGroupId
 SQLContainerImpl::CursorImpl::getIndexGroupId(size_t pos) {
 	do {
@@ -1186,6 +1432,21 @@ uint32_t SQLContainerImpl::CursorImpl::getIndexOrdinal(size_t pos) {
 		}
 
 		return it->second;
+	}
+	while (false);
+
+	assert(false);
+	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+}
+
+uint32_t SQLContainerImpl::CursorImpl::getNoIndexOrdinal() {
+	do {
+		const IndexOrdinalMap *map = data_.indexOrdinalMap_;
+		if (map == NULL) {
+			break;
+		}
+
+		return static_cast<uint32_t>(map->size());
 	}
 	while (false);
 
@@ -1633,7 +1894,7 @@ void SQLContainerImpl::CursorImpl::setUpOIdTable(
 				SQLExprs::IndexSelector::nextCompositeConditionDistance(
 						it, condList.end());
 		OIdTableGroupId followingId;
-		if (it->andOrdinal_ == 0 && count < it->andCount_) {
+		if (it->andOrdinal_ == 0 && count < it->andCount_ && !it->dynamic_) {
 			oIdTable.createGroup(nextId, rootId, OIdTable::MODE_INTERSECT);
 			followingId = nextId;
 			nextId++;
@@ -1669,7 +1930,8 @@ SQLContainerImpl::CursorImpl::IndexConditionCursor::IndexConditionCursor(
 		currentPos_(0),
 		currentSubPos_(0),
 		nextPos_(0),
-		condCount_(condList.size()) {
+		condCount_(condList.size()),
+		costResolved_(false) {
 }
 
 bool SQLContainerImpl::CursorImpl::IndexConditionCursor::exists() {
@@ -1682,6 +1944,7 @@ void SQLContainerImpl::CursorImpl::IndexConditionCursor::next() {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
 	currentPos_ = nextPos_;
+	costResolved_ = false;
 }
 
 void SQLContainerImpl::CursorImpl::IndexConditionCursor::close() {
@@ -1716,6 +1979,51 @@ void SQLContainerImpl::CursorImpl::IndexConditionCursor::setCurrentSubPosition(
 size_t SQLContainerImpl::CursorImpl::IndexConditionCursor::getCurrentSubPosition() {
 	assert(exists());
 	return currentSubPos_;
+}
+
+bool SQLContainerImpl::CursorImpl::IndexConditionCursor::isCostResolved() {
+	return costResolved_;
+}
+
+void SQLContainerImpl::CursorImpl::IndexConditionCursor::setCostResolved() {
+	costResolved_ = true;
+}
+
+
+SQLContainerImpl::CursorImpl::ScanInterruptionHandler::ScanInterruptionHandler() :
+		cxt_(NULL),
+		scanner_(NULL) {
+}
+
+SQLContainerImpl::CursorImpl::ScanInterruptionHandler::~ScanInterruptionHandler() {
+	unbind();
+}
+
+void SQLContainerImpl::CursorImpl::ScanInterruptionHandler::bind(
+		OpContext &cxt, ContainerRowScanner &scanner) {
+	unbind();
+
+	cxt.setTransferInterruptionHandler(this);
+	cxt_ = &cxt;
+	scanner_ = &scanner;
+}
+
+void SQLContainerImpl::CursorImpl::ScanInterruptionHandler::unbind() {
+	if (cxt_ != NULL) {
+		cxt_->setTransferInterruptionHandler(NULL);
+		cxt_ = NULL;
+	}
+
+	if (scanner_ != NULL) {
+		scanner_->clearInterruption();
+		scanner_ = NULL;
+	}
+}
+
+void SQLContainerImpl::CursorImpl::ScanInterruptionHandler::onInterrupted() {
+	if (scanner_ != NULL) {
+		scanner_->interrupt();
+	}
 }
 
 
@@ -1797,7 +2105,8 @@ SQLContainerImpl::CursorAccessorImpl::CursorAccessorImpl(const Source &source) :
 		memLimit_(source.memLimit_),
 		partialExecSizeRange_(source.partialExecSizeRange_),
 		partialExecCountBased_(source.partialExecCountBased_),
-		indexSelection_(NULL) {
+		indexSelection_(NULL),
+		lastCriterion_(SQLOpTypes::END_CRITERION) {
 }
 
 util::AllocUniquePtr<SQLContainerUtils::ScanCursor::Holder>::ReturnType
@@ -2280,6 +2589,16 @@ void SQLContainerImpl::CursorAccessorImpl::setRangeScanFinished() {
 	rangeScanFinished_ = true;
 }
 
+void SQLContainerImpl::CursorAccessorImpl::setLastCriterion(
+		SQLOpTypes::PlannigCriterion criterion) {
+	lastCriterion_ = criterion;
+}
+
+SQLOpTypes::PlannigCriterion
+SQLContainerImpl::CursorAccessorImpl::getLastCriterion() {
+	return lastCriterion_;
+}
+
 void SQLContainerImpl::CursorAccessorImpl::initializeScanRange(
 		TransactionContext &txn, BaseContainer &container) {
 	getMaxRowId(txn, container);
@@ -2340,7 +2659,8 @@ void SQLContainerImpl::CursorAccessorImpl::assignIndexInfo(
 			continue;
 		}
 
-		indexSelector.addIndex(columnIds, flagsList);
+		const bool unique = isUniqueIndex(container, *it);
+		indexSelector.addIndex(columnIds, flagsList, unique);
 	}
 	indexSelector.completeIndex();
 }
@@ -2360,6 +2680,27 @@ void SQLContainerImpl::CursorAccessorImpl::getIndexInfoList(
 
 		indexInfoList.push_back(indexInfo);
 	}
+}
+
+bool SQLContainerImpl::CursorAccessorImpl::isUniqueIndex(
+		BaseContainer &container, const IndexInfo &info) {
+	const ColumnIdList &columnIds = info.columnIds_;
+	if (columnIds.front() == 0) {
+		return false;
+	}
+
+	const uint32_t count = container.getRowKeyColumnNum();
+	if (columnIds.size() != count) {
+		return false;
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		if (columnIds[i] != i) {
+			return false;
+		}
+	}
+
+	return true;
 }
 
 SQLContainerImpl::OIdTable&
@@ -2411,6 +2752,19 @@ SQLContainerImpl::CursorAccessorImpl::findRowIdFilter() {
 
 void SQLContainerImpl::CursorAccessorImpl::clearRowIdFilter() {
 	rowIdFilter_.reset();
+}
+
+SQLContainerImpl::CursorImpl::ScanInterruptionHandler&
+SQLContainerImpl::CursorAccessorImpl::prepareInterruptionHandler() {
+	if (interruptionHandler_.get() == NULL) {
+		interruptionHandler_ = UTIL_MAKE_LOCAL_UNIQUE(
+				interruptionHandler_, CursorImpl::ScanInterruptionHandler);
+	}
+	return *interruptionHandler_;
+}
+
+void SQLContainerImpl::CursorAccessorImpl::clearInterruptionHandler() {
+	interruptionHandler_.reset();
 }
 
 TransactionContext&
@@ -3271,7 +3625,8 @@ SQLContainerImpl::ScannerHandlerFactory::getInstanceForRegistrar() {
 
 ContainerRowScanner& SQLContainerImpl::ScannerHandlerFactory::create(
 		OpContext &cxt, CursorImpl &cursor, CursorAccessorImpl &accessor,
-		const Projection &proj, RowIdFilter *rowIdFilter) const {
+		const Projection &proj, RowIdFilter *rowIdFilter,
+		bool interruptible) const {
 	typedef SQLExprs::ExprCode ExprCode;
 	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
 
@@ -3318,9 +3673,13 @@ ContainerRowScanner& SQLContainerImpl::ScannerHandlerFactory::create(
 		create(factoryCxt, destProj);
 	}
 
+	const bool inerruptionEnabled = (
+			interruptible && cxt.isBlockTransferActive() &&
+			SQLOps::OpCodeBuilder::isLargeOutputPossible(proj));
+
 	RowArray *rowArray = accessor.getRowArray();
 	return *(ALLOC_NEW(cxt.getAllocator()) ContainerRowScanner(
-			handlerSet, *rowArray, NULL));
+			handlerSet, *rowArray, NULL, inerruptionEnabled));
 }
 
 ContainerRowScanner::HandlerSet&
@@ -3556,9 +3915,19 @@ SQLContainerImpl::IndexConditionUpdator::prepare(
 		const util::Vector<SQLValues::TupleColumn> *columnList,
 		TupleListReader *reader, size_t pos, size_t subPos, size_t &nextPos) {
 	assert(condList != NULL);
+
+	SQLExprs::IndexConditionList::const_iterator condBegin =
+			condList->begin() + pos;
+	SQLExprs::IndexConditionList::const_iterator condEnd = condList->end();
+
+	const size_t distance = (condBegin == condEnd || !condBegin->dynamic_ ?
+			SQLExprs::IndexSelector::nextCompositeConditionDistance(
+					condBegin, condEnd) :
+			SQLExprs::IndexSelector::nextOrConditionDistance(
+					condBegin, condEnd));
+
 	subPos_ = pos;
-	nextPos = pos + SQLExprs::IndexSelector::nextCompositeConditionDistance(
-			condList->begin() + pos, condList->end());
+	nextPos = pos + distance;
 
 	if (ByReader::isAcceptable(*condList, pos)) {
 		if (columnList == NULL || reader == NULL) {
@@ -4439,11 +4808,21 @@ void SQLContainerImpl::CursorScope::setUpAccessor(BaseContainer *container) {
 	accessor_.frontFieldCache_ = UTIL_MAKE_LOCAL_UNIQUE(
 			accessor_.frontFieldCache_, BaseObject,
 			objectManager, container->getRowAllocateStrategy());
+
+	objectManager.updateProfileCounter();
 }
 
 void SQLContainerImpl::CursorScope::clear(bool force) {
 	if (containerAutoPtr_.get() == NULL) {
 		return;
+	}
+
+	if (accessor_.container_ != NULL && !force) {
+		ObjectManagerV4 *objectManager =
+				accessor_.container_->getObjectManager();
+		if (objectManager != NULL) {
+			objectManager->updateProfileCounter();
+		}
 	}
 
 	accessor_.destroyRowArray();
@@ -4629,6 +5008,7 @@ SQLContainerImpl::LocalCursorScope::LocalCursorScope(
 
 SQLContainerImpl::LocalCursorScope::~LocalCursorScope() {
 	assert(data_.closed_);
+	data_.accessor_.clearInterruptionHandler();
 }
 
 void SQLContainerImpl::LocalCursorScope::close() throw() {

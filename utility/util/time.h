@@ -115,6 +115,7 @@ public:
 	struct FieldData;
 	struct Option;
 	struct ZonedOption;
+	struct SilentErrorHandler;
 
 	class Formatter;
 	class Parser;
@@ -290,6 +291,11 @@ struct DateTime::ZonedOption {
 	bool asLocalTimeZone_;
 	TimeZone zone_;
 	const FieldData *maxFields_;
+};
+
+struct DateTime::SilentErrorHandler {
+	template<typename E> void errorTimeParse(E&) const {}
+	template<typename E> void errorTimeFormat(E&) const {}
 };
 
 class DateTime::Formatter {

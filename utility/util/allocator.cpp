@@ -861,13 +861,13 @@ size_t FixedSizeCachedAllocator::getFreeElementCount() {
 	{
 		BaseAllocator *alloc = localAlloc_.get();
 		if (alloc != NULL) {
-			return alloc->getTotalElementCount();
+			return alloc->getFreeElementCount() + freeElementCount_;
 		}
 	}
 	{
 		LockedBaseAllocator *alloc = localLockedAlloc_.get();
 		if (alloc != NULL) {
-			return alloc->getTotalElementCount();
+			return alloc->getFreeElementCount() + freeElementCount_;
 		}
 	}
 	return 0;
@@ -1803,9 +1803,7 @@ void AllocatorManager::setSharingLimitterGroup(GroupId id, GroupId sharingId) {
 	GroupEntry &entry = groupList_.begin_[id];
 	assert(entry.totalLimitter_ == NULL);
 	assert(entry.sharingLimitterId_ == GROUP_ID_ROOT);
-
-	GroupEntry &sharingEntry = groupList_.begin_[sharingId];
-	assert(sharingEntry.totalLimitter_ != NULL);
+	assert(groupList_.begin_[sharingId].totalLimitter_ != NULL);
 
 	entry.sharingLimitterId_ = sharingId;
 	setLimit(id, LIMIT_GROUP_TOTAL_SIZE, std::numeric_limits<size_t>::max());
@@ -2247,6 +2245,7 @@ AllocatorLimitter::AllocatorLimitter(
 		info_(info),
 		parent_(parent),
 		limit_(std::numeric_limits<size_t>::max()),
+		essential_(0),
 		acquired_(0),
 		reserved_(0),
 		peakUsage_(0),
@@ -2286,6 +2285,11 @@ void AllocatorLimitter::setLimit(size_t size) {
 	limit_ = size;
 }
 
+void AllocatorLimitter::setEssential(size_t size) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	essential_ = size;
+}
+
 size_t AllocatorLimitter::acquire(
 		size_t minimum, size_t desired, bool force,
 		const AllocatorLimitter *requester) {
@@ -2294,9 +2298,15 @@ size_t AllocatorLimitter::acquire(
 	const size_t requestingMin = std::max(reserved_, minimum) - reserved_;
 	const size_t requestingDesired = std::max(reserved_, desired) - reserved_;
 
-	const size_t size =
+	const size_t localSize =
 			acquireLocal(requestingMin, requestingDesired, force, requester);
-	reserved_ -= std::min(reserved_, size);
+
+	const size_t reservedDelta = minimum - std::min(localSize, minimum);
+	reserved_ -= reservedDelta;
+
+	const size_t size = (localSize + reservedDelta);
+	assert(size >= minimum);
+
 	updatePeakUsageSize();
 	return size;
 }
@@ -2308,7 +2318,7 @@ void AllocatorLimitter::release(size_t size) {
 
 void AllocatorLimitter::growReservation(size_t size) {
 	util::LockGuard<util::Mutex> guard(mutex_);
-	reserved_ += acquireLocal(size, size, false, NULL);
+	reserved_ += acquireLocal(0, size, false, NULL);
 }
 
 void AllocatorLimitter::shrinkReservation(size_t size) {
@@ -2362,15 +2372,16 @@ size_t AllocatorLimitter::acquireLocal(
 
 	size_t size;
 	do {
+		const bool forceLocal = isForceAcquireAllowed(minimum, force);
 		if (parent_ != NULL) {
 			size = parent_->acquire(
-					minimum, desired, force, &resolveRequester(requester));
+					minimum, desired, forceLocal, &resolveRequester(requester));
 			break;
 		}
 
 		const size_t rest = getLocalAvailableSize();
 		if (rest < minimum) {
-			if (!resolveFailOnExcess(requester, force)) {
+			if (!resolveFailOnExcess(requester, forceLocal)) {
 				size = minimum;
 				break;
 			}
@@ -2401,6 +2412,21 @@ void AllocatorLimitter::releaseLocal(size_t size) {
 	acquired_ -= size;
 }
 
+bool AllocatorLimitter::isForceAcquireAllowed(size_t minimum, bool force) {
+	if (force) {
+		return true;
+	}
+	else if (essential_ <= 0) {
+		return false;
+	}
+
+	if (minimum > std::numeric_limits<size_t>::max() - acquired_) {
+		return false;
+	}
+
+	return (acquired_ + minimum <= essential_);
+}
+
 size_t AllocatorLimitter::getLocalAvailableSize() {
 	if (limit_ < acquired_) {
 		return 0;
@@ -2429,8 +2455,8 @@ const AllocatorLimitter& AllocatorLimitter::resolveRequester(
 }
 
 bool AllocatorLimitter::resolveFailOnExcess(
-		const AllocatorLimitter *requester, bool acquiringForcibly) {
-	if (acquiringForcibly) {
+		const AllocatorLimitter *requester, bool forceAcquirable) {
+	if (forceAcquirable) {
 		return false;
 	}
 
@@ -2445,8 +2471,7 @@ void AllocatorLimitter::errorNewLimit(
 	try {
 		UTIL_THROW_UTIL_ERROR(CODE_MEMORY_LIMIT_EXCEEDED,
 				"Memory limit exceeded ("
-				"group=" << info <<
-				", acquired=" << acquired_ <<
+				"acquired=" << acquired_ <<
 				", newLimit=" << newLimit << ")");
 	}
 	catch (Exception &e) {
@@ -2462,8 +2487,7 @@ size_t AllocatorLimitter::errorAcquisition(
 	try {
 		UTIL_THROW_UTIL_ERROR(CODE_MEMORY_LIMIT_EXCEEDED,
 				"Memory limit exceeded ("
-				"group=" << info <<
-				", required=" << required <<
+				"required=" << required <<
 				", acquired=" << acquired_ <<
 				", limit=" << limit_ << ")");
 	}
@@ -2475,6 +2499,26 @@ size_t AllocatorLimitter::errorAcquisition(
 	}
 }
 
+bool AllocatorLimitter::enableFailOnExcessScoped() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	if (failOnExcess_) {
+		return false;
+	}
+
+	if (limit_ < acquired_) {
+		errorNewLimit(info_, limit_);
+	}
+
+	failOnExcess_ = true;
+	return true;
+}
+
+void AllocatorLimitter::disableFailOnExcessScoped() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	failOnExcess_ = false;
+}
+
 AllocatorLimitter::Scope::~Scope() {
 	unbinder_(allocator_, orgLimitter_);
 }
@@ -2484,6 +2528,24 @@ AllocatorLimitter::Stats::Stats() :
 		peakUsage_(0),
 		limit_(0),
 		failOnExcess_(false) {
+}
+
+AllocatorLimitter::ConfigScope::ConfigScope(AllocatorLimitter &limitter) :
+		limitter_(limitter),
+		failOnExcessScoped_(false) {
+}
+
+AllocatorLimitter::ConfigScope::~ConfigScope() {
+	if (failOnExcessScoped_) {
+		limitter_.disableFailOnExcessScoped();
+	}
+}
+
+void AllocatorLimitter::ConfigScope::enableFailOnExcess() {
+	if (failOnExcessScoped_) {
+		return;
+	}
+	failOnExcessScoped_ = limitter_.enableFailOnExcessScoped();
 }
 
 }	

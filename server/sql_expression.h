@@ -111,7 +111,8 @@ public:
 		ATTR_COLUMN_UNIFIED = 1 << 5,
 		ATTR_AGGR_DECREMENTAL = 1 << 6,
 		ATTR_DECREMENTAL_FORWARD = 1 << 7,
-		ATTR_DECREMENTAL_BACKWARD = 1 << 8
+		ATTR_DECREMENTAL_BACKWARD = 1 << 8,
+		ATTR_AGGR_FINISH_ALWAYS = 1 << 9
 	};
 
 	enum InputSourceType {
@@ -424,6 +425,8 @@ struct SQLExprs::WindowState {
 	RangeKey rangeKey_;
 	RangeKey rangePrevKey_;
 	RangeKey rangeNextKey_;
+
+	const TupleValue *variableName_;
 };
 
 class SQLExprs::NormalFunctionContext {
@@ -570,6 +573,7 @@ public:
 
 	void initializeAggregationValues();
 
+	const WindowState& resolveWindowState();
 	const WindowState* getWindowState();
 	void setWindowState(const WindowState *state);
 
@@ -593,6 +597,7 @@ private:
 	typedef util::AllocVector<Entry> EntryList;
 
 	Entry& prepareEntry(uint32_t index);
+	static const WindowState& errorWindowState();
 
 	SQLValues::ValueContext valueCxt_;
 	NormalFunctionContext funcCxt_;
@@ -656,7 +661,9 @@ struct SQLExprs::ExprSpec {
 		FLAG_WINDOW_POS_AFTER = 1 << 25,
 		FLAG_WINDOW_VALUE_COUNTING = 1 << 26,
 
-		FLAG_COMP_SENSITIVE = 1 << 27
+		FLAG_COMP_SENSITIVE = 1 << 27,
+
+		FLAG_PATTERN_MATCH_ONLY = 1 << 28
 	};
 
 	enum DecrementalType {
@@ -695,9 +702,13 @@ public:
 			ExprFactoryContext &cxt, const ExprCode &code) const = 0;
 	virtual const ExprSpec& getSpec(ExprType type) const = 0;
 
+	static FactoryFunc getEmptyFunc();
+
 private:
 	ExprFactory(const ExprFactory&);
 	ExprFactory& operator=(const ExprFactory&);
+
+	static Expression& emptyFunc(ExprFactoryContext&, const ExprCode&);
 };
 
 class SQLExprs::ExprFactoryContext {
@@ -1083,6 +1094,14 @@ inline void SQLExprs::ExprContext::addDecrementalValueBy(
 inline void SQLExprs::ExprContext::initializeAggregationValues() {
 	assert(aggrTuple_ != NULL);
 	aggrTuple_->initializeValues(*aggrTupleSet_);
+}
+
+inline const SQLExprs::WindowState& SQLExprs::ExprContext::resolveWindowState() {
+	const SQLExprs::WindowState *state = getWindowState();
+	if (state == NULL) {
+		return errorWindowState();
+	}
+	return *state;
 }
 
 inline const SQLExprs::WindowState* SQLExprs::ExprContext::getWindowState() {

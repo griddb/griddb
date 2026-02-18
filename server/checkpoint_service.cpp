@@ -354,6 +354,9 @@ CheckpointService::CheckpointService(
 	syncTempTopPath_(config.get<const char8_t*>(CONFIG_TABLE_DS_SYNC_TEMP_PATH)),
 	chunkCopyIntervalMillis_(config.get<int32_t>(
 		CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL)),
+	chunkCopyQueueSize_(config.get<int32_t>(
+		CONFIG_TABLE_CP_CHECKPOINT_COPY_QUEUE_SIZE)),
+	totalWaitTime_(0),
 	backupEndPending_(false),
 	currentDuplicateLogMode_(false),
 	currentCpPId_(UNDEF_PARTITIONID),
@@ -365,7 +368,8 @@ CheckpointService::CheckpointService(
 	archiveLogMode_(0),
 	enablePeriodicCheckpoint_(true), 
 	newestLogFormatVersion_(0),  
-	autoArchiveInfo_(config) 
+	autoArchiveInfo_(config), 
+	lastSyncCheckpointRequestTime_(0)
 {
 	statUpdator_.cpSvc_ = this;
 	try {
@@ -840,7 +844,10 @@ void CheckpointService::stopLongtermSync(
 		removeCpLongtermSyncInfo(ssn);
 
 		try {
-			delete tmpInfo.syncCpFile_;
+			if (tmpInfo.syncCpFile_) {
+				delete tmpInfo.syncCpFile_;
+				tmpInfo.syncCpFile_ = NULL;
+			}
 		}
 		catch (std::exception &e) {
 			GS_TRACE_WARNING(CHECKPOINT_SERVICE,
@@ -995,6 +1002,7 @@ void CheckpointService::partitionCheckpoint(
 
 			const PartitionGroupId pgId =
 					getPGConfig().getPartitionGroupId(pId);
+			int32_t chunkCopyQueueSizeLimit = getChunkCopyQueueSize();
 			while (cursor.hasNext()) {
 				{
 					util::LockGuard<util::Mutex> guard(partition.mutex());
@@ -1003,13 +1011,15 @@ void CheckpointService::partitionCheckpoint(
 							partition.calcCheckpointRange(mode));
 				}
 				checkSystemError();
-				int32_t queueSize = getTransactionEEQueueSize(pgId);
+				int64_t queueSize = 0;
+				txnEE_->getLiveStats(pgId, queueSize);
 				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN) {
 					util::Thread::sleep(0); 
 				}
 				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN &&
-					(queueSize > CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE)) {
+					(queueSize > chunkCopyQueueSizeLimit)) {
 					util::Thread::sleep(chunkCopyIntervalMillis_);
+					totalWaitTime_ += chunkCopyIntervalMillis_;
 				}
 			}
 		}
@@ -1409,7 +1419,8 @@ void CheckpointService::requestSyncCheckpoint(
 									  longtermSyncInfo->getSequentialNumber());
 		EventByteOutStream out = requestEvent.getOutStream();
 		message.encode(out);
-		ee_.add(requestEvent);
+		lastSyncCheckpointRequestTime_ = util::DateTime::now(false).getUnixTime();
+		ee_.addTimer(requestEvent, EE_PRIORITY_HIGH);
 	}
 	catch (std::exception &e) {
 
@@ -1441,8 +1452,7 @@ void CheckpointService::cancelSyncCheckpoint(
 			CheckpointMainMessage message(CP_STOP_LONGTERM_SYNC, 0, "", ssn);
 			EventByteOutStream out = requestEvent.getOutStream();
 			message.encode(out);
-
-			ee_.add(requestEvent);
+			ee_.addTimer(requestEvent, EE_PRIORITY_HIGH);
 		}
 		catch (std::exception &e) {
 
@@ -2122,8 +2132,14 @@ bool CheckpointService::makeBackupDirectory(
 PartitionLock::PartitionLock(
 		TransactionManager &txnManager, PartitionId pId)
 		: transactionManager_(txnManager), pId_(pId) {
+	watch_.start();
 	while (!transactionManager_.lockPartition(pId_)) {
 		util::Thread::sleep(100);
+	}
+	uint32_t lap = watch_.elapsedMillis();
+	if (lap > traceLimitTime_) {
+		GS_TRACE_WARNING(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+			"partition lock, pId=" << pId_ << ", lap=" << lap);
 	}
 }
 
@@ -2285,6 +2301,21 @@ bool CheckpointService::isEntry(SyncSequentialNumber ssn) {
 	}
 }
 
+void  CheckpointService::removeChunkFile(SyncSequentialNumber ssn) {
+	if (ssn != UNDEF_SYNC_SEQ_NUMBER) {
+		CpLongtermSyncInfo* info = getCpLongtermSyncInfo(ssn);
+		if (info && info->atomicStopFlag_ == 1) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"LongtermSync cancelled: ssn=" << ssn);
+		}
+		if (info && info->syncCpFile_) {
+			delete info->syncCpFile_;
+			info->syncCpFile_ = NULL;
+		}
+	}
+}
+
 bool CheckpointService::getLongSyncChunk(
 		SyncSequentialNumber ssn, uint64_t size, uint8_t* buffer,
 		uint64_t &readSize, uint64_t &totalCount,
@@ -2391,8 +2422,11 @@ void CheckpointService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 			.setMin(1)
 			.setMax(1024)
 			.setDefault(5);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CP_CHECKPOINT_COPY_QUEUE_SIZE, INT32)
+		.setMin(0)
+		.setDefault(40);
 }
-
 
 void CheckpointService::requestStartCheckpointForLongtermSync(
 	const Event::Source& eventSource,
@@ -2485,8 +2519,13 @@ void CheckpointService::requestStartCheckpointForLongtermSync(
 		CheckpointMainMessage message(CP_PREPARE_LONGTERM_SYNC, 0, syncTempPath, ssn);
 		EventByteOutStream out = requestEvent.getOutStream();
 		message.encode(out);
-
-		ee_.add(requestEvent);
+		const int64_t currentTime = util::DateTime::now(false).getUnixTime();
+		int32_t delayTime = 0;
+		if (currentTime - lastSyncCheckpointRequestTime_ > (-1) * EE_PRIORITY_MIDDLE) {
+			delayTime = EE_PRIORITY_MIDDLE;
+		}
+		lastSyncCheckpointRequestTime_ = currentTime;
+		ee_.addTimer(requestEvent, delayTime);
 	}
 	catch (std::exception& e) {
 		info->errorOccured_ = true;
@@ -2620,7 +2659,6 @@ void CheckpointService::requestStartCheckpointForLongtermSyncPost(
 			", thisSSN=" << ssn << ")");
 	}
 
-
 	try {
 		std::string syncTempPath;
 		util::NormalOStringStream oss;
@@ -2638,7 +2676,13 @@ void CheckpointService::requestStartCheckpointForLongtermSyncPost(
 		CheckpointMainMessage message(CP_PREPARE_LONGTERM_SYNC, 0, syncTempPath, ssn);
 		EventByteOutStream out = requestEvent.getOutStream();
 		message.encode(out);
-		ee_.add(requestEvent);
+		const int64_t currentTime = util::DateTime::now(false).getUnixTime();
+		int32_t delayTime = 0;
+		if (currentTime - lastSyncCheckpointRequestTime_ > (-1) * EE_PRIORITY_MIDDLE) {
+			delayTime = EE_PRIORITY_MIDDLE;
+		}
+		lastSyncCheckpointRequestTime_ = currentTime;
+		ee_.addTimer(requestEvent, delayTime);
 	}
 	catch (std::exception& e) {
 		info->errorOccured_ = true;
@@ -2670,8 +2714,7 @@ void CheckpointService::requestStopCheckpointForLongtermSync(
 			CheckpointMainMessage message(CP_STOP_LONGTERM_SYNC, 0, "", ssn);
 			EventByteOutStream out = requestEvent.getOutStream();
 			message.encode(out);
-
-			ee_.add(requestEvent);
+			ee_.addTimer(requestEvent, EE_PRIORITY_HIGH);
 		}
 		catch (std::exception &e) {
 

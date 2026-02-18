@@ -101,8 +101,8 @@ struct ChunkBufferStats {
 		BUF_STAT_CP_WRITE_SIZE,
 		BUF_STAT_CP_WRITE_TIME,
 		BUF_STAT_CP_WRITE_COMPRESS_TIME,
-		BUF_STAT_HIT_COUNT, 
-		BUF_STAT_MISS_HIT_COUNT, 
+		BUF_STAT_HIT_COUNT,
+		BUF_STAT_MISS_HIT_COUNT,
 		BUF_STAT_ALLOCATE_COUNT, 
 		BUF_STAT_ACTIVE_COUNT, 
 		BUF_STAT_SWAP_NORMAL_READ_COUNT,
@@ -171,6 +171,7 @@ private:
 	PartitionGroupId pgId_;
 	PartitionId beginPId_;
 	PartitionId endPId_;
+	uint64_t timeCount_;
 
 protected:
 	static const uint32_t MAX_ONCE_SWAP_SIZE_BYTE_ = 64 * 1024 * 1024;  
@@ -218,6 +219,8 @@ public:
 	void fin();
 
 	double getActivity() const;
+
+	void updateProfileCounter();
 
 	bool resize(int32_t capacity);
 
@@ -393,6 +396,8 @@ public:
 
 	double getActivity() const;
 
+	void updateProfileCounter();
+
 	bool resize(int32_t capacity);
 
 	int32_t getCurrentLimit();
@@ -471,12 +476,13 @@ struct LRUFrame {
 	int32_t prev_;
 	PartitionId pId_;
 	int64_t groupId_; 
+	uint64_t timeCount_;
 
 	LRUFrame()
 		: key_(-1), value_(NULL),
 		  isdirty_(false), startHot_(true),
 		  inHot_(true), pincount_(-1), next_(-1), prev_(-1),
-		  pId_(-1), groupId_(-1) {};
+		  pId_(-1), groupId_(-1), timeCount_(0) {};
 };
 
 /*!
@@ -760,6 +766,10 @@ inline double ChunkBuffer::getActivity() const {
 	return basicChunkBuffer_->getActivity();
 }
 
+inline void ChunkBuffer::updateProfileCounter() {
+	return basicChunkBuffer_->updateProfileCounter();
+}
+
 inline bool ChunkBuffer::resize(int32_t capacity) {
 	return basicChunkBuffer_->resize(capacity);
 }
@@ -825,6 +835,11 @@ inline double BasicChunkBuffer<L>::getActivity() const {
 }
 
 template<class L>
+void BasicChunkBuffer<L>::updateProfileCounter() {
+	timeCount_++;
+}
+
+template<class L>
 inline void BasicChunkBuffer<L>::rebalance() {
 	bufferTable_->rebalance();
 }
@@ -866,7 +881,10 @@ inline void BasicChunkBuffer<L>::ChunkAccessor::pinChunk(
 		assert(fr->groupId_ == groupId);
 
 		ChunkBufferStats &stats = bcBuffer_.stats_;
-		stats.table_(ChunkBufferStats::BUF_STAT_HIT_COUNT).increment();
+		if (fr->pincount_ == 0 && fr->timeCount_ != bcBuffer_.timeCount_) {
+			stats.table_(ChunkBufferStats::BUF_STAT_HIT_COUNT).increment();
+			fr->timeCount_ = bcBuffer_.timeCount_;
+		}
 		++fr->pincount_; 
 		assert(fr->pincount_ > 0);
 		if (dirty) {

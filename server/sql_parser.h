@@ -100,6 +100,7 @@ public:
 	struct WindowOption;
 	struct WindowFrameOption;
 	struct WindowFrameBoundary;
+	struct PatternRecognizeOption;
 
 	typedef TupleList::TupleColumnType ColumnType;
 	typedef int32_t SourceId;
@@ -302,6 +303,30 @@ public:
 		TABLE_PARTITION_TYPE_RANGE_HASH
 	};
 
+	enum PatternMatchMode {
+		PATERN_MATCH_ONE_ROW_PER_MATCH  = (1<<0),
+		PATERN_MATCH_ALL_ROWS_PER_MATCH = (1<<1)
+	};
+
+	enum PatternSkipToMode {
+		PATTERN_SKIP_NONE = 0,
+		PATTERN_SKIP_PAST_LAST_ROW = (1<<0)
+	};
+
+	enum PatternRegexNodeType {
+		PATTERN_REGEX_NONE = 0,
+		PATTERN_REGEX_ALT,
+		PATTERN_REGEX_CONCAT,
+		PATTERN_REGEX_STAR,
+		PATTERN_REGEX_PLUS,
+		PATTERN_REGEX_QMARK,
+		PATTERN_REGEX_REPEAT,
+		PATTERN_REGEX_GROUP,
+		PATTERN_REGEX_ANCHOR_START,
+		PATTERN_REGEX_ANCHOR_END,
+		PATTERN_REGEX_VARNAME
+	};
+
 	template<typename T>
 	static bool isRangePartitioningType(T typeVal) {
 		TablePartitionType type = static_cast<TablePartitionType>(typeVal);
@@ -482,6 +507,8 @@ public:
 
 		WindowOption* windowOpt_; 
 
+		PatternRecognizeOption* patternRecognizeOpt_;
+
 		uint32_t inputId_;
 		ColumnId columnId_;
 		uint32_t subqueryLevel_;
@@ -507,6 +534,7 @@ public:
 				left_, right_, mid_, next_,
 				subQuery_,
 				windowOpt_,
+				patternRecognizeOpt_,
 				UTIL_OBJECT_CODER_OPTIONAL(sortAscending_, true),
 				UTIL_OBJECT_CODER_ENUM(aggrOpts_, AggrOpt()),
 				UTIL_OBJECT_CODER_ENUM(
@@ -615,6 +643,65 @@ public:
 				UTIL_OBJECT_CODER_ENUM(partitionType_),
 				optInterval_, optIntervalUnit_);
 	};
+
+	class RegexNode { 
+	public:
+		explicit RegexNode(SQLAllocator& alloc);
+
+		RegexNode(
+			SQLAllocator& alloc, PatternRegexNodeType type,
+			RegexNode* arg1 = NULL, RegexNode* arg2 = NULL);
+
+		void dumpTree(std::ostream& os, int indent = 0) const;
+
+		static RegexNode* makeRegexNode(SQLAllocator &alloc, PatternRegexNodeType type,
+										RegexNode* arg1 = NULL, RegexNode* arg2 = NULL);
+
+		static const char* nodeTypeToString(PatternRegexNodeType type);
+
+		SQLAllocator& alloc_;
+		PatternRegexNodeType nodeType_;
+		util::Vector<SyntaxTree::RegexNode*> children_;
+		QualifiedName *varName_;
+		int64_t min_;
+		int64_t max_;
+
+		UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+		UTIL_OBJECT_CODER_MEMBERS(
+				UTIL_OBJECT_CODER_ENUM(nodeType_),
+				children_, varName_, min_, max_);
+
+	private:
+		RegexNode(const RegexNode& another);
+		RegexNode& operator=(const RegexNode& another);
+	};
+
+
+	struct PatternRecognizeOption {
+		explicit PatternRecognizeOption(SQLAllocator &alloc);
+
+		PatternRecognizeOption(const PatternRecognizeOption &another);
+		PatternRecognizeOption& operator=(const PatternRecognizeOption &another);
+
+		void dump(std::ostream &os);
+
+		SQLAllocator& alloc_;
+		ExprList* partitionByList_;
+		ExprList* orderByList_;
+		ExprList* measuresList_;
+		PatternMatchMode matchMode_;
+		PatternSkipToMode skipToMode_; 
+		RegexNode* pattern_;
+		ExprList* defineList_;
+
+		UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+		UTIL_OBJECT_CODER_MEMBERS(
+				partitionByList_, orderByList_, measuresList_,
+				UTIL_OBJECT_CODER_ENUM(matchMode_),
+				UTIL_OBJECT_CODER_ENUM(skipToMode_),
+				pattern_, defineList_);
+	};
+
 
 
 	typedef uint8_t ColumnOption;

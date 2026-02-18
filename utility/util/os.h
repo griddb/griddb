@@ -231,7 +231,8 @@ inline void* OSFunction::findAddress() {
 struct FileLib {
 public:
 #ifdef _WIN32
-	typedef void (*GetSystemTimePreciseAsFileTimeFunc)(LPFILETIME);
+	typedef void (UTIL_WIN32_API_CALL *GetSystemTimePreciseAsFileTimeFunc)(
+			LPFILETIME);
 #endif
 
 #ifdef _WIN32

@@ -296,11 +296,18 @@ bool DMLProcessor::finish(Context& cxt, InputId inputId) {
 			cxt.transfer(block);
 			cxt.finish();
 		}
+		else {
+			return true;
+		}
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 	return false;
+}
+
+bool DMLProcessor::next(Context& cxt) {
+	return finish(cxt, 0);
 }
 
 /*!

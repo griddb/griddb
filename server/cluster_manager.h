@@ -146,7 +146,6 @@ public:
 		util::Mutex lock_;
 		bool enableMode_;
 		bool isStandby_;
-		const char* configDir_;
 		std::string standbyFileName_;
 		PartitionTable *pt_;
 	};
@@ -268,6 +267,18 @@ public:
 
 	void setUpdatePartition() {
 		clusterInfo_.isUpdatePartition_ = true;
+	}
+
+	void setRefreshGoal() {
+		clusterInfo_.isRefreshGoal_ = true;
+	}
+
+	void checkConfigParameter(int32_t value);
+
+	bool isRefreshGoal() {
+		bool retVal = clusterInfo_.isRefreshGoal_;
+		clusterInfo_.isRefreshGoal_ = false;
+		return retVal;
 	}
 
 	bool isRepairPartition() {
@@ -898,7 +909,7 @@ public:
 			util::StackAllocator& alloc,
 			NodeId nodeId, PartitionTable* pt)
 			: ClusterManagerInfo(alloc, nodeId),
-			reserveNum_(0),
+			reserveNum_(0), startupTime_(0),
 			partitionSequentialNumber_(0),
 			pt_(pt)
 		{}
@@ -1863,7 +1874,8 @@ public:
 			pt_(pt),
 			isAddOrDownNode_(false),
 			mode_(NOTIFICATION_MULTICAST),
-			isConfigurationChange_(false)
+			isConfigurationChange_(false),
+			isRefreshGoal_(false)
 		{
 		}
 
@@ -1890,6 +1902,7 @@ public:
 			isRepairPartition_ = false;
 			isInitialCluster_ = true;
 			isAddOrDownNode_ = false;
+			isRefreshGoal_ = false;
 		}
 
 
@@ -1918,6 +1931,7 @@ public:
 		bool isAddOrDownNode_;
 		ClusterNotificationMode mode_;
 		bool isConfigurationChange_;
+		bool isRefreshGoal_;
 	};
 
 	ClusterInfo& getClusterInfo() {

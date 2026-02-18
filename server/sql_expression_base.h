@@ -31,6 +31,10 @@ public:
 	void add(ExprType type, const ExprSpec &spec, FactoryFunc func);
 
 private:
+	enum {
+		EXTRA_ATTRIBUTES = ExprCode::ATTR_AGGR_FINISH_ALWAYS
+	};
+
 	struct Entry {
 		Entry();
 
@@ -42,6 +46,9 @@ private:
 	DefaultExprFactory(Entry *entryList, size_t entryCount);
 
 	size_t getEntryIndex(ExprType type, bool overwriting) const;
+
+	static SQLExprs::Expression& createWithExtaAttributes(
+			ExprFactoryContext &cxt, const ExprCode &code, FactoryFunc func);
 
 	static const ExprFactory &factory_;
 
@@ -2122,7 +2129,7 @@ private:
 
 	template<ExprType, typename>
 	static FactoryFunc createCheckerFuncDetail(const util::FalseType&) {
-		return FactoryFunc();
+		return ExprFactory::getEmptyFunc();
 	}
 
 	template<ExprType T, typename F, size_t Opt, size_t M>
@@ -2260,7 +2267,7 @@ private:
 
 	template<ExprType, typename>
 	static FactoryFunc createCheckerFuncDetail(const util::FalseType&) {
-		return FactoryFunc();
+		return ExprFactory::getEmptyFunc();
 	}
 
 	template<ExprType T, typename F, size_t Phase, size_t M, DecrementalType D>
@@ -2295,7 +2302,7 @@ private:
 
 	template<ExprType, typename, size_t, size_t, DecrementalType>
 	static FactoryFunc createFactoryFunc(const util::FalseType&) {
-		return FactoryFunc();
+		return ExprFactory::getEmptyFunc();
 	}
 };
 

@@ -79,6 +79,7 @@ std::string getPathElements(std::vector<std::string>& pathElements, int32_t pos)
 #define AUDIT_TRACE_ERROR_COMMAND() { \
 }
 
+
 typedef ObjectManagerV4 OCManager;
 
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
@@ -87,6 +88,9 @@ UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
 
 UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 
+
+UTIL_TRACER_DECLARE(RESOURCE_MONITOR);
+UTIL_TRACER_DECLARE(RESOURCE_MONITOR_PLAN);
 
 AUDIT_TRACER_DECLARE(AUDIT_SYSTEM);
 AUDIT_TRACER_DECLARE(AUDIT_STAT);
@@ -141,6 +145,7 @@ SystemService::SystemService(
 		secureSocketFactories_(source.secureSocketFactories_)
 {
 	statUpdator_.service_ = this;
+	sysConfig_.setService(*this);
 	try {
 		ee_.setHandler(SYS_EVENT_OUTPUT_STATS, outputStatsHandler_);
 		Event::Source eventSource(source);
@@ -262,6 +267,8 @@ void SystemService::initialize(ManagerSet &mgrSet) {
 		pt_->setSSLPortNo(SELF_NODEID, static_cast<int32_t>(sslPort));
 	}
 
+
+	setUpMonitoringTrace();
 
 	initialized_ = true;
 }
@@ -1026,6 +1033,15 @@ void SystemService::traceStats() {
 	}
 }
 
+void SystemService::setUpMonitoringTrace() {
+	sysConfig_.setUpMonitoringLogsFile();
+	sysConfig_.setUpMonitoringPlansFile();
+}
+
+void SystemService::applySqlMonitoringConfig(ConfigTable &config) {
+	SystemConfig::applySqlMonitoringConfigInternal(*this, config);
+}
+
 /*!
 	@brief Gets the statistics about synchronization
 */
@@ -1035,22 +1051,27 @@ void SystemService::getSyncStats(
 
 	syncStats["contextCount"] = picojson::value(
 		static_cast<double>(syncMgr_->getContextCount()));
+	syncStats["syncWaitTime"] = picojson::value(
+		static_cast<double>(syncMgr_->getTotalSyncWaitTime()));
+	syncStats["syncWaitCount"] = picojson::value(
+		static_cast<double>(syncMgr_->getTotalSyncWaitCount()));
 
-	PartitionId currentCatchupPId = pt_->getCatchupPId();
-	if (currentCatchupPId != UNDEF_PARTITIONID) {
-		util::StackAllocator alloc(
-			util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "syncStats"),
-			fixedSizeAlloc_);
+	if (clsSvc_->getPartitionTable()->enableParallelSync()) {
+		PartitionId currentCatchupPId = pt_->getCatchupPId();
+		if (currentCatchupPId != UNDEF_PARTITIONID) {
+			util::StackAllocator alloc(
+				util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "syncStats"),
+				fixedSizeAlloc_);
 
-		util::XArray<NodeId> catchups(alloc);
-		NodeId owner = pt_->getOwner(currentCatchupPId);
-		pt_->getCatchup(currentCatchupPId, catchups);
-		if (owner != UNDEF_NODEID && catchups.size() == 1) {
+			util::XArray<NodeId> catchups(alloc);
+			NodeId owner = pt_->getOwner(currentCatchupPId);
+			pt_->getCatchup(currentCatchupPId, catchups);
+			if (owner != UNDEF_NODEID && catchups.size() == 1) {
 				syncStats["pId"] =
 					picojson::value(static_cast<double>(currentCatchupPId));
 				NodeId catchup = *catchups.begin();
 				picojson::object ownerInfo, catchupInfo;
-				SyncStat &stat = clsMgr_->getSyncStat();
+				SyncStat& stat = clsMgr_->getSyncStat();
 
 				ownerInfo["lsn"] = picojson::value(
 					static_cast<double>(pt_->getLSN(currentCatchupPId, owner)));
@@ -1065,6 +1086,7 @@ void SystemService::getSyncStats(
 				getServiceAddress(pt_, catchup, catchupInfo, addressType);
 				syncStats["catchup"] = picojson::value(catchupInfo);
 			}
+		}
 	}
 }
 
@@ -2878,6 +2900,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 		}
 
+
 		else if (request.pathElements_.size() >= 2 &&
 				 request.pathElements_[1] == "trace") {
 			if (request.pathElements_.size() == 2) {
@@ -3758,6 +3781,37 @@ void SystemService::ListenerSocketHandler::dispatch(
 			return;
 		}
 		}
+		else if (request.pathElements_.size() == 2 &&
+			request.pathElements_[1] == "testSiteReplication") {
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+			int64_t point = 0;
+			int64_t type = 0;
+			int64_t value = 0;
+			const char* checkParam = "point";
+			if (request.parameterMap_.find(checkParam) !=
+				request.parameterMap_.end()) {
+				if (!response.checkParamValue(checkParam, point, true)) {
+					return;
+				}
+			}
+			checkParam = "type";
+			if (request.parameterMap_.find("type") !=
+				request.parameterMap_.end()) {
+				if (!response.checkParamValue(checkParam, type, true)) {
+					return;
+				}
+			}
+			checkParam = "value";
+			if (request.parameterMap_.find("value") !=
+				request.parameterMap_.end()) {
+				if (!response.checkParamValue(checkParam, value, false)) {
+					return;
+				}
+			}
+		}
 
 		else if (request.pathElements_.size() == 2 &&
 				 request.pathElements_[1] == "dump") {
@@ -3823,6 +3877,30 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setJson(jsonOutValue);
 			}
 		}
+		else if (request.pathElements_.size() == 3 &&
+			request.pathElements_[1] == "sql" && request.pathElements_[2] == "failure") {
+			JobManager* jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
+			StatJobIdList infoList(alloc_);
+			picojson::value jsonOutValue;
+			JsonUtils::OutStream out(jsonOutValue);
+			if (request.parameterMap_.find("callback") !=
+				request.parameterMap_.end()) {
+				response.setJson(request.parameterMap_["callback"], jsonOutValue);
+			}
+			else {
+				response.setJson(jsonOutValue);
+			}
+
+			int64_t mode = 0;
+			const char8_t *modeParam = "mode";
+			if (request.parameterMap_.find(modeParam) !=
+					request.parameterMap_.end()) {
+				if (!response.checkParamValue(modeParam, mode, true)) {
+					return;
+				}
+			}
+			jobManager->invalidateNode(alloc_, varSizeAlloc_, static_cast<int32_t>(mode));
+		}
 		else if (request.pathElements_.size() == 4 &&
 				request.pathElements_[1] == "sql"
 				&& request.pathElements_[2] == "cache"
@@ -3876,6 +3954,19 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 		}
 		else if (request.pathElements_.size() == 4 &&
+				request.pathElements_[1] == "sql" &&
+				request.pathElements_[2] == "cache" &&
+				request.pathElements_[3] == "reset") {
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+
+			JobManager *jobManager = clsSvc_->getSQLService()
+					->getExecutionManager()->getJobManager();
+			jobManager->resetCache();
+		}
+		else if (request.pathElements_.size() == 4 &&
 				 request.pathElements_[1] == "sql" && request.pathElements_[2] == "job" 
 						&& request.pathElements_[3] == "profs") {
 			if (request.method_ != EBB_GET) {
@@ -3911,7 +4002,8 @@ void SystemService::ListenerSocketHandler::dispatch(
 			JobManager *jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
 			StatJobProfiler profs(alloc_);
 			profs.currentTime_ = CommonUtility::getTimeStr(util::DateTime::now(false).getUnixTime()).c_str();
-			jobManager->getProfiler(alloc_, profs, mode, currentJobId);
+			jobManager->getProfiler(
+					alloc_, varSizeAlloc_, profs, mode, currentJobId);
 			picojson::value jsonOutValue;
 			JsonUtils::OutStream out(jsonOutValue);
 			util::ObjectCoder().encode(out, profs);
@@ -4612,7 +4704,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 						response.setMethodError();
 						return;
 					}
-					return;
 				}
 
 				if (isSetted) {
@@ -4644,9 +4735,13 @@ void SystemService::ListenerSocketHandler::dispatch(
 					}
 				}
 				const picojson::value *paramValue = request.jsonValue_.get();
-				if (!sysSvc_->setGoalPartitions(alloc_, paramValue, result)) {
-					response.setJson(result);
-					response.setBadRequestError();
+				if (paramValue != NULL) {
+					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED, "Goal update has started");
+					if (!sysSvc_->setGoalPartitions(alloc_, paramValue, result)) {
+						response.setJson(result);
+						response.setBadRequestError();
+					}
+					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED, "Goal update completed successfully");
 				}
 			}
 		}
@@ -5014,30 +5109,246 @@ void SystemService::WebAPIResponse::update() {
 	header_ = oss.str();
 }
 
-SystemService::SystemConfig::SystemConfig(ConfigTable &configTable)
-	: sysStatsInterval_(CommonUtility::changeTimeSecondToMilliSecond(OUTPUT_STATS_INTERVAL_SEC)),
-	  traceMode_(static_cast<TraceMode>(
-		  configTable.get<int32_t>(CONFIG_TABLE_SYS_TRACE_MODE))) {
-	setUpConfigHandler(configTable);
+SystemService::SystemConfig::SystemConfig(ConfigTable &config) :
+		svc_(NULL),
+		manager_(util::TraceManager::getInstance()),
+		sysStatsInterval_(CommonUtility::changeTimeSecondToMilliSecond(
+				OUTPUT_STATS_INTERVAL_SEC)),
+		traceMode_(static_cast<TraceMode>(
+				config.get<int32_t>(CONFIG_TABLE_SYS_TRACE_MODE))),
+		traceFileCount_(config.get<int32_t>(CONFIG_TABLE_TRACE_FILE_COUNT)),
+		eventLogPath_(config.get<const char8_t*>(
+				CONFIG_TABLE_SYS_EVENT_LOG_PATH)),
+		monitoringFileSeparated_(config.get<bool>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_SEPARATED)),
+		monitoringPlanEnabled_(config.get<bool>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_ENABLED)),
+		monitoringFileCount_(config.get<int32_t>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_COUNT)),
+		monitoringFileLimit_(config.get<int32_t>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_LIMIT)),
+		monitoringLogsPath_(config.get<const char8_t*>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_LOGS_PATH)),
+		monitoringPlansPath_(config.get<const char8_t*>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLANS_PATH)),
+		monitoringPlanFileCount_(config.get<int32_t>(
+				CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_FILE_COUNT)) {
+	setUpConfigHandler(config);
 }
 
-void SystemService::SystemConfig::setUpConfigHandler(ConfigTable &configTable) {
-	configTable.setParamHandler(CONFIG_TABLE_SYS_TRACE_MODE, *this);
+void SystemService::SystemConfig::setService(SystemService &svc) {
+	svc_ = &svc;
+}
+
+uint32_t SystemService::SystemConfig::fileLimitSizeToBytes(int32_t megas) {
+	return static_cast<uint32_t>(std::min<int64_t>(
+			megas * 1024 * 1024, std::numeric_limits<int32_t>::max()));
+}
+
+void SystemService::SystemConfig::setUpMonitoringLogsFile() {
+	util::LockGuard<util::Mutex> guard(lock_);
+	util::Tracer &tracer = UTIL_TRACER_RESOLVE(RESOURCE_MONITOR);
+
+	if (!monitoringFileSeparated_) {
+		manager_.apply(tracer);
+		return;
+	}
+
+	const char8_t *directory = monitoringLogsPath_.c_str();
+	if (strlen(directory) <= 0) {
+		directory = eventLogPath_.c_str();
+	}
+
+	int32_t fileCount = monitoringFileCount_;
+	if (fileCount <= 0) {
+		fileCount = traceFileCount_;
+	}
+
+	const uint32_t fileLimit = fileLimitSizeToBytes(monitoringFileLimit_);
+
+	util::TraceManager &sub = manager_.getSubManager("RESOURCE_MONITOR");
+	sub.setMaxRotationFileCount(fileCount);
+	sub.setMaxRotationFileSize(static_cast<int32_t>(fileLimit));
+	sub.setRotationFileName("gs_resource");
+	if (strlen(directory) > 0) {
+		sub.setRotationFilesDirectory(directory);
+	}
+
+	sub.apply(tracer);
+}
+
+void SystemService::SystemConfig::setUpMonitoringPlansFile() {
+	util::LockGuard<util::Mutex> guard(lock_);
+	util::Tracer &tracer = UTIL_TRACER_RESOLVE(RESOURCE_MONITOR_PLAN);
+
+	if (!monitoringPlanEnabled_) {
+		return;
+	}
+
+	const char8_t *directory = monitoringPlansPath_.c_str();
+	if (strlen(directory) <= 0) {
+		directory = monitoringLogsPath_.c_str();
+		if (strlen(directory) <= 0) {
+			directory = eventLogPath_.c_str();
+		}
+	}
+
+	int32_t fileCount = monitoringPlanFileCount_;
+	if (fileCount <= 0) {
+		fileCount = monitoringFileCount_;
+		if (fileCount <= 0) {
+			fileCount = traceFileCount_;
+		}
+	}
+
+	const int32_t fileLimitBytes = 0;
+
+	util::TraceManager &sub = manager_.getSubManager("RESOURCE_MONITOR_PLAN");
+	sub.setFormatter(&PlainTraceFormatter::getInstance());
+	sub.setTraceHandler(NULL);
+	sub.setMaxRotationFileCount(fileCount);
+	sub.setMaxRotationFileSize(fileLimitBytes);
+	sub.setRotationFileName("gs_plan");
+	sub.setRotationFileSuffix(".json");
+	if (strlen(directory) > 0) {
+		sub.setRotationFilesDirectory(directory);
+	}
+
+	sub.apply(tracer);
+}
+
+void SystemService::SystemConfig::applySqlMonitoringConfigInternal(
+		SystemService &svc, ConfigTable &config) {
+	JobManager *jobMgr = svc.sqlSvc_->getExecutionManager()->getJobManager();
+
+	jobMgr->setMonitoringInterval(
+			config.get<int32_t>(CONFIG_TABLE_SYS_MONITORING_INTERVAL) *
+			INT64_C(1000));
+	jobMgr->setMonitoringLimit(
+			config.get<int32_t>(CONFIG_TABLE_SYS_MONITORING_LIMIT));
+
+	jobMgr->setMonitoringPlanTraceEnabled(
+			config.get<bool>(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_ENABLED));
+	jobMgr->setMonitoringPlanSizeLimit(fileLimitSizeToBytes(config.get<int32_t>(
+			CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_LIMIT)));
 }
 
 void SystemService::SystemConfig::operator()(
 	ConfigTable::ParamId id, const ParamValue &value) {
+	assert(svc_ != NULL);
 	switch (id) {
 	case CONFIG_TABLE_SYS_TRACE_MODE:
 		traceMode_ = static_cast<TraceMode>(value.get<int32_t>());
 		break;
+	case CONFIG_TABLE_SYS_MONITORING_INTERVAL:
+		getJobManager()->setMonitoringInterval(
+				value.get<int32_t>() * INT64_C(1000));
+		break;
+	case CONFIG_TABLE_SYS_MONITORING_LIMIT:
+		getJobManager()->setMonitoringLimit(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_SEPARATED:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringFileSeparated_ = value.get<bool>();
+		}
+		setUpMonitoringLogsFile();
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_ENABLED:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringPlanEnabled_ = value.get<bool>();
+		}
+		setUpMonitoringPlansFile();
+		getJobManager()->setMonitoringPlanTraceEnabled(value.get<bool>());
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_COUNT:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringFileCount_ = value.get<int32_t>();
+		}
+		setUpMonitoringLogsFile();
+		setUpMonitoringPlansFile();
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_LIMIT:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringFileLimit_ = value.get<int32_t>();
+		}
+		setUpMonitoringLogsFile();
+		setUpMonitoringPlansFile();
+		getJobManager()->setMonitoringPlanSizeLimit(
+				fileLimitSizeToBytes(value.get<int32_t>()));
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_LOGS_PATH:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringLogsPath_ =
+					checkPathPattern(value.get<const char8_t*>());
+		}
+		setUpMonitoringLogsFile();
+		setUpMonitoringPlansFile();
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLANS_PATH:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringPlansPath_ =
+					checkPathPattern(value.get<const char8_t*>());
+		}
+		setUpMonitoringPlansFile();
+		break;
+	case CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_FILE_COUNT:
+		{
+			util::LockGuard<util::Mutex> guard(lock_);
+			monitoringPlanFileCount_ = value.get<int32_t>();
+		}
+		setUpMonitoringPlansFile();
+		break;
+	default:
+		assert(false);
+		break;
 	}
+}
+
+void SystemService::SystemConfig::setUpConfigHandler(ConfigTable &config) {
+	config.setParamHandler(CONFIG_TABLE_SYS_TRACE_MODE, *this);
+	config.setParamHandler(CONFIG_TABLE_SYS_MONITORING_INTERVAL, *this);
+	config.setParamHandler(CONFIG_TABLE_SYS_MONITORING_LIMIT, *this);
+
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_SEPARATED, *this);
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_ENABLED, *this);
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_COUNT, *this);
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_LIMIT, *this);
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_LOGS_PATH, *this);
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLANS_PATH, *this);
+	config.setParamHandler(CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_FILE_COUNT, *this);
+}
+
+const char8_t* SystemService::SystemConfig::checkPathPattern(
+		const char8_t *path) {
+	for (const char8_t *it = path; *it != '\0'; ++it) {
+		if (
+				!('0' <= *it && *it <= '9') &&
+				!('a' <= *it && *it <= 'z') &&
+				!('A' <= *it && *it <= 'Z') &&
+				*it != '_' && *it != '-') {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INVALID_ARGS,
+					"Unacceptable path for online configuration ("
+					"path=" << path << ")");
+		}
+	}
+	return path;
+}
+
+JobManager* SystemService::SystemConfig::getJobManager() {
+	return svc_->sqlSvc_->getExecutionManager()->getJobManager();
 }
 
 SystemService::ConfigSetUpHandler SystemService::configSetUpHandler_;
 
 void SystemService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_RESOLVE_GROUP(config, CONFIG_TABLE_SYS, "system");
+	CONFIG_TABLE_RESOLVE_GROUP(config, CONFIG_TABLE_TRACE, "trace");
 
 	CONFIG_TABLE_ADD_SERVICE_ADDRESS_PARAMS(config, SYS, 10040);
 
@@ -5081,6 +5392,39 @@ void SystemService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.addEnum(SslConfig::SSL_VER_TLS1_2, "TLSv1.2")
 		.addEnum(SslConfig::SSL_VER_TLS1_3, "TLSv1.3")
 		.setDefault(SslConfig::SSL_VER_TLS1_2);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_MONITORING_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(1)
+		.setDefault(300);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_MONITORING_LIMIT, INT32)
+		.setMin(1)
+		.setDefault(10);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_SEPARATED, BOOL)
+		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_ENABLED, BOOL)
+		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_COUNT, INT32)
+		.setMin(0)
+		.setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_FILE_LIMIT, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
+		.setMin(0)
+		.setDefault(1);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_LOGS_PATH, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLANS_PATH, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TRACE_RESOURCE_MONITOR_PLAN_FILE_COUNT, INT32)
+		.setMin(0)
+		.setDefault(0);
 }
 
 SystemService::StatSetUpHandler SystemService::statSetUpHandler_;
@@ -5418,6 +5762,37 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 	}
 
 	return true;
+}
+
+
+SystemService::PlainTraceFormatter SystemService::PlainTraceFormatter::instance_;
+
+SystemService::PlainTraceFormatter::~PlainTraceFormatter() {
+}
+
+void SystemService::PlainTraceFormatter::format(
+		std::ostream &stream, util::TraceRecord &record) {
+	stream << record.message_;
+}
+
+void SystemService::PlainTraceFormatter::handleTraceFailure(
+		const char8_t *formattingString) {
+	static_cast<void>(formattingString);
+}
+
+void SystemService::PlainTraceFormatter::escapeControlChars(
+		util::NormalOStringStream &oss) {
+	static_cast<void>(oss);
+}
+
+void SystemService::PlainTraceFormatter::appendRecordSeparator(
+		util::NormalOStringStream &oss) {
+	static_cast<void>(oss);
+}
+
+SystemService::PlainTraceFormatter&
+SystemService::PlainTraceFormatter::getInstance() {
+	return instance_;
 }
 
 void ServiceThreadErrorHandler::operator()(

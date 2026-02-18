@@ -255,7 +255,7 @@ public:
 			ownerLsn_(UNDEF_LSN),
 			startLsn_(UNDEF_LSN), endLsn_(UNDEF_LSN),
 			chunkSize_(0), numChunk_(0), binaryLogSize_(0),
-			startLsnNext_(false), endLsnNext_(false)
+			requestInfo_(NULL), startLsnNext_(false), endLsnNext_(false)
 		{}
 
 		~Request() {};
@@ -264,8 +264,6 @@ public:
 			EventByteOutStream& out, bool isOwner = true);
 
 		void decode(EventByteInStream& in);
-
-		std::string dump();
 
 
 		int32_t syncMode_;
@@ -356,7 +354,7 @@ public:
 		@brief Encodes/Decodes the message for sync response
 	*/
 	struct Response {
-		Response(int32_t mode) : syncMode_(mode), targetLsn_(UNDEF_LSN) {}
+		Response(int32_t mode) : syncMode_(mode), targetLsn_(UNDEF_LSN), responseInfo_(NULL) {}
 		~Response() {};
 
 		void encode(EventByteOutStream& out);
@@ -457,7 +455,8 @@ private:
 class SyncHandler : public EventHandler {
 public:
 	static const int32_t UNDEF_DELAY_TIME = -1;
-	SyncHandler() {};
+	SyncHandler() : pt_(NULL), clsMgr_(NULL), clsSvc_(NULL), txnSvc_(NULL), txnMgr_(NULL), txnEE_(NULL),
+	syncSvc_(NULL), syncMgr_(NULL), syncEE_(NULL), recoveryMgr_(NULL), partitionList_(NULL), cpSvc_(NULL) {};
 	~SyncHandler() {};
 
 	void initialize(const ManagerSet& mgrSet);
@@ -465,7 +464,6 @@ public:
 	void operator()(EventContext&, EventEngine::Event&) {};
 
 	void removePartition(PartitionId pId);
-
 
 	PartitionTable* pt_;
 	ClusterManager* clsMgr_;
@@ -1028,7 +1026,7 @@ public:
 	}
 
 	~RedoLogHandler() {
-		for (int32_t pId = 0; pId < pt_->getPartitionNum(); pId++) {
+		for (int32_t pId = 0; pId < memoryBlockList_.size(); pId++) {
 			delete memoryBlockList_[pId];
 		}
 	}
@@ -1056,6 +1054,5 @@ private:
 	void complete(RedoContext& cxt);
 	void checkBackupError(EventContext& ec, RedoContext& cxt, SyncRedoRequestInfo& syncRedoRequestInfo);
 };
-
 
 #endif

@@ -271,7 +271,7 @@ const util::NameCoderEntry<MetaType::PartitionMeta>
 
 const util::NameCoderEntry<MetaType::StatementResMeta>
 MetaType::Coders::LIST_STATEMENT_RES[] = {
-	UTIL_NAME_CODER_ENTRY(STATEMENT_RES_REQEST_ID),
+	UTIL_NAME_CODER_ENTRY(STATEMENT_RES_REQUEST_ID),
 	UTIL_NAME_CODER_ENTRY(STATEMENT_RES_NODE_ADDRESS),
 	UTIL_NAME_CODER_ENTRY(STATEMENT_RES_NODE_PORT),
 	UTIL_NAME_CODER_ENTRY(STATEMENT_RES_CONNECTION_ADDRESS),
@@ -293,7 +293,7 @@ MetaType::Coders::LIST_STATEMENT_RES[] = {
 
 const util::NameCoderEntry<MetaType::TaskResMeta>
 MetaType::Coders::LIST_TASK_RES[] = {
-	UTIL_NAME_CODER_ENTRY(TASK_RES_REQEST_ID),
+	UTIL_NAME_CODER_ENTRY(TASK_RES_REQUEST_ID),
 	UTIL_NAME_CODER_ENTRY(TASK_RES_JOB_ORDINAL),
 	UTIL_NAME_CODER_ENTRY(TASK_RES_TASK_ORDINAL),
 	UTIL_NAME_CODER_ENTRY(TASK_RES_NODE_ADDRESS),
@@ -369,6 +369,33 @@ MetaType::Coders::LIST_DATABASE[] = {
 	UTIL_NAME_CODER_ENTRY(DATABASE_DATABASE_NAME)
 };
 
+const util::NameCoderEntry<MetaType::SyncStatsMeta>
+MetaType::Coders::LIST_SYNC_STATS[] = {
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_CLUSTER_PARTITION_INDEX),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_WORKER_INDEX),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PARTITION_ROLE),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_NODE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_NODE_PORT),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_REMOTE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_REMOTE_PORT),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_LSN),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_SSN),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_CLUSTER_PARTITION_REVISION),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_SYNC_PHASE),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_ELAPSED_TIME),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_START_TIME),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_END_TIME),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_TOTAL_BLOCK_COUNT),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_CHECKPOINT_TIME),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_BASE_LSN),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PROCESSED_LSN),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PROCESSED_BLOCK_COUNT),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PROCESSED_BLOCK_TIME),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PROCESSED_LOG_COUNT),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PROCESSED_LOG_SIZE),
+	UTIL_NAME_CODER_ENTRY(SYNC_STATS_PROCESSED_LOG_TIME),
+};
+
 const util::NameCoder<MetaType::ContainerMeta, MetaType::END_CONTAINER>
 		MetaType::Coders::CODER_CONTAINER(LIST_CONTAINER, 1);
 const util::NameCoder<MetaType::ColumnMeta, MetaType::END_COLUMN>
@@ -407,6 +434,9 @@ const util::NameCoder<MetaType::DatabaseStatsMeta, MetaType::END_DATABASE_STATS>
 		MetaType::Coders::CODER_DATABASE_STATS(LIST_DATABASE_STATS, 1);
 const util::NameCoder<MetaType::DatabaseMeta, MetaType::END_DATABASE>
 		MetaType::Coders::CODER_DATABASE(LIST_DATABASE, 1);
+
+const util::NameCoder<MetaType::SyncStatsMeta, MetaType::END_SYNC_STATS>
+MetaType::Coders::CODER_SYNC_STATS(LIST_SYNC_STATS, 1);
 
 const util::NameCoderEntry<MetaType::StringConstants>
 		MetaType::Coders::LIST_STR[] = {
@@ -497,7 +527,7 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_QUERY_ID),
 	UTIL_NAME_CODER_ENTRY(STR_JOB_ID),
 	UTIL_NAME_CODER_ENTRY(STR_NUM_ROWS),
-	UTIL_NAME_CODER_ENTRY(STR_ROLE),
+	UTIL_NAME_CODER_ENTRY(STR_PARTITION_ROLE),
 	UTIL_NAME_CODER_ENTRY(STR_LSN),
 	UTIL_NAME_CODER_ENTRY(STR_STATUS),
 	UTIL_NAME_CODER_ENTRY(STR_BLOCK_CATEGORY),
@@ -528,7 +558,7 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_ROW_ARRAY_COUNT),
 	UTIL_NAME_CODER_ENTRY(STR_COLUMN_MISMATCH_COUNT),
 
-	UTIL_NAME_CODER_ENTRY(STR_REQEST_ID),
+	UTIL_NAME_CODER_ENTRY(STR_REQUEST_ID),
 	UTIL_NAME_CODER_ENTRY(STR_CONNECTION_ADDRESS),
 	UTIL_NAME_CODER_ENTRY(STR_CONNECTION_PORT),
 	UTIL_NAME_CODER_ENTRY(STR_STAEMENT_TYPE),
@@ -562,7 +592,23 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_STANDBY_LAST_UPDATED_TIME),
 	UTIL_NAME_CODER_ENTRY(STR_REPLICATION_STATUS),
 	UTIL_NAME_CODER_ENTRY(STR_LAST_ERROR_CODE),
-	UTIL_NAME_CODER_ENTRY(STR_LAST_ERROR_TIME)
+	UTIL_NAME_CODER_ENTRY(STR_LAST_ERROR_TIME),
+
+	UTIL_NAME_CODER_ENTRY(STR_SSN),
+	UTIL_NAME_CODER_ENTRY(STR_CLUSTER_PARTITION_REVISION),
+	UTIL_NAME_CODER_ENTRY(STR_SYNC_PHASE),
+	UTIL_NAME_CODER_ENTRY(STR_ELAPSED_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_END_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_TOTAL_BLOCK_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_CHECKPOINT_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_BASE_LSN),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_LSN),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_BLOCK_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_BLOCK_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_BLOCK_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_LOG_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_LOG_SIZE),
+	UTIL_NAME_CODER_ENTRY(STR_PROCESSED_LOG_TIME)
 };
 
 const util::NameCoder<MetaType::StringConstants, MetaType::END_STR>
@@ -731,7 +777,7 @@ const MetaType::CoreColumns::Entry<MetaType::ContainerRaStatsMeta>
 
 const MetaType::CoreColumns::Entry<MetaType::StatementResMeta>
 		MetaType::CoreColumns::COLUMNS_STATEMENT_RES[] = {
-	of(STATEMENT_RES_REQEST_ID).asString(),
+	of(STATEMENT_RES_REQUEST_ID).asString(),
 	of(STATEMENT_RES_NODE_ADDRESS).asString(),
 	of(STATEMENT_RES_NODE_PORT).asInteger(),
 	of(STATEMENT_RES_CONNECTION_ADDRESS).asString(true),
@@ -753,7 +799,7 @@ const MetaType::CoreColumns::Entry<MetaType::StatementResMeta>
 
 const MetaType::CoreColumns::Entry<MetaType::TaskResMeta>
 		MetaType::CoreColumns::COLUMNS_TASK_RES[] = {
-	of(TASK_RES_REQEST_ID).asString(),
+	of(TASK_RES_REQUEST_ID).asString(),
 	of(TASK_RES_JOB_ORDINAL).asLong(),
 	of(TASK_RES_TASK_ORDINAL).asInteger(),
 	of(TASK_RES_NODE_ADDRESS).asString(),
@@ -846,6 +892,33 @@ const MetaType::CoreColumns::Entry<MetaType::DatabaseMeta>
 MetaType::CoreColumns::COLUMNS_DATABASE[] = {
 	of(DATABASE_DATABASE_ID).asLong(),
 	of(DATABASE_DATABASE_NAME).asString()
+};
+
+const MetaType::CoreColumns::Entry<MetaType::SyncStatsMeta>
+MetaType::CoreColumns::COLUMNS_SYNC_STATS[] = {
+of(SYNC_STATS_CLUSTER_PARTITION_INDEX).asInteger(),
+of(SYNC_STATS_WORKER_INDEX).asInteger(),
+of(SYNC_STATS_PARTITION_ROLE).asString(),
+of(SYNC_STATS_NODE_ADDRESS).asString(true),
+of(SYNC_STATS_NODE_PORT).asInteger(true),
+of(SYNC_STATS_REMOTE_ADDRESS).asString(true),
+of(SYNC_STATS_REMOTE_PORT).asInteger(true),
+of(SYNC_STATS_LSN).asLong(),
+of(SYNC_STATS_SSN).asLong(),
+of(SYNC_STATS_CLUSTER_PARTITION_REVISION).asInteger(),
+of(SYNC_STATS_SYNC_PHASE).asString(),
+of(SYNC_STATS_ELAPSED_TIME).asLong(),
+of(SYNC_STATS_START_TIME).asTimestamp(),
+of(SYNC_STATS_END_TIME).asTimestamp(true),
+of(SYNC_STATS_TOTAL_BLOCK_COUNT).asLong(),
+of(SYNC_STATS_CHECKPOINT_TIME).asLong(),
+of(SYNC_STATS_BASE_LSN).asLong(),
+of(SYNC_STATS_PROCESSED_LSN).asLong(),
+of(SYNC_STATS_PROCESSED_BLOCK_COUNT).asLong(),
+of(SYNC_STATS_PROCESSED_BLOCK_TIME).asLong(),
+of(SYNC_STATS_PROCESSED_LOG_COUNT).asLong(),
+of(SYNC_STATS_PROCESSED_LOG_SIZE).asLong(),
+of(SYNC_STATS_PROCESSED_LOG_TIME).asLong()
 };
 
 template<typename T>
@@ -1084,7 +1157,7 @@ const MetaType::RefColumns::Entry<MetaType::ContainerStatsMeta>
 const MetaType::RefColumns::Entry<MetaType::ClusterPartitionMeta>
 		MetaType::RefColumns::COLUMNS_CLUSTER_PARTITION[] = {
 	of(CLUSTER_PARTITION_CLUSTER_PARTITION_INDEX, STR_CLUSTER_PARTITION_INDEX),
-	of(CLUSTER_PARTITION_ROLE, STR_ROLE),
+	of(CLUSTER_PARTITION_ROLE, STR_PARTITION_ROLE),
 	of(CLUSTER_PARTITION_NODE_ADDRESS, STR_NODE_ADDRESS),
 	of(CLUSTER_PARTITION_NODE_PORT, STR_NODE_PORT),
 	of(CLUSTER_PARTITION_LSN, STR_LSN),
@@ -1107,7 +1180,7 @@ const MetaType::RefColumns::Entry<MetaType::ContainerRaStatsMeta>
 
 const MetaType::RefColumns::Entry<MetaType::StatementResMeta>
 		MetaType::RefColumns::COLUMNS_STATEMENT_RES[] = {
-	of(STATEMENT_RES_REQEST_ID, STR_REQEST_ID),
+	of(STATEMENT_RES_REQUEST_ID, STR_REQUEST_ID),
 	of(STATEMENT_RES_NODE_ADDRESS, STR_NODE_ADDRESS),
 	of(STATEMENT_RES_NODE_PORT, STR_NODE_PORT),
 	of(STATEMENT_RES_CONNECTION_ADDRESS, STR_CONNECTION_ADDRESS),
@@ -1129,7 +1202,7 @@ const MetaType::RefColumns::Entry<MetaType::StatementResMeta>
 
 const MetaType::RefColumns::Entry<MetaType::TaskResMeta>
 		MetaType::RefColumns::COLUMNS_TASK_RES[] = {
-	of(TASK_RES_REQEST_ID, STR_REQEST_ID),
+	of(TASK_RES_REQUEST_ID, STR_REQUEST_ID),
 	of(TASK_RES_JOB_ORDINAL, STR_JOB_ORDINAL),
 	of(TASK_RES_TASK_ORDINAL, STR_TASK_ORDINAL),
 	of(TASK_RES_NODE_ADDRESS, STR_NODE_ADDRESS),
@@ -1223,6 +1296,33 @@ MetaType::RefColumns::COLUMNS_DATABASE[] = {
 	of(DATABASE_DATABASE_NAME, STR_DATABASE_NAME)
 };
 
+const MetaType::RefColumns::Entry<MetaType::SyncStatsMeta>
+MetaType::RefColumns::COLUMNS_SYNC_STATS[] = {
+of(SYNC_STATS_CLUSTER_PARTITION_INDEX, STR_CLUSTER_PARTITION_INDEX),
+of(SYNC_STATS_WORKER_INDEX, STR_WORKER_INDEX),
+of(SYNC_STATS_PARTITION_ROLE, STR_PARTITION_ROLE),
+of(SYNC_STATS_NODE_ADDRESS, STR_NODE_ADDRESS),
+of(SYNC_STATS_NODE_PORT, STR_NODE_PORT),
+of(SYNC_STATS_REMOTE_ADDRESS, STR_REMOTE_ADDRESS),
+of(SYNC_STATS_REMOTE_PORT, STR_REMOTE_PORT),
+of(SYNC_STATS_LSN, STR_LSN),
+of(SYNC_STATS_SSN, STR_SSN),
+of(SYNC_STATS_CLUSTER_PARTITION_REVISION, STR_CLUSTER_PARTITION_REVISION),
+of(SYNC_STATS_SYNC_PHASE, STR_SYNC_PHASE),
+of(SYNC_STATS_ELAPSED_TIME, STR_ELAPSED_TIME),
+of(SYNC_STATS_START_TIME, STR_START_TIME),
+of(SYNC_STATS_END_TIME, STR_END_TIME),
+of(SYNC_STATS_TOTAL_BLOCK_COUNT, STR_TOTAL_BLOCK_COUNT),
+of(SYNC_STATS_CHECKPOINT_TIME, STR_CHECKPOINT_TIME),
+of(SYNC_STATS_BASE_LSN, STR_BASE_LSN),
+of(SYNC_STATS_PROCESSED_LSN, STR_PROCESSED_LSN),
+of(SYNC_STATS_PROCESSED_BLOCK_COUNT, STR_PROCESSED_BLOCK_COUNT),
+of(SYNC_STATS_PROCESSED_BLOCK_TIME, STR_PROCESSED_BLOCK_TIME),
+of(SYNC_STATS_PROCESSED_LOG_COUNT, STR_PROCESSED_LOG_COUNT),
+of(SYNC_STATS_PROCESSED_LOG_SIZE, STR_PROCESSED_LOG_SIZE),
+of(SYNC_STATS_PROCESSED_LOG_TIME, STR_PROCESSED_LOG_TIME)
+};
+
 template<typename T>
 MetaType::RefColumns::Entry<T> MetaType::RefColumns::of(
 		T refId,
@@ -1283,9 +1383,13 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_CORE[] = {
 			TYPE_TASK_RES, "_core_task_resources",
 			CoreColumns::COLUMNS_TASK_RES,
 			Coders::CODER_TASK_RES, 0)),
+	toNodeDistribution(coreOf(
+			TYPE_SYNC_STATS, "_core_sync_stats",
+			CoreColumns::COLUMNS_SYNC_STATS, Coders::CODER_SYNC_STATS, 0)),
 	coreOf(
 			TYPE_PARTITION, "_core_table_partitions",
 			CoreColumns::COLUMNS_PARTITION, Coders::CODER_PARTITION, 0),
+
 	coreOf(
 			TYPE_VIEW, "_core_views",
 			CoreColumns::COLUMNS_VIEW, Coders::CODER_VIEW, 0),
@@ -1345,6 +1449,8 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
 	refOf(TYPE_TASK_RES,
 			"task_resources", NULL, NULL, RefColumns::COLUMNS_TASK_RES, 0)
 	,
+	refOf(TYPE_SYNC_STATS,
+			"sync_stats", NULL, NULL, RefColumns::COLUMNS_SYNC_STATS, 0),
 	refOf(TYPE_PARTITION,
 			NULL, "container_partitions", "table_partitions",
 			RefColumns::COLUMNS_PARTITION, 0),
@@ -1814,6 +1920,9 @@ void MetaProcessor::scan(
 		case MetaType::TYPE_CONTAINER_RA_STATS:
 			scanCore<ContainerDetailStatsHandler>(txn, cxt);
 			break;
+		case MetaType::TYPE_SYNC_STATS:
+			scanCore<SyncStatsHandler>(txn, cxt);
+			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 		}
@@ -2047,6 +2156,23 @@ Value MetaProcessor::ValueUtils::makeTimestamp(Timestamp src) {
 	Value value;
 	value.setTimestamp(src);
 	return value;
+}
+
+Value MetaProcessor::ValueUtils::makeStringOptional(
+		util::StackAllocator &alloc, const char8_t *src,
+		const uint32_t limit) {
+	if (strlen(src) == 0) {
+		return makeNull();
+	}
+	return makeString(alloc, src, limit);
+}
+
+Value MetaProcessor::ValueUtils::makeIntegerOptional(
+		int32_t src, int32_t defaultValue) {
+	if (src == defaultValue) {
+		return makeNull();
+	}
+	return makeInteger(src);
 }
 
 void MetaProcessor::ValueUtils::toUpperString(util::String &str) {
@@ -2319,10 +2445,10 @@ MetaProcessor::Context& MetaProcessor::StoreCoreHandler::getContext() const {
 	return cxt_;
 }
 
-Value MetaProcessor::StoreCoreHandler::makeString(util::StackAllocator& alloc, const char8_t* src) const {
-	assert(cxt_.getSource().sqlExecutionManager_);
+Value MetaProcessor::StoreCoreHandler::makeString(util::StackAllocator& alloc, const char8_t* src, Context& cxt)  {
+	assert(cxt.getSource().sqlExecutionManager_);
 	return ValueUtils::makeString(alloc, src,
-		cxt_.getSource().sqlExecutionManager_->getManagerSet()->dsConfig_->getLimitSmallSize());
+		cxt.getSource().sqlExecutionManager_->getManagerSet()->dsConfig_->getLimitSmallSize());
 }
 
 void MetaProcessor::StoreCoreHandler::getNames(
@@ -2388,6 +2514,22 @@ util::String MetaProcessor::StoreCoreHandler::getDataPartitionNameDetail(
 bool MetaProcessor::StoreCoreHandler::enableAdministratorScan() const {
 	return (cxt_.getSource().isAdministrator_
 		&& cxt_.getSource().sqlService_->getScanMetaTableByAdmin());
+}
+
+Value MetaProcessor::StoreCoreHandler::makeString(
+		util::StackAllocator &alloc, const char8_t *src) const {
+	assert(cxt_.getSource().sqlExecutionManager_);
+	return ValueUtils::makeString(
+			alloc, src,
+			cxt_.getSource().sqlExecutionManager_->getManagerSet()->dsConfig_->getLimitSmallSize());
+}
+
+Value MetaProcessor::StoreCoreHandler::makeStringOptional(
+		util::StackAllocator &alloc, const char8_t *src) const {
+	assert(cxt_.getSource().sqlExecutionManager_);
+	return ValueUtils::makeStringOptional(
+			alloc, src,
+			cxt_.getSource().sqlExecutionManager_->getManagerSet()->dsConfig_->getLimitSmallSize());
 }
 
 
@@ -3594,7 +3736,7 @@ void MetaProcessor::StatementResHandler::operator()(
 	bool isAdministrator = enableAdministratorScan();
 
 	PartitionTable *pt = getContext().getSource().partitionTable_;
-	NodeAddress &address = pt->getNodeAddress(0, SYSTEM_SERVICE);
+	NodeAddress &address = pt->getNodeAddress(0, SQL_SERVICE);
 
 	SQLExecutionManager *executionManager =
 			getContext().getSource().sqlExecutionManager_;
@@ -3612,99 +3754,75 @@ void MetaProcessor::StatementResHandler::operator()(
 
 	for (size_t pos = 0; pos < jobIdList.size(); pos++) {
 		JobId &jobId = jobIdList[pos];
-		JobManager::Latch latch(
-				jobId, "MetaProcessor::StatementResHandler::operator()", jobManager);
-
-		Job *job = latch.get();
-		if (job) {
-			DatabaseId currentDbId = job->getDbId();
-			if (!isAdministrator && currentDbId != dbId) {
-				continue;
-			}
-
-			StatJobProfilerInfo prof(alloc, jobId);
-			job->getProfiler(alloc, prof, 1);
-
-			builder.set(
-					MetaType::STATEMENT_RES_REQEST_ID,
-					makeString(alloc, jobId.dump(alloc, true).c_str()));
-
-			builder.set(
-					MetaType::STATEMENT_RES_NODE_ADDRESS,
-					makeString(alloc, address.dump(false).c_str()));
-			builder.set(
-					MetaType::STATEMENT_RES_NODE_PORT,
-					ValueUtils::makeInteger(address.port_));
-
-			builder.set(
-					MetaType::STATEMENT_RES_CONNECTION_ADDRESS,
-					ValueUtils::makeNull());
-			builder.set(
-					MetaType::STATEMENT_RES_CONNECTION_PORT,
-					ValueUtils::makeNull());
-
-			builder.set(
-					MetaType::STATEMENT_RES_USER_NAME,
-					job->getUserName() ?
-							makeString(alloc, job->getUserName()) :
-							ValueUtils::makeNull());
-
-			builder.set(
-					MetaType::STATEMENT_RES_APPLICATION_NAME,
-					job->getAppName() ?
-							makeString(alloc, job->getAppName()) :
-							ValueUtils::makeNull());
-
-			builder.set(
-					MetaType::STATEMENT_RES_STAEMENT_TYPE,
-					makeString(alloc, "SQL_EXECUTE"));
-
-			builder.set(
-					MetaType::STATEMENT_RES_START_TIME,
-					ValueUtils::makeTimestamp(
-							job->getStartTime()));
-
-			const int64_t actualTime = std::max<int64_t>(
-					handlerStartTime - job->getStartTime(), 0);
-			builder.set(
-					MetaType::STATEMENT_RES_ACTUAL_TIME,
-					ValueUtils::makeLong(actualTime));
-
-			builder.set(
-					MetaType::STATEMENT_RES_MEMORY_USE,
-					ValueUtils::makeLong(prof.getMemoryUse()));
-
-			builder.set(
-					MetaType::STATEMENT_RES_SQL_STORE_USE,
-					ValueUtils::makeLong(prof.getSqlStoreUse()));
-
-			builder.set(
-					MetaType::STATEMENT_RES_DATA_STORE_ACCESS,
-					ValueUtils::makeLong(
-							prof.getDataStoreAccess(*executionManager)));
-
-			builder.set(
-					MetaType::STATEMENT_RES_NETWORK_TRANSFER_SIZE,
-					ValueUtils::makeLong(0));
-
-			builder.set(
-					MetaType::STATEMENT_RES_NETWORK_TIME,
-					ValueUtils::makeLong(0));
-
-			builder.set(
-					MetaType::STATEMENT_RES_AVAILABLE_CONCURRENCY,
-					ValueUtils::makeLong(0));
-
-			builder.set(
-					MetaType::STATEMENT_RES_RESOURCE_RESTRICTIONS,
-					makeString(alloc, ""));
-
-			builder.set(
-					MetaType::STATEMENT_RES_STATEMENT,
-					ValueUtils::makeNull());
-
-			getContext().getRowHandler()(txn, builder.build());
+		const JobResourceInfo *info =
+				jobManager->getResourceProfile(alloc, jobId, handlerStartTime);
+		if (info == NULL || (!isAdministrator && info->dbId_ != dbId)) {
+			continue;
 		}
+
+		builder.set(
+				MetaType::STATEMENT_RES_REQUEST_ID,
+				makeString(alloc, info->requestId_.c_str()));
+
+		builder.set(
+			MetaType::STATEMENT_RES_NODE_ADDRESS,
+			makeStringOptional(alloc, address.dump(false).c_str()));
+		builder.set(
+			MetaType::STATEMENT_RES_NODE_PORT,
+			ValueUtils::makeIntegerOptional(address.port_, 0));
+
+		builder.set(
+				MetaType::STATEMENT_RES_CONNECTION_ADDRESS,
+				makeStringOptional(alloc, info->connectionAddress_.c_str()));
+		builder.set(
+				MetaType::STATEMENT_RES_CONNECTION_PORT,
+				ValueUtils::makeIntegerOptional(info->connectionPort_, 0));
+
+		builder.set(
+				MetaType::STATEMENT_RES_USER_NAME,
+				makeStringOptional(alloc, info->userName_.c_str()));
+		builder.set(
+				MetaType::STATEMENT_RES_APPLICATION_NAME,
+				makeStringOptional(alloc, info->applicationName_.c_str()));
+
+		builder.set(
+				MetaType::STATEMENT_RES_STAEMENT_TYPE,
+				makeString(alloc, info->statementType_.c_str()));
+		builder.set(
+				MetaType::STATEMENT_RES_START_TIME,
+				ValueUtils::makeTimestamp(info->startTime_));
+		builder.set(
+				MetaType::STATEMENT_RES_ACTUAL_TIME,
+				ValueUtils::makeLong(info->actualTime_));
+
+		builder.set(
+				MetaType::STATEMENT_RES_MEMORY_USE,
+				ValueUtils::makeLong(info->memoryUse_));
+		builder.set(
+				MetaType::STATEMENT_RES_SQL_STORE_USE,
+				ValueUtils::makeLong(info->sqlStoreUse_));
+		builder.set(
+				MetaType::STATEMENT_RES_DATA_STORE_ACCESS,
+				ValueUtils::makeLong(info->dataStoreAccess_));
+		builder.set(
+				MetaType::STATEMENT_RES_NETWORK_TRANSFER_SIZE,
+				ValueUtils::makeLong(info->networkTransferSize_));
+		builder.set(
+				MetaType::STATEMENT_RES_NETWORK_TIME,
+				ValueUtils::makeLong(info->networkTime_));
+
+		builder.set(
+				MetaType::STATEMENT_RES_AVAILABLE_CONCURRENCY,
+				ValueUtils::makeLong(info->availableConcurrency_));
+		builder.set(
+				MetaType::STATEMENT_RES_RESOURCE_RESTRICTIONS,
+				makeString(alloc, info->resourceRestrictions_.c_str()));
+
+		builder.set(
+				MetaType::STATEMENT_RES_STATEMENT,
+				makeStringOptional(alloc, info->statement_.c_str()));
+
+		getContext().getRowHandler()(txn, builder.build());
 	}
 }
 
@@ -3726,7 +3844,7 @@ void MetaProcessor::TaskResHandler::operator()(
 	bool isAdministrator = enableAdministratorScan();
 
 	PartitionTable *pt = getContext().getSource().partitionTable_;
-	NodeAddress &address = pt->getNodeAddress(0, SYSTEM_SERVICE);
+	NodeAddress &address = pt->getNodeAddress(0, SQL_SERVICE);
 
 	SQLExecutionManager *executionManager =
 			getContext().getSource().sqlExecutionManager_;
@@ -3741,81 +3859,64 @@ void MetaProcessor::TaskResHandler::operator()(
 
 	for (size_t pos = 0; pos < jobIdList.size(); pos++) {
 		JobId &jobId = jobIdList[pos];
-		JobManager::Latch latch(
-				jobId, "MetaProcessor::StatementResHandler::operator()", jobManager);
-		Job *job = latch.get();
-		if (!job) {
-			continue;
-		}
+		util::Vector<JobResourceInfo> infoList(alloc);
+		jobManager->getTaskResourceProfile(alloc, jobId, infoList);
 
-		DatabaseId currentDbId = job->getDbId();
-		if (!isAdministrator && currentDbId != dbId) {
-			continue;
-		}
+		for (util::Vector<JobResourceInfo>::iterator it = infoList.begin();
+				it != infoList.end(); ++it) {
+			JobResourceInfo *info = &(*it);
 
-		StatJobProfilerInfo prof(alloc, jobId);
-		job->getProfiler(alloc, prof, 1);
-
-		for (util::Vector<StatTaskProfilerInfo>::iterator it = prof.taskProfs_.begin();
-				it != prof.taskProfs_.end(); ++it) {
-			if (it->counter_ <= 0) {
+			if (!isAdministrator && info->dbId_ != dbId) {
 				continue;
 			}
 
 			builder.set(
-					MetaType::TASK_RES_REQEST_ID,
-					makeString(alloc, jobId.dump(alloc, true).c_str()));
+					MetaType::TASK_RES_REQUEST_ID,
+					makeString(alloc, info->requestId_.c_str()));
 
 			builder.set(
 					MetaType::TASK_RES_JOB_ORDINAL,
-					ValueUtils::makeLong(jobIdList[pos].versionId_));
+					ValueUtils::makeLong(info->jobOrdinal_));
 			builder.set(
 					MetaType::TASK_RES_TASK_ORDINAL,
-					ValueUtils::makeInteger(static_cast<int32_t>(it->id_)));
+					ValueUtils::makeInteger(info->taskOrdinal_));
 
 			builder.set(
-					MetaType::TASK_RES_NODE_ADDRESS,
-					makeString(alloc, address.dump(false).c_str()));
+				MetaType::TASK_RES_NODE_ADDRESS,
+				makeStringOptional(alloc, address.dump(false).c_str()));
 			builder.set(
-					MetaType::TASK_RES_NODE_PORT,
-					ValueUtils::makeInteger(address.port_));
+				MetaType::TASK_RES_NODE_PORT,
+				ValueUtils::makeIntegerOptional(address.port_, 0));
 
 			builder.set(
 					MetaType::TASK_RES_TASK_TYPE,
-					makeString(alloc, it->name_.c_str()));
-
+					makeString(alloc, info->taskType_.c_str()));
 			builder.set(
 					MetaType::TASK_RES_LEAD_TIME,
-					ValueUtils::makeLong(it->leadTime_));
-
+					ValueUtils::makeLong(info->leadTime_));
 			builder.set(
 					MetaType::TASK_RES_ACTUAL_TIME,
-					ValueUtils::makeLong(it->actualTime_));
+					ValueUtils::makeLong(info->actualTime_));
 
 			builder.set(
 					MetaType::TASK_RES_MEMORY_USE,
-					ValueUtils::makeLong(it->getMemoryUse()));
-
+					ValueUtils::makeLong(info->memoryUse_));
 			builder.set(
 					MetaType::TASK_RES_SQL_STORE_USE,
-					ValueUtils::makeLong(it->getSqlStoreUse()));
-
+					ValueUtils::makeLong(info->sqlStoreUse_));
 			builder.set(
 					MetaType::TASK_RES_DATA_STORE_ACCESS,
-					ValueUtils::makeLong(
-							it->getDataStoreAccess(*executionManager)));
-
+					ValueUtils::makeLong(info->dataStoreAccess_));
 			builder.set(
 					MetaType::TASK_RES_NETWORK_TRANSFER_SIZE,
-					ValueUtils::makeLong(0));
-
+					ValueUtils::makeLong(info->networkTransferSize_));
 			builder.set(
 					MetaType::TASK_RES_NETWORK_TIME,
-					ValueUtils::makeLong(0));
+					ValueUtils::makeLong(info->networkTime_));
 
 			builder.set(
 					MetaType::TASK_RES_PLAN,
-					ValueUtils::makeNull());
+					makeStringOptional(alloc, info->plan_.c_str()));
 
 			getContext().getRowHandler()(txn, builder.build());
 		}
@@ -4198,55 +4299,54 @@ void MetaProcessor::SQLHandler::operator()(
 	util::Vector<JobId> jobIdList(alloc);
 	jobManager->getCurrentJobList(jobIdList);
 
+	EventContext *eventContext = getContext().getSource().eventContext_;
+	const int64_t handlerStartTime =
+			eventContext->getHandlerStartTime().getUnixTime();
+
 	for (size_t pos = 0; pos < jobIdList.size(); pos++) {
-		JobManager::Latch latch(jobIdList[pos], "MetaProcessor::SQLHandler::operator()", jobManager);
-		Job *job = latch.get();
-		if (job) {
-			DatabaseId currentDbId = job->getDbId();
-			if (!isAdministrator && currentDbId != dbId) {
-				continue;
-			}
-
-			builder.set(
-				MetaType::SQL_DATABASE_NAME,
-				makeString(alloc, job->getDbName()));
-
-			builder.set(
-				MetaType::SQL_NODE_ADDRESS,
-				makeString(alloc, address.dump(false).c_str()));
-
-			builder.set(
-					MetaType::SQL_NODE_PORT,
-					ValueUtils::makeInteger(address.port_));
-
-			builder.set(
-					MetaType::SQL_START_TIME,
-					ValueUtils::makeTimestamp(
-							job->getStartTime()));
-
-			builder.set(
-					MetaType::SQL_APPLICATION_NAME,
-					job->getAppName() ? makeString(alloc, job->getAppName()) :
-					ValueUtils::makeNull());
-
-			builder.set(
-					MetaType::SQL_SQL,
-					ValueUtils::makeNull());
-
-			builder.set(
-					MetaType::SQL_QUERY_ID,
-					makeString(alloc, jobIdList[pos].dump(alloc, true).c_str()));
-			builder.set(
-					MetaType::SQL_JOB_ID,
-					makeString(alloc, jobIdList[pos].dump(alloc, false).c_str()));
-
-			builder.set(
-				MetaType::SQL_USER_NAME,
-				job->getUserName() ? makeString(alloc, job->getUserName()) :
-				ValueUtils::makeNull());
-
-			getContext().getRowHandler()(txn, builder.build());
+		JobId &jobId = jobIdList[pos];
+		const JobResourceInfo *info =
+				jobManager->getResourceProfile(alloc, jobId, handlerStartTime);
+		if (info == NULL || (!isAdministrator && info->dbId_ != dbId)) {
+			continue;
 		}
+
+		builder.set(
+			MetaType::SQL_DATABASE_NAME,
+			makeString(alloc, info->dbName_.c_str()));
+
+		builder.set(
+			MetaType::SQL_NODE_ADDRESS,
+			makeString(alloc, address.dump(false).c_str()));
+
+		builder.set(
+				MetaType::SQL_NODE_PORT,
+				ValueUtils::makeInteger(address.port_));
+
+		builder.set(
+				MetaType::SQL_START_TIME,
+				ValueUtils::makeTimestamp(info->startTime_));
+
+		builder.set(
+				MetaType::SQL_APPLICATION_NAME,
+				makeStringOptional(alloc, info->applicationName_.c_str()));
+
+		builder.set(
+			MetaType::SQL_SQL,
+			ValueUtils::makeNull());
+
+		builder.set(
+				MetaType::SQL_QUERY_ID,
+				makeString(alloc, jobIdList[pos].dump(alloc, true).c_str()));
+		builder.set(
+				MetaType::SQL_JOB_ID,
+				makeString(alloc, jobIdList[pos].dump(alloc, false).c_str()));
+
+		builder.set(
+			MetaType::SQL_USER_NAME,
+			makeStringOptional(alloc, info->userName_.c_str()));
+
+		getContext().getRowHandler()(txn, builder.build());
 	}
 }
 
@@ -4839,6 +4939,8 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 	JobManager* jobManager = executionManager->getJobManager();
 	jobManager->getDatabaseStats(alloc, specifiedDbId, statsMap, isAdministrator);
 
+	dbManager.getStatsMapForRequest(alloc, statsMap);
+
 	const uint32_t chunkSize = PartitionList::Config::getChunkSize(*jobManager->getExecutionManager()->getManagerSet()->config_);
 
 	LocalTempStore& store = jobManager->getStore();
@@ -4851,11 +4953,6 @@ void MetaProcessor::DatabaseStatsHandler::operator()(
 		if (!isAdministrator && currentDbId != dbId) {
 			continue;
 		}
-		dbInfo.second->connectionStats_.sqlRequestCount_ 
-			= getContext().getSource().transactionManager_->getDatabaseManager().getRequestCount(currentDbId, true);
-
-		dbInfo.second->connectionStats_.nosqlRequestCount_
-			= getContext().getSource().transactionManager_->getDatabaseManager().getRequestCount(currentDbId, true);
 
 		builder.set(
 			MetaType::DATABASE_STATS_DATABASE_ID,
@@ -5123,4 +5220,230 @@ void MetaProcessor::ContainerDetailStatsHandler::operator()(
 	getContext().getRowHandler()(txn, builder.build());
 
 	getContext().stepContainerListing(id);
+}
+
+
+
+MetaProcessor::SyncStatsHandler::SyncStatsHandler(Context& cxt) :
+	StoreCoreHandler(cxt) {
+}
+
+
+/**
+ * @brief Sets synchronization statistics into the builder for meta data management.
+ * @param alloc Stack allocator for temporary objects.
+ * @param cxt MetaProcessor context providing access to partition table and other resources.
+ * @param builder Builder to accumulate meta information about sync statistics.
+ * @param stats Synchronization statistics to be processed and set.
+ * @retval true Statistics were set successfully and builder was updated.
+ * @retval false No catchup nodes found or statistics could not be set.
+ * @note This function extracts relevant sync statistics and populates the builder for further processing.
+ */
+bool MetaProcessor::SyncStatsHandler::setStats(util::StackAllocator& alloc, MetaProcessor::Context &cxt,
+	ValueListBuilder<MetaType::SyncStatsMeta>& builder, LongtermSyncStats& stats) {
+	PartitionTable* pt = cxt.getSource().partitionTable_;
+
+	NodeIdList& catchups = stats.role_.getCatchups();
+	if (catchups.size() == 0) {
+		return false;
+	}
+	PartitionId pId = stats.role_.getPartitionId();
+	builder.set(
+		MetaType::SYNC_STATS_CLUSTER_PARTITION_INDEX,
+		ValueUtils::makeInteger(pId));
+
+	PartitionGroupId pgId = pt->getPartitionGroupId(pId);
+	builder.set(
+		MetaType::SYNC_STATS_WORKER_INDEX,
+		ValueUtils::makeInteger(pgId));
+
+	PartitionRoleStatus roleStatus = stats.role_.getPartitionRoleStatus();
+	builder.set(
+		MetaType::SYNC_STATS_PARTITION_ROLE,
+		makeString(alloc, pt->dumpPartitionRoleStatus(roleStatus).c_str(), cxt));
+
+	NodeId ownerNodeId = stats.role_.getOwner();
+	NodeId catchupNodeId = catchups[0];
+	NodeAddress selfAddress;
+	NodeAddress remoteAddress;
+
+	if (ownerNodeId == 0) {
+		selfAddress = pt->getNodeAddress(ownerNodeId, TRANSACTION_SERVICE);
+		remoteAddress = pt->getNodeAddress(catchupNodeId, TRANSACTION_SERVICE);
+	}
+	else {
+		selfAddress = pt->getNodeAddress(catchupNodeId, TRANSACTION_SERVICE);
+		remoteAddress = pt->getNodeAddress(ownerNodeId, TRANSACTION_SERVICE);
+	}
+
+	if (selfAddress.isValid()) {
+		builder.set(
+			MetaType::SYNC_STATS_NODE_ADDRESS,
+			makeString(alloc, selfAddress.dump(false).c_str(), cxt));
+
+		builder.set(
+			MetaType::SYNC_STATS_NODE_PORT,
+			ValueUtils::makeInteger(selfAddress.port_));
+	}
+	else {
+		builder.set(
+			MetaType::SYNC_STATS_NODE_ADDRESS,
+			ValueUtils::makeNull());
+		builder.set(
+			MetaType::SYNC_STATS_NODE_PORT,
+			ValueUtils::makeNull());
+	}
+
+	if (remoteAddress.isValid()) {
+		builder.set(
+			MetaType::SYNC_STATS_REMOTE_ADDRESS,
+			makeString(alloc, remoteAddress.dump(false).c_str(), cxt));
+
+		builder.set(
+			MetaType::SYNC_STATS_REMOTE_PORT,
+			ValueUtils::makeInteger(remoteAddress.port_));
+	}
+	else {
+		builder.set(
+			MetaType::SYNC_STATS_REMOTE_ADDRESS,
+			ValueUtils::makeNull());
+		builder.set(
+			MetaType::SYNC_STATS_REMOTE_PORT,
+			ValueUtils::makeNull());
+	}
+
+	LogSequentialNumber lsn = pt->getLSN(pId);
+	builder.set(
+		MetaType::SYNC_STATS_LSN,
+		ValueUtils::makeLong(lsn));
+
+	int64_t ssn = stats.ssn_;
+	builder.set(
+		MetaType::SYNC_STATS_SSN,
+		ValueUtils::makeLong(ssn));
+
+	int32_t revision = stats.partitionRevisionNo_;
+	builder.set(
+		MetaType::SYNC_STATS_CLUSTER_PARTITION_REVISION,
+		ValueUtils::makeInteger(revision));
+
+	std::string eventTypeName = EventTypeUtility::getEventTypeName(stats.eventType_);
+	builder.set(
+		MetaType::SYNC_STATS_SYNC_PHASE,
+		makeString(alloc, eventTypeName.c_str(), cxt));
+
+	int64_t elapsedTime = stats.elapsedTime_;
+	builder.set(
+		MetaType::SYNC_STATS_ELAPSED_TIME,
+		ValueUtils::makeLong(elapsedTime));
+
+	int64_t startTime = stats.startTime_;
+	builder.set(
+		MetaType::SYNC_STATS_START_TIME,
+		ValueUtils::makeTimestamp(startTime));
+
+	int64_t endTime = stats.endTime_;
+	if (endTime == 0) {
+		builder.set(
+			MetaType::SYNC_STATS_END_TIME,
+			ValueUtils::makeNull());
+	}
+	else {
+		builder.set(
+			MetaType::SYNC_STATS_END_TIME,
+			ValueUtils::makeTimestamp(startTime));
+	}
+
+	int64_t totalBlockCount = stats.totalBlockCount_;
+	builder.set(
+		MetaType::SYNC_STATS_TOTAL_BLOCK_COUNT,
+		ValueUtils::makeLong(totalBlockCount));
+
+	int64_t checkpointTime = stats.checkpointTime_;
+	builder.set(
+		MetaType::SYNC_STATS_CHECKPOINT_TIME,
+		ValueUtils::makeLong(checkpointTime));
+
+	int64_t baseLsn = stats.baseLsn_;
+	builder.set(
+		MetaType::SYNC_STATS_BASE_LSN,
+		ValueUtils::makeLong(baseLsn));
+
+	LogSequentialNumber processedLsn = stats.processedLsn_;
+	builder.set(
+		MetaType::SYNC_STATS_PROCESSED_LSN,
+		ValueUtils::makeLong(processedLsn));
+
+	int64_t processedBlockCount = stats.processedBlockCount_;
+	builder.set(
+		MetaType::SYNC_STATS_PROCESSED_BLOCK_COUNT,
+		ValueUtils::makeLong(processedBlockCount));
+
+	int64_t processedBlockTime = stats.processedBlockTime_;
+	builder.set(
+		MetaType::SYNC_STATS_PROCESSED_BLOCK_TIME,
+		ValueUtils::makeLong(processedBlockTime));
+
+	int64_t processedLogCount = stats.processedLogCount_;
+	builder.set(
+		MetaType::SYNC_STATS_PROCESSED_LOG_COUNT,
+		ValueUtils::makeLong(processedLogCount));
+
+	int64_t processedLogSize = stats.processedLogCount_;
+	builder.set(
+		MetaType::SYNC_STATS_PROCESSED_LOG_SIZE,
+		ValueUtils::makeLong(processedLogSize));
+
+	int64_t processedLogTime = stats.processedLogCount_;
+	builder.set(
+		MetaType::SYNC_STATS_PROCESSED_LOG_TIME,
+		ValueUtils::makeLong(processedLogTime));
+	return true;
+}
+
+
+/**
+ * @brief Processes synchronization statistics for meta data management.
+ * @param [in] txn Transaction context for the operation.
+ * @param [in] id Container ID.
+ * @param [in] dbId Database ID.
+ * @param [in] attribute Container attribute.
+ * @param [in] targetContainer Pointer to the target container.
+ * @note Updates meta information, triggers monitoring or notification logic, and may affect cluster state based on received statistics.
+ */
+void MetaProcessor::SyncStatsHandler::operator()(
+	TransactionContext& txn, ContainerId id, DatabaseId dbId,
+	ContainerAttribute attribute, BaseContainer* targetContainer) const {
+	UNUSED_VARIABLE(id);
+	UNUSED_VARIABLE(dbId);
+	UNUSED_VARIABLE(attribute);
+	UNUSED_VARIABLE(targetContainer);
+
+	ValueListBuilder<MetaType::SyncStatsMeta> builder(
+		getContext().getValueListSource());
+	util::StackAllocator& alloc = txn.getDefaultAllocator();
+	SyncManager& syncMgr = getContext().getSource().transactionService_->getSyncManager();
+
+	PartitionTable* pt = getContext().getSource().partitionTable_;
+	for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
+		PartitionRole role;
+		pt->getPartitionRole(pId, role);
+		if (!role.hasCatchupRole()) {
+			continue;
+		}
+		LongtermSyncStats stats;
+		if (!syncMgr.getSyncStats(pId, stats)) {
+			continue;
+		}
+		if (!setStats(alloc, getContext(), builder, stats)) {
+			continue;
+		}
+		getContext().getRowHandler()(txn, builder.build());
+	}
+	SyncManager::StatsManager::Latch latch(syncMgr.getStatsManager());
+	util::AllocDeque<LongtermSyncStats*>& statsMap = latch.getStatsDeque();
+	for (const auto& stats : statsMap) {
+		MetaProcessor::SyncStatsHandler::setStats(alloc, getContext(), builder, *stats);
+		getContext().getRowHandler()(txn, builder.build());
+	}
 }

@@ -34,7 +34,6 @@
 
 
 
-
 class VirtualFileBase;
 /*!
 	@brief 物理チャンク情報
@@ -364,6 +363,9 @@ private:
 	void addExtentFree(int32_t index);
 
 	void extentChecker();
+
+	void checkChunkTableIndex(int64_t chunkId, int32_t index);
+	void checkChunkTablePos(int64_t chunkId, int32_t index, int16_t pos, int64_t extentOffset);
 
 	DSGroupId groupId_;
 	DLTable::Chain* chain_;
@@ -817,6 +819,7 @@ public:
 	void updateStoreMemoryAgingParams();
 
 	void updateStoreObjectUseStats();
+	void updateProfileCounter();
 
 	int64_t getMaxChunkId() {
 		return MAX_CHUNK_ID;
@@ -1022,9 +1025,11 @@ inline int8_t MeshedChunkTable::Group::getVacancy(int64_t chunkId) {
 inline int64_t MeshedChunkTable::Group::getOffset(int64_t chunkId) {
 	int32_t index = mct_.getIndex(chunkId);
 	int16_t pos = mct_.getPos(chunkId);
+
 	ChunkExtent& extent = *mct_.extents_[index];
-	assert(extent.getOffset(pos) >= 0);
-	return extent.getOffset(pos);
+	int64_t extentOffset = extent.getOffset(pos);
+
+	return extentOffset;
 }
 
 

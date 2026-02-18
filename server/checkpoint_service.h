@@ -47,10 +47,12 @@ class PartitionLock {
 public:
 	PartitionLock(TransactionManager &txnManager, PartitionId pId);
 	~PartitionLock();
+	static const int32_t traceLimitTime_ = 60 * 10000;
 
 private:
 	TransactionManager &transactionManager_;
 	PartitionId pId_;
+	util::Stopwatch watch_;
 };
 
 static const uint32_t CP_HANDLER_PARTITION_ID = 0;
@@ -279,6 +281,8 @@ public:
 
 	static const std::string PID_LSN_INFO_FILE_NAME;
 	static const std::string AUTO_ARCHIVE_COMMAND_INFO_FILE_NAME;
+	static const int32_t EE_PRIORITY_HIGH = static_cast<int32_t>(INT32_MIN);
+	static const int32_t EE_PRIORITY_MIDDLE = static_cast<int32_t>(-1800 * 1000);
 
 	static const uint32_t BACKUP_ARCHIVE_LOG_MODE_FLAG = 1;
 	static const uint32_t BACKUP_DUPLICATE_LOG_MODE_FLAG = 1 << 1;
@@ -415,6 +419,8 @@ public:
 			uint64_t &resultSize, uint64_t &totalCount,
 			uint64_t &completedCount, uint64_t &readyCount);
 
+	void removeChunkFile(SyncSequentialNumber ssn);
+
 	CpLongtermSyncInfo* getCpLongtermSyncInfo(SyncSequentialNumber id);
 
 	bool setCpLongtermSyncInfo(
@@ -486,6 +492,10 @@ public:
 
 	int32_t getChunkCopyInterval() {
 		return chunkCopyIntervalMillis_;
+	}
+
+	int32_t getChunkCopyQueueSize() {
+		return chunkCopyQueueSize_;
 	}
 
 	int32_t getChunkCopyLimitQueueSize() {
@@ -725,6 +735,9 @@ private:
 	util::Atomic<int32_t>
 		chunkCopyIntervalMillis_;  
 
+	int32_t chunkCopyQueueSize_;
+	int64_t  totalWaitTime_;
+
 	volatile bool backupEndPending_;
 
 	std::string lastBackupPath_;
@@ -763,6 +776,7 @@ private:
 	util::Atomic<bool> enablePeriodicCheckpoint_;
 	util::Atomic<int32_t> newestLogFormatVersion_;
 	AutoArchiveInfo autoArchiveInfo_;
+	util::Atomic<int64_t> lastSyncCheckpointRequestTime_;
 
 };
 

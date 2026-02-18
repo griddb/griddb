@@ -49,8 +49,13 @@ struct PartitionListStats;
 struct StatJobProfilerInfo;
 struct StatJobProfiler;
 struct SQLProfilerInfo;
+struct JobResourceInfo;
 struct DatabaseStats;
 typedef int32_t TaskId;
+
+class PriorityJobEnvironment;
+class PriorityJobController;
+class PriorityTask;
 
 
 static const uint8_t UNDEF_JOB_VERSIONID = UINT8_MAX;
@@ -78,35 +83,7 @@ struct ChunkBufferStatsSQL {
 class ChunkBufferStatsSQLScope;
 
 struct StatTaskProfilerInfo {
-	StatTaskProfilerInfo(util::StackAllocator& alloc) :
-		id_(0),
-		inputId_(0),
-		name_(alloc),
-		status_(alloc),
-		counter_(0),
-		sendPendingCount_(0),
-		dispatchCount_(0),
-		worker_(0),
-		actualTime_(0),
-		leadTime_(0),
-		dispatchTime_(0),
-		startTime_(alloc),
-		sendEventCount_(0),
-		sendEventSize_(0),
-		allocateMemory_(0)
-		,
-		inputSwapRead_(0),
-		inputSwapWrite_(0),
-		inputActiveBlockCount_(0),
-		swapRead_(0),
-		swapWrite_(0),
-		activeBlockCount_(0)
-		,
-		scanBufferHitCount_(0),
-		scanBufferMissHitCount_(0),
-		scanBufferSwapReadSize_(0),
-		scanBufferSwapWriteSize_(0)
-	{}
+	explicit StatTaskProfilerInfo(util::StackAllocator& alloc);
 
 	int64_t getMemoryUse() const;
 	int64_t getSqlStoreUse() const;
@@ -124,6 +101,7 @@ struct StatTaskProfilerInfo {
 	int64_t leadTime_;
 	int64_t dispatchTime_;
 	util::String startTime_;
+	util::String operationCheckTime_;
 	int64_t sendEventCount_;
 	int64_t sendEventSize_;
 	int64_t allocateMemory_;
@@ -138,18 +116,25 @@ struct StatTaskProfilerInfo {
 	int64_t scanBufferSwapReadSize_;
 	int64_t scanBufferSwapWriteSize_;
 
+	util::Vector<TaskId> *inputList_;
+	util::Vector<TaskId> *outputList_;
+	util::Vector<TaskId> *workingInputList_;
+	util::Vector<TaskId> *workingOutputList_;
+	util::Vector<TaskId> *inactiveOutputList_;
+
 	UTIL_OBJECT_CODER_MEMBERS(
 		id_,
-		inputId_,
+		UTIL_OBJECT_CODER_OPTIONAL(inputId_, -1),
 		name_,
 		status_,
 		counter_,
-		sendPendingCount_,
-		dispatchCount_,
+		UTIL_OBJECT_CODER_OPTIONAL(sendPendingCount_, -1),
+		UTIL_OBJECT_CODER_OPTIONAL(dispatchCount_, -1),
 		worker_,
 		actualTime_,
 		UTIL_OBJECT_CODER_OPTIONAL(dispatchTime_, 0),
 		startTime_,
+		operationCheckTime_,
 		UTIL_OBJECT_CODER_OPTIONAL(allocateMemory_, 0),
 		UTIL_OBJECT_CODER_OPTIONAL(inputSwapRead_, 0),
 		UTIL_OBJECT_CODER_OPTIONAL(inputSwapWrite_, 0),
@@ -162,7 +147,12 @@ struct StatTaskProfilerInfo {
 		UTIL_OBJECT_CODER_OPTIONAL(scanBufferHitCount_, 0),
 		UTIL_OBJECT_CODER_OPTIONAL(scanBufferMissHitCount_, 0),
 		UTIL_OBJECT_CODER_OPTIONAL(scanBufferSwapReadSize_, 0),
-		UTIL_OBJECT_CODER_OPTIONAL(scanBufferSwapWriteSize_, 0)
+		UTIL_OBJECT_CODER_OPTIONAL(scanBufferSwapWriteSize_, 0),
+		inputList_,
+		outputList_,
+		workingInputList_,
+		workingOutputList_,
+		inactiveOutputList_
 	);
 };
 
@@ -246,6 +236,7 @@ public:
 	typedef uint32_t ResourceId;
 	static const int32_t UNIT_CHECK_COUNT = 127;
 	static const int32_t UNDEF_TASKID = -1;
+	static const int32_t PRIORITY_JOB_CONTROL_LEVEL = 3;
 
 	enum ControlType {
 		FW_CONTROL_DEPLOY,
@@ -276,9 +267,18 @@ public:
 	*/
 	struct JobId {
 
-		JobId() : execId_(UNDEF_STATEMENTID), versionId_(0) {}
+		JobId() :
+				execId_(UNDEF_STATEMENTID), versionId_(0) {
+		}
+
 		JobId(ClientId& clientId, ExecId execId) :
-			clientId_(clientId), execId_(execId), versionId_(0) {}
+				clientId_(clientId), execId_(execId), versionId_(0) {
+		}
+
+		JobId(const JobId& another) :
+				execId_(UNDEF_STATEMENTID), versionId_(0) {
+			*this = another;
+		}
 
 		JobId& operator=(const JobId& another) {
 			if (this == &another) {
@@ -346,7 +346,7 @@ public:
 		ExecId execId_;
 		uint8_t versionId_;
 		void parse(util::StackAllocator& alloc, util::String& jobIdStr, bool isJobId = true);
-		void toString(util::StackAllocator& alloc, util::String& str, bool isClientIdOnly = false);
+		void toString(util::StackAllocator& alloc, util::String& str, bool isClientIdOnly = false) const;
 		void set(ClientId& clientId, ExecId execId, uint8_t versionId = 0) {
 			clientId_ = clientId;
 			execId_ = execId;
@@ -368,19 +368,13 @@ public:
 			sqlType_(SQLType::START_EXEC), isDml_(false) {}
 
 		void setSQLType(SQLType::Id sqlType) {
-			switch (sqlType) {
-			case SQLType::EXEC_INSERT:
-			case SQLType::EXEC_UPDATE:
-			case SQLType::EXEC_DELETE:
-				isDml_ = true;
-				break;
-			default:
-				break;
-			}
+			isDml_ = isDml(sqlType);
 			sqlType_ = sqlType;
 		}
 
 		void setPlanInfo(SQLPreparedPlan* pPlan, size_t pos);
+
+		static bool isDml(SQLType::Id sqlType);
 
 		util::StackAllocator& alloc_;
 		TaskId taskId_;
@@ -472,6 +466,8 @@ public:
 		GsNodeInfo* createAssignInfo(PartitionTable* pt, NodeId nodeId,
 			bool isLocal, JobManager* jobManager);
 
+		int64_t resolveStatementTimeout() const;
+
 		util::StackAllocator& eventStackAlloc_;
 		GsNodeInfoList gsNodeInfoList_;
 		bool coordinator_;
@@ -560,11 +556,12 @@ public:
 		class TaskInterruptionHandler :
 			public InterruptionChecker::CheckHandler {
 		public:
-			TaskInterruptionHandler();
+			explicit TaskInterruptionHandler(Job *job);
 			virtual ~TaskInterruptionHandler();
 			virtual bool operator()(InterruptionChecker& checker, int32_t flags);
 
-			SQLContext* cxt_;
+			SQLContext *cxt_;
+			Job *job_;
 			EventMonotonicTime intervalMillis_;
 		};
 
@@ -801,11 +798,7 @@ public:
 
 		bool checkLimitTime(int64_t &startTime, uint32_t &elapsedMills);
 
-		std::string getLongQueryForAudit(SQLExecution* execution);
-		std::string getLongQueryForEventLog(SQLExecution* execution);
-
-		void traceLongQuery(SQLExecution* execution);
-		static void traceLongQueryCore(SQLExecution* execution, int64_t startTime, int64_t executionTime);
+		void traceLongQuery(SQLExecution &execution);
 
 		void deploy(EventContext& ec, util::StackAllocator& alloc,
 			JobInfo* jobInfo, NodeId senderNodeId, int64_t waitInterval);
@@ -1305,7 +1298,9 @@ public:
 	~JobManager();
 
 	void initialize(const ManagerSet& mgrSet);
-	void beginJob(EventContext& ec, JobId& jobId, JobInfo* jobInfo, int64_t waitInterval);
+	void beginJob(
+		EventContext &ec, JobId &jobId, JobInfo *jobInfo, int64_t waitInterval,
+		SQLExecution &execution);
 	void removeExecution(
 		EventContext* ec, JobId& jobId, SQLExecution* execution, bool withCheck);
 	void cancel(EventContext& ec, JobId& jobId, bool clientCancel);
@@ -1321,9 +1316,24 @@ public:
 	Job* create(JobId& jobId, JobInfo* jobInfo);
 	Job* get(JobId& jobId);
 	void resetSendCounter(util::StackAllocator& alloc);
+	void resetCache();
 
-	void getProfiler(util::StackAllocator& alloc,
-		StatJobProfiler& jobProfiler, int32_t mode, JobId* jobId);
+	JobResourceInfo* getResourceProfile(
+			util::StackAllocator &alloc, JobId &jobId,
+			int64_t handlerStartTime);
+	void getTaskResourceProfile(
+			util::StackAllocator &alloc, JobId &jobId,
+			util::Vector<JobResourceInfo> &infoList);
+
+	void getProfiler(
+			util::StackAllocator &alloc, util::VariableSizeAllocator<> &varAlloc,
+			StatJobProfiler &jobProfiler, int32_t mode, JobId *jobId);
+	void setUpProfilerInfo(JobId &jobId, SQLProfilerInfo &profilerInfo);
+
+	static void traceLongQueryByExecution(
+			util::StackAllocator &alloc, SQLExecution &execution,
+			int64_t startTime, uint32_t elapsedMillis);
+	static bool checkLongQuery(SQLService &sqlSvc, int64_t execTime);
 
 	void getJobIdList(util::StackAllocator& alloc, StatJobIdList& infoList);
 	void executeStatementError(EventContext& ec, std::exception* e, JobId& jobId);
@@ -1332,6 +1342,20 @@ public:
 
 	void getDatabaseStats(util::StackAllocator& alloc,
 		DatabaseId dbId, util::Map<DatabaseId, DatabaseStats*>& statsMap, bool isAdministrator);
+
+	bool fetch(EventContext& ec, const JobId &jobId, SQLExecution &execution);
+
+	void receiveNoSQLResponse(
+			EventContext& ec, util::Exception& dest,
+			Job::StatementExecStatus status, JobId &jobId, int32_t pos);
+	static bool checkNoSQLException(
+			const util::Exception &exception, Job::StatementExecStatus status);
+	static bool isContinuableNoSQLErrorCode(int32_t errorCode);
+	bool checkNoSQLRequestCancel(JobId &jobId);
+
+	void start();
+	void shutdown();
+	void waitForShutdown();
 
 	EventEngine* getEE(ServiceType type) {
 		return eeList_[static_cast<size_t>(type)];
@@ -1373,7 +1397,7 @@ public:
 		return executionManager_;
 	}
 
-	void remove(JobId& jobId);
+	void remove(EventContext *ec, JobId &jobId);
 
 	std::string& getHostName() {
 		return hostName_;
@@ -1414,6 +1438,34 @@ public:
 		return sendRequestCount_;
 	}
 
+	void setJobNodeTimeout(int32_t timeoutSeconds);
+
+	void setMonitoringInterval(int64_t interval);
+	void setMonitoringLimit(int64_t limit);
+
+	void setMonitoringPlanTraceEnabled(bool enabled);
+	void setMonitoringPlanSizeLimit(uint32_t limit);
+
+	void setMonitoringMemoryTotal(uint64_t total);
+	void setMonitoringSqlStoreTotal(uint64_t total);
+
+	void setMonitoringMemoryRate(double rate);
+	void setMonitoringSqlStoreRate(double rate);
+	void setMonitoringDataStoreRate(double rate);
+	void setMonitoringNetworkRate(double rate);
+
+	void setJobEssentialMemoryLimit(uint64_t limit);
+
+	void setFailOnMemoryExcess(bool enabled);
+	void setSqlStoreLimitRate(double rate);
+
+	void updateResourceControlLevel(int32_t level);
+	bool isPriorityJobActivated();
+
+	void invalidateNode(
+			util::StackAllocator &alloc, util::VariableSizeAllocator<> &varAlloc,
+			int32_t mode);
+
 private:
 
 	std::string hostName_;
@@ -1425,6 +1477,10 @@ private:
 	EventType getEventType(ControlType type);
 
 	void release(Job* job, const char* str);
+
+	static bool isPriorityJobActivated(int32_t level);
+
+	void setUpPriorityJobController();
 
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	util::Mutex mutex_;
@@ -1446,6 +1502,9 @@ private:
 	PartitionGroupConfig sqlPgConfig_;
 	PartitionGroupConfig txnPgConfig_;
 	util::Atomic<int64_t> sendRequestCount_;
+
+	util::AllocUniquePtr<PriorityJobEnvironment> priorityJobEnv_;
+	util::AllocUniquePtr<PriorityJobController> priorityJobController_;
 };
 
 class SQLJobHandler : public EventHandler {
@@ -1568,17 +1627,19 @@ public:
 	EventContext* getEventContext() const;
 	void setEventContext(EventContext* eventContext);
 	void setJobManager(JobManager* jobManager);
-	Task* getTask();
 	void setTask(Task* task);
+	void setPriorityTask(PriorityTask* priorityTask);
 	void checkCancelRequest();
 	void transfer(TupleList::Block& block);
 	void transfer(TupleList::Block& block, bool completed_, int32_t outputId);
 	void finish(int32_t outputId);
 	void finish();
 
-	bool isTransactionService() {
-		return (task_->type_ == TRANSACTION_SERVICE);
-	}
+	bool isEnableFetch();
+	void setResultCompleted();
+	bool checkAndSetPending();
+
+	bool isTransactionService();
 
 	void setGlobalAllocator(SQLVariableSizeGlobalAllocator* globalVarAlloc) {
 		globalVarAlloc_ = globalVarAlloc;
@@ -1588,15 +1649,46 @@ public:
 	}
 	int64_t getMonotonicTime();
 
-private:
+	bool fetch(
+			SQLExecution *execution, TupleList::Reader *reader,
+			const TupleList::Column *columnInfoList, size_t columnCount,
+			ExecId execId, uint8_t versionId);
 
+	bool isForResultSet();
+	void setForResultSet(bool value);
+
+	bool isProfiling();
+	void setProfiling(bool value);
+
+	void setInputPriority(uint32_t priorInput);
+
+	bool findInitialProgress(TaskProgressKey &key);
+	void setInitialProgress(const TaskProgressKey &key);
+
+	void setProgress(
+			const TaskProgressKey &key, const TaskProgressValue *value);
+
+	const JobId& getJobId();
+	TaskId getTaskId();
+
+protected:
+	static void resolveIndexScanCostConfig(
+			SQLExecutionManager &execMger, double &indexScanCostRate,
+			double &rangeScanCostRate, double &blockScanCountRate);
+
+private:
 	util::StackAllocator* alloc_;
 	SQLVariableSizeGlobalAllocator* globalVarAlloc_;
 	JobManager* jobManager_;
 	Task* task_;
+	PriorityTask* priorityTask_;
 	EventContext* eventContext_;
 	int64_t counter_;
 	NoSQLSyncContext* syncContext_;
+	util::LocalUniquePtr<TaskProgressKey> initialProgressKey_;
+
+	bool forResultSet_;
+	bool profiling_;
 };
 
 class TaskProcessor {
@@ -1632,20 +1724,10 @@ struct TaskProf {
 };
 
 struct StatJobProfilerInfo {
-	StatJobProfilerInfo(util::StackAllocator& alloc, JobId& targetJobId) :
-		id_(0),
-		startTime_(alloc),
-		deployCompleteTime_(alloc),
-		execStartTime_(alloc),
-		jobId_(alloc),
-		address_(alloc),
-		sendPendingCount_(0),
-		sendEventCount_(0),
-		sendEventSize_(0),
-		allocateMemory_(0),
-		taskProfs_(alloc) {
-		jobId_ = targetJobId.dump(alloc).c_str();
-	}
+	struct Config;
+	struct State;
+
+	StatJobProfilerInfo(util::StackAllocator &alloc, JobId &targetJobId);
 
 	int64_t getMemoryUse() const;
 	int64_t getSqlStoreUse() const;
@@ -1655,33 +1737,244 @@ struct StatJobProfilerInfo {
 	util::String startTime_;
 	util::String deployCompleteTime_;
 	util::String execStartTime_;
+	util::String lastReplyTime_;
+	util::String replyTypes_;
 	util::String jobId_;
 	util::String address_;
 	int64_t sendPendingCount_;
 	int64_t sendEventCount_;
 	int64_t sendEventSize_;
 	int64_t allocateMemory_;
+
+	int64_t idleTime_;
+
+	int64_t activityCheckElapsedTime_;
+
+	const Config *config_;
+	const State *state_;
 	util::Vector<StatTaskProfilerInfo> taskProfs_;
 
 	UTIL_OBJECT_CODER_MEMBERS(
-		id_,
-		jobId_,
-		startTime_,
-		deployCompleteTime_,
-		execStartTime_,
-		sendPendingCount_,
-		allocateMemory_,
-		address_,
-		UTIL_OBJECT_CODER_OPTIONAL(sendEventCount_, 0),
-		UTIL_OBJECT_CODER_OPTIONAL(sendEventSize_, 0),
-		taskProfs_);
+			id_,
+			jobId_,
+			startTime_,
+			deployCompleteTime_,
+			execStartTime_,
+			lastReplyTime_,
+			replyTypes_,
+			sendPendingCount_,
+			allocateMemory_,
+			idleTime_,
+			activityCheckElapsedTime_,
+			address_,
+			UTIL_OBJECT_CODER_OPTIONAL(sendEventCount_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(sendEventSize_, 0),
+			config_,
+			state_,
+			taskProfs_);
+};
+
+struct StatJobProfilerInfo::Config {
+	Config();
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			statementTimeout_);
+
+	int64_t statementTimeout_;
+};
+
+struct StatJobProfilerInfo::State {
+	explicit State(util::StackAllocator &alloc);
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			coordinator_,
+			participantNodes_,
+			closed_,
+			deployed_,
+			resultCompleted_,
+			exceptions_,
+			workingNodes_,
+			profilingNodes_,
+			closingNodes_,
+			disabledNodes_,
+			workingTasks_,
+			outputPendingTasks_,
+			operatingTaskCount_,
+			disconnected_,
+			responded_,
+			selfIdle_,
+			selfWorkerBusy_,
+			remoteIdle_);
+
+	util::String coordinator_;
+	util::Vector<util::String> participantNodes_;
+
+	bool closed_;
+	bool deployed_;
+	bool resultCompleted_;
+	util::Vector<util::String> exceptions_;
+
+	util::Vector<util::String> workingNodes_;
+	util::Vector<util::String> profilingNodes_;
+	util::Vector<util::String> closingNodes_;
+	util::Vector<util::String> disabledNodes_;
+	util::Vector<int32_t> workingTasks_;
+	util::Vector<int32_t> *outputPendingTasks_;
+	int64_t operatingTaskCount_;
+
+	bool disconnected_;
+	bool responded_;
+	bool selfIdle_;
+	bool selfWorkerBusy_;
+	bool remoteIdle_;
+};
+
+struct StatWorkerProfilerInfo {
+	struct InputEntry;
+	struct OutputEntry;
+	struct TaskEntry;
+	struct JobEntry;
+	struct QueueEntry;
+	struct NodeEntry;
+
+	explicit StatWorkerProfilerInfo(util::StackAllocator &alloc);
+
+	bool isEmpty() const;
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			forTransaction_,
+			forBackend_,
+			totalId_,
+			subId_,
+			lastEventElapsed_,
+			queueList_,
+			nodeList_);
+
+	bool forTransaction_;
+	bool forBackend_;
+
+	uint32_t totalId_;
+	uint32_t subId_;
+
+	int64_t lastEventElapsed_;
+
+	util::Vector<QueueEntry> queueList_;
+	util::Vector<NodeEntry> nodeList_;
+};
+
+struct StatWorkerProfilerInfo::InputEntry {
+	InputEntry();
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			index_,
+			UTIL_OBJECT_CODER_OPTIONAL(blockCount_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(forFinish_, false));
+
+	uint32_t index_;
+	uint64_t blockCount_;
+	bool forFinish_;
+};
+
+struct StatWorkerProfilerInfo::OutputEntry {
+	OutputEntry();
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			index_,
+			UTIL_OBJECT_CODER_OPTIONAL(blockCount_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(forFinish_, false));
+
+	uint32_t index_;
+	uint64_t blockCount_;
+	bool forFinish_;
+};
+
+struct StatWorkerProfilerInfo::TaskEntry {
+	explicit TaskEntry();
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			taskId_,
+			type_,
+			inputList_,
+			outputList_);
+
+	int32_t taskId_;
+	util::String *type_;
+	util::Vector<InputEntry> *inputList_;
+	util::Vector<OutputEntry> *outputList_;
+};
+
+struct StatWorkerProfilerInfo::JobEntry {
+	explicit JobEntry(util::StackAllocator &alloc);
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			jobId_,
+			nextTaskOrdinal_,
+			taskList_);
+
+	util::String jobId_;
+	int64_t nextTaskOrdinal_;
+	util::Vector<TaskEntry> taskList_;
+};
+
+struct StatWorkerProfilerInfo::QueueEntry {
+	explicit QueueEntry(util::StackAllocator &alloc);
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			type_,
+			outputNode_,
+			nextJobOrdinal_,
+			jobList_,
+			prevRotationElapsed_,
+			lastRotationElapsed_);
+
+	util::String *type_;
+	util::String *outputNode_;
+
+	int64_t nextJobOrdinal_;
+	util::Vector<JobEntry> jobList_;
+
+	int64_t prevRotationElapsed_;
+	int64_t lastRotationElapsed_;
+};
+
+struct StatWorkerProfilerInfo::NodeEntry {
+	explicit NodeEntry(util::StackAllocator &alloc);
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			address_,
+			inputSize_,
+			inputCapacity_,
+			outputSize_,
+			outputCapacity_,
+			outputRestricted_,
+			outputSendingElapsed_,
+			outputSendingKey_,
+			outputSendingValue_);
+
+	util::String address_;
+
+	uint64_t inputSize_;
+	uint64_t inputCapacity_;
+
+	uint64_t outputSize_;
+	uint64_t outputCapacity_;
+
+	bool outputRestricted_;
+	int64_t outputSendingElapsed_;
+	uint64_t outputSendingKey_;
+	uint64_t outputSendingValue_;
 };
 
 struct StatJobProfiler {
-	StatJobProfiler(util::StackAllocator& alloc) : jobProfs_(alloc), currentTime_(alloc) {}
-	util::Vector<StatJobProfilerInfo> jobProfs_;
+	explicit StatJobProfiler(util::StackAllocator& alloc);
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			currentTime_, activityCheckTime_, jobProfs_, workerProfs_);
+
 	util::String currentTime_;
-	UTIL_OBJECT_CODER_MEMBERS(currentTime_, jobProfs_);
+	const util::String *activityCheckTime_;
+	util::Vector<StatJobProfilerInfo> jobProfs_;
+	const util::Vector<StatWorkerProfilerInfo> *workerProfs_;
 };
 
 struct JobExecutionLatch {
@@ -1705,6 +1998,42 @@ struct JobExecutionLatch {
 
 	Job* job_;
 	bool remote_;
+};
+
+struct JobResourceInfo {
+	explicit JobResourceInfo(util::StackAllocator &alloc);
+
+	DatabaseId dbId_;
+	util::String dbName_;
+
+	util::String requestId_;
+	int64_t jobOrdinal_;
+	int32_t taskOrdinal_;
+
+	util::String nodeAddress_;
+	int32_t nodePort_;
+
+	util::String connectionAddress_;
+	int32_t connectionPort_;
+
+	util::String userName_;
+	util::String applicationName_;
+	util::String statementType_;
+	util::String taskType_;
+
+	int64_t startTime_;
+	int64_t leadTime_;
+	int64_t actualTime_;
+	int64_t memoryUse_;
+	int64_t sqlStoreUse_;
+	int64_t dataStoreAccess_;
+	int64_t networkTransferSize_;
+	int64_t networkTime_;
+	int64_t availableConcurrency_;
+
+	util::String resourceRestrictions_;
+	util::String statement_;
+	util::String plan_;
 };
 
 #endif

@@ -628,8 +628,12 @@ const SQLExprs::IndexSelector* SQLScanOps::Scan::selectIndex(
 				SQLValues::ValueContext::ofAllocator(alloc));
 		selector = ALLOC_NEW(alloc) SQLExprs::IndexSelector(
 				valueCxt, SQLType::EXPR_COLUMN, inputInfo);
+
 		if (location.multiIndexActivated_) {
 			selector->setMultiAndConditionEnabled(true);
+		}
+		if (!location.noCostBased_) {
+			selector->setDynamicSelectionEnabled(true);
 		}
 
 		accessor.getIndexSpec(

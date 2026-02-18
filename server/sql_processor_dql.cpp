@@ -24,7 +24,6 @@
 #include "sql_execution.h"
 #include "transaction_manager.h"
 
-
 const DQLProcessor::ProcRegistrar DQLProcessor::REGISTRAR_LIST[] = {
 	ProcRegistrar::of<DQLProcs::GroupOption>(SQLType::EXEC_GROUP),
 	ProcRegistrar::of<DQLProcs::JoinOption>(SQLType::EXEC_JOIN),
@@ -102,6 +101,7 @@ bool DQLProcessor::applyInfo(
 			DQLProcs::OptionInput in(
 					valueCxt, getRegistrarTable(), getType(), &option);
 			opOption.importFrom(in);
+			opOption.setUpContext(cxt);
 
 			typedef util::XArrayOutStream<
 					util::StdAllocator<uint8_t, void> > ByteOutStream;
@@ -418,6 +418,9 @@ void DQLProcessor::setUpConfig(
 			config->interruptionScanCount_);
 	dest.set(
 			SQLOpTypes::CONF_SCAN_COUNT_BASED, config->scanCountBased_);
+	dest.set(
+			SQLOpTypes::CONF_PATTERN_MATCH_MEMORY_LIMIT,
+			config->patternMatchMemoryLimitBytes_);
 	store.setConfig(dest);
 }
 
@@ -731,6 +734,22 @@ uint32_t DQLProcs::ExtProcContext::getTotalWorkerId() {
 
 util::AllocatorLimitter* DQLProcs::ExtProcContext::getAllocatorLimitter() {
 	return getBase().getAllocatorLimitter();
+}
+
+void DQLProcs::ExtProcContext::setInputPriority(uint32_t priorInput) {
+	getBase().setInputPriority(priorInput);
+}
+
+void DQLProcs::ExtProcContext::setProgress(
+		const TaskProgressKey &key, const TaskProgressValue *value) {
+	return getBase().setProgress(key, value);
+}
+
+void DQLProcs::ExtProcContext::getIndexScanCostConfig(
+		double &indexScanCostRate, double &rangeScanCostRate,
+		double &blockScanCountRate) {
+	getBase().getIndexScanCostConfig(
+			indexScanCostRate, rangeScanCostRate, blockScanCountRate);
 }
 
 SQLContext& DQLProcs::ExtProcContext::getBase() {
@@ -1178,8 +1197,18 @@ SQLOps::OpCode DQLProcs::Option::toCode(
 	return code;
 }
 
+void DQLProcs::Option::setUpContext(SQLContext &cxt) const {
+	assert(common_ != NULL && specific_ != NULL);
+	specific_->setUpContext(cxt);
+}
+
 bool DQLProcs::Option::isInputIgnorable(const SQLOps::OpCode &code) {
 	return (code.findContainerLocation() != NULL);
+}
+
+
+void DQLProcs::DefaultExtraOption::setUpContext(SQLContext &cxt) const {
+	static_cast<void>(cxt);
 }
 
 
@@ -1212,6 +1241,23 @@ template<typename T>
 void DQLProcs::BasicSubOption<T>::toCode(
 		SQLOps::OpCodeBuilder &builder, SQLOps::OpCode &code) const {
 	optionValue_.toCode(builder, code);
+}
+
+template<typename T>
+void DQLProcs::BasicSubOption<T>::setUpContext(SQLContext &cxt) const {
+	getExtraOptionValue(ExtraOptionEnabled()).setUpContext(cxt);
+}
+
+template<typename T>
+const T& DQLProcs::BasicSubOption<T>::getExtraOptionValue(
+		const util::TrueType&) const {
+	return optionValue_;
+}
+
+template<typename T>
+DQLProcs::DefaultExtraOption DQLProcs::BasicSubOption<T>::getExtraOptionValue(
+		const util::FalseType&) const {
+	return DefaultExtraOption();
 }
 
 
@@ -1448,6 +1494,12 @@ void DQLProcs::ScanOption::toCode(
 	code.setFilterPredicate(pred_);
 }
 
+void DQLProcs::ScanOption::setUpContext(SQLContext &cxt) const {
+	if (location_.type_ == SQLType::TABLE_CONTAINER) {
+		cxt.setInitialProgress(location_.id_);
+	}
+}
+
 SQLOps::ContainerLocation DQLProcs::ScanOption::getLocation(
 		util::StackAllocator &alloc, const ProcPlan::Node &node) {
 	SQLOps::ContainerLocation location;
@@ -1480,6 +1532,8 @@ SQLOps::ContainerLocation DQLProcs::ScanOption::getLocation(
 				ProcPlan::Node::Config::CMD_OPT_SCAN_INDEX) != 0);
 		location.multiIndexActivated_ = ((flags &
 				ProcPlan::Node::Config::CMD_OPT_SCAN_MULTI_INDEX) != 0);
+		location.noCostBased_ = ((flags &
+				ProcPlan::Node::Config::CMD_OPT_SCAN_NO_COST_BASED) != 0);
 	}
 
 	return location;
@@ -1549,9 +1603,19 @@ void DQLProcs::SortOption::fromPlanNode(OptionInput &in) {
 	}
 
 	output_ = &rewriter.toProjection(node.outputList_);
-	windowOption_ = (srcWindowOption == NULL || srcWindowOption->empty() ?
-			NULL : &rewriter.makeExpr(
-					SQLType::EXPR_WINDOW_OPTION, srcWindowOption));
+
+	SQLExprs::Expression *option;
+	if (srcWindowOption == NULL || srcWindowOption->empty()) {
+		option = NULL;
+	}
+	else if (srcWindowOption->front().op_ == SQLType::EXPR_PATTERN_OPTION) {
+		option = rewriter.toExpr(&srcWindowOption->front());
+	}
+	else {
+		option = &rewriter.makeExpr(
+				SQLType::EXPR_WINDOW_OPTION, srcWindowOption);
+	}
+	windowOption_ = option;
 }
 
 void DQLProcs::SortOption::toPlanNode(OptionOutput &out) const {
@@ -1597,7 +1661,8 @@ void DQLProcs::SortOption::toCode(
 void DQLProcs::SortOption::planExprToOptions(
 		const ProcPlan::Node::Expr &expr, SortColumnList &orderColumns,
 		ProcPlan::Node::ExprList *windowOption) {
-	if (expr.op_ == SQLType::EXPR_CONSTANT) {
+	if (expr.op_ == SQLType::EXPR_CONSTANT ||
+			expr.op_ == SQLType::EXPR_PATTERN_OPTION) {
 		if (windowOption == NULL) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_OPTION, "");
 		}
@@ -2449,4 +2514,12 @@ SQLCompiler::Type SQLCompiler::ProcessorUtils::negateCompOp(Type type) {
 SQLCompiler::Type SQLCompiler::ProcessorUtils::getLogicalOp(
 		Type type, bool negative) {
 	return SQLExprs::ExprTypeUtils::getLogicalOp(type, negative);
+}
+
+bool SQLCompiler::ProcessorUtils::getPatternMatchExprInfo(
+		Type type, bool onPatternMatch, bool &measuresOnly,
+		bool &implicitlyNavigable, Type &rewritableExprType) {
+	return SQLExprs::ExprTypeUtils::getPatternMatchExprInfo(
+			type, onPatternMatch, measuresOnly, implicitlyNavigable,
+			rewritableExprType);
 }

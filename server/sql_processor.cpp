@@ -57,7 +57,8 @@ SQLProcessorConfig::SQLProcessorConfig() :
 		sortTopNBatchSize_(-1),
 		interruptionProjectionCount_(-1),
 		interruptionScanCount_(-1),
-		scanCountBased_(-1) {
+		scanCountBased_(-1),
+		patternMatchMemoryLimitBytes_(-1) {
 }
 
 const SQLProcessorConfig& SQLProcessorConfig::getDefault() {
@@ -108,7 +109,8 @@ SQLProcessorConfig::SQLProcessorConfig(const DefaultTag&) :
 		sortTopNBatchSize_(-1),
 		interruptionProjectionCount_(100000),
 		interruptionScanCount_(10000),
-		scanCountBased_(-1) {
+		scanCountBased_(-1),
+		patternMatchMemoryLimitBytes_(workMemoryLimitBytes_ / 2) {
 	SQLProcessor::DQLTool::customizeDefaultConfig(*this);
 }
 
@@ -141,6 +143,7 @@ bool SQLProcessorConfig::merge(const SQLProcessorConfig &base) {
 	merged |= mergeValue(base, base.interruptionProjectionCount_);
 	merged |= mergeValue(base, base.interruptionScanCount_);
 	merged |= mergeValue(base, base.scanCountBased_);
+	merged |= mergeValue(base, base.patternMatchMemoryLimitBytes_);
 	return merged;
 }
 
@@ -467,9 +470,8 @@ SQLProcessorConfig::Manager::PartialId::PartialId() :
 
 SQLProcessorConfig::Manager::PartialId::PartialId(
 		TaskContext &cxt, int32_t index) :
-		jobId_(cxt.getTask() == NULL || cxt.getTask()->getJob() == NULL ?
-				JobId() : cxt.getTask()->getJobId()),
-		taskId_(cxt.getTask() == NULL ? TaskId() : cxt.getTask()->getTaskId()),
+		jobId_(cxt.getJobId()),
+		taskId_(cxt.getTaskId()),
 		index_(index) {
 }
 
@@ -817,52 +819,6 @@ void SQLProcessor::Factory::check(
 }
 
 SQLContext::SQLContext(
-		SQLVariableSizeGlobalAllocator *valloc,
-		Task *task,
-		SQLAllocator *alloc,
-		SQLVarSizeAllocator *varAlloc,
-		LocalTempStore &store,
-		const SQLProcessorConfig *config) :
-		TaskContext(),
-		varAlloc_(varAlloc),
-		store_(store),
-		localDest_(NULL),
-		interruptionHandler_(NULL),
-		event_(NULL),
-		partitionList_(NULL),
-		clusterService_(NULL),
-		transactionManager_(NULL),
-		transactionService_(NULL),
-		partitionTable_(NULL),
-		execution_(NULL),
-		executionManager_(NULL),
-		clientId_(NULL),
-		stmtId_(UNDEF_STATEMENTID),
-		jobStartTime_(-1),
-		tableSchema_(NULL),
-		tableLatch_(NULL),
-		finished_(false),
-		fetchComplete_(false),
-		execId_(-1),
-		versionId_(0),
-		config_(config),
-		isDmlTimeSeries_(false),
-		jobCheckComplete_(false),
-		partialMonitorRestricted_(false),
-		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
-		timeZone_(util::TimeZone())
-		,
-		setGroup_(false),
-		groupId_(LocalTempStore::UNDEF_GROUP_ID)
-		,
-		isAdministrator_(false)
-{
-	setAllocator(alloc);
-	static_cast<void>(valloc);
-	static_cast<void>(task);
-}
-
-SQLContext::SQLContext(
 		SQLAllocator *alloc,
 		SQLVarSizeAllocator *varAlloc,
 		LocalTempStore &store,
@@ -1074,6 +1030,14 @@ void SQLContext::setTimeZone(const util::TimeZone &zone) {
 
 util::AllocatorLimitter* SQLContext::getAllocatorLimitter() {
 	return allocLimitter_;
+}
+
+void SQLContext::getIndexScanCostConfig(
+		double &indexScanCostRate, double &rangeScanCostRate,
+		double &blockScanCountRate) {
+	resolveIndexScanCostConfig(
+			*getExecutionManager(), indexScanCostRate, rangeScanCostRate,
+			blockScanCountRate);
 }
 
 void SQLContext::setAllocatorLimitter(util::AllocatorLimitter *allocLimitter) {

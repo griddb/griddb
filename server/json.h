@@ -102,6 +102,16 @@ public:
 	static const char8_t* typeToString();
 	static const char8_t* typeToString(const picojson::value &value);
 
+	template<typename V, typename Str, typename It>
+	static void serializeWithLimit(
+			const V &value, Str &fullStr, It inserter,
+			const size_t *limit, const picojson::value *limitMessage,
+			const char8_t *const *retainedKeys);
+	static picojson::value limitedValueForSerialize(
+			const picojson::value &value, size_t limit,
+			const picojson::value *limitMessage,
+			const char8_t *const *retainedKeys);
+
 private:
 	struct Impl;
 
@@ -494,6 +504,28 @@ bool JsonUtils::findInt(
 	*result = asInt<T>(*value, localPathAddr);
 	applyPath(&result, localPath, path);
 	return true;
+}
+
+template<typename V, typename Str, typename It>
+void JsonUtils::serializeWithLimit(
+		const V &value, Str &fullStr, It inserter,
+		const size_t *limit, const picojson::value *limitMessage,
+		const char8_t *const *retainedKeys) {
+	fullStr.clear();
+	if (limit == NULL) {
+		value.serialize(inserter);
+		return;
+	}
+
+	value.serialize(std::back_inserter(fullStr));
+	if (fullStr.size() <= *limit) {
+		std::copy(fullStr.begin(), fullStr.end(), inserter);
+	}
+	else {
+		const V &limitedValue = limitedValueForSerialize(
+				value, *limit, limitMessage, retainedKeys);
+		limitedValue.serialize(inserter);
+	}
 }
 
 template<typename T>

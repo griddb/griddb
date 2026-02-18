@@ -101,6 +101,7 @@ struct MetaType {
 		TYPE_STATEMENT_RES,
 		TYPE_TASK_RES,
 //		TYPE_REPLICATION_STATS,
+		TYPE_SYNC_STATS,
 		END_TYPE,
 
 		START_TYPE_SQL = 100000,
@@ -372,7 +373,7 @@ struct MetaType {
 	};
 
 	enum StatementResMeta {
-		STATEMENT_RES_REQEST_ID,
+		STATEMENT_RES_REQUEST_ID,
 		STATEMENT_RES_NODE_ADDRESS,
 		STATEMENT_RES_NODE_PORT,
 		STATEMENT_RES_CONNECTION_ADDRESS,
@@ -394,7 +395,7 @@ struct MetaType {
 	};
 
 	enum TaskResMeta {
-		TASK_RES_REQEST_ID,
+		TASK_RES_REQUEST_ID,
 		TASK_RES_JOB_ORDINAL,
 		TASK_RES_TASK_ORDINAL,
 		TASK_RES_NODE_ADDRESS,
@@ -426,6 +427,33 @@ struct MetaType {
 		REPLICATION_STATS_LAST_ERROR_CODE,
 		REPLICATION_STATS_LAST_ERROR_TIME,
 		END_REPLICATION_STATS
+	};
+
+	enum SyncStatsMeta {
+		SYNC_STATS_CLUSTER_PARTITION_INDEX,
+		SYNC_STATS_WORKER_INDEX,
+		SYNC_STATS_PARTITION_ROLE,
+		SYNC_STATS_NODE_ADDRESS,
+		SYNC_STATS_NODE_PORT,
+		SYNC_STATS_REMOTE_ADDRESS,
+		SYNC_STATS_REMOTE_PORT,
+		SYNC_STATS_LSN,
+		SYNC_STATS_SSN,
+		SYNC_STATS_CLUSTER_PARTITION_REVISION,
+		SYNC_STATS_SYNC_PHASE,
+		SYNC_STATS_ELAPSED_TIME,
+		SYNC_STATS_START_TIME,
+		SYNC_STATS_END_TIME,
+		SYNC_STATS_TOTAL_BLOCK_COUNT,
+		SYNC_STATS_CHECKPOINT_TIME,
+		SYNC_STATS_BASE_LSN,
+		SYNC_STATS_PROCESSED_LSN,
+		SYNC_STATS_PROCESSED_BLOCK_COUNT,
+		SYNC_STATS_PROCESSED_BLOCK_TIME,
+		SYNC_STATS_PROCESSED_LOG_COUNT,
+		SYNC_STATS_PROCESSED_LOG_SIZE,
+		SYNC_STATS_PROCESSED_LOG_TIME,
+		END_SYNC_STATS
 	};
 
 	enum StringConstants {
@@ -522,7 +550,7 @@ struct MetaType {
 		STR_JOB_ID,
 
 		STR_NUM_ROWS,
-		STR_ROLE,
+		STR_PARTITION_ROLE,
 		STR_LSN,
 		STR_STATUS,
 		STR_BLOCK_CATEGORY,
@@ -552,7 +580,7 @@ struct MetaType {
 		STR_ROW_ARRAY_COUNT,
 		STR_COLUMN_MISMATCH_COUNT,
 
-		STR_REQEST_ID,
+		STR_REQUEST_ID,
 		STR_CONNECTION_ADDRESS,
 		STR_CONNECTION_PORT,
 		STR_STAEMENT_TYPE,
@@ -587,6 +615,21 @@ struct MetaType {
 		STR_REPLICATION_STATUS,
 		STR_LAST_ERROR_CODE,
 		STR_LAST_ERROR_TIME,
+		STR_SSN,
+		STR_CLUSTER_PARTITION_REVISION,
+		STR_SYNC_PHASE,
+		STR_ELAPSED_TIME,
+		STR_END_TIME,
+		STR_TOTAL_BLOCK_COUNT,
+		STR_CHECKPOINT_TIME,
+		STR_BASE_LSN,
+		STR_PROCESSED_LSN,
+		STR_PROCESSED_BLOCK_COUNT,
+		STR_PROCESSED_BLOCK_SIZE,
+		STR_PROCESSED_BLOCK_TIME,
+		STR_PROCESSED_LOG_COUNT,
+		STR_PROCESSED_LOG_SIZE,
+		STR_PROCESSED_LOG_TIME,
 
 		END_STR
 	};
@@ -612,6 +655,7 @@ struct MetaType::Coders {
 	static const util::NameCoderEntry<DatabaseStatsMeta> LIST_DATABASE_STATS[];
 	static const util::NameCoderEntry<DatabaseMeta> LIST_DATABASE[];
 	static const util::NameCoderEntry<ReplicationStatsMeta> LIST_REPLICATION_STATS[];
+	static const util::NameCoderEntry<SyncStatsMeta> LIST_SYNC_STATS[];
 
 	static const util::NameCoder<ContainerMeta, END_CONTAINER> CODER_CONTAINER;
 	static const util::NameCoder<ColumnMeta, END_COLUMN> CODER_COLUMN;
@@ -632,6 +676,7 @@ struct MetaType::Coders {
 	static const util::NameCoder<DatabaseStatsMeta, END_DATABASE_STATS> CODER_DATABASE_STATS;
 	static const util::NameCoder<DatabaseMeta, END_DATABASE> CODER_DATABASE;
 	static const util::NameCoder<ReplicationStatsMeta, END_REPLICATION_STATS> CODER_REPLICATION_STATS;
+	static const util::NameCoder<SyncStatsMeta, END_SYNC_STATS> CODER_SYNC_STATS;
 
 	static const util::NameCoderEntry<StringConstants> LIST_STR[];
 	static const util::NameCoder<StringConstants, END_STR> CODER_STR;
@@ -683,6 +728,7 @@ struct MetaType::CoreColumns {
 	static const Entry<DatabaseStatsMeta> COLUMNS_DATABASE_STATS[];
 	static const Entry<DatabaseMeta> COLUMNS_DATABASE[];
 	static const Entry<ReplicationStatsMeta> COLUMNS_REPLICATION_STATS[];
+	static const Entry<SyncStatsMeta> COLUMNS_SYNC_STATS[];
 
 	template<typename T>
 	static Entry<T> of(T id);
@@ -717,6 +763,7 @@ struct MetaType::RefColumns {
 	static const Entry<DatabaseStatsMeta> COLUMNS_DATABASE_STATS[];
 	static const Entry<DatabaseMeta> COLUMNS_DATABASE[];
 	static const Entry<ReplicationStatsMeta> COLUMNS_REPLICATION_STATS[];
+	static const Entry<SyncStatsMeta> COLUMNS_SYNC_STATS[];
 
 	template<typename T>
 	static Entry<T> of(

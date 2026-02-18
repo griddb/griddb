@@ -68,6 +68,9 @@ const int64_t UNDEF_NOSQL_SYNCID = -1;
 typedef int64_t NoSQLRequestId;
 const int64_t UNDEF_NOSQL_REQUESTID = -1;
 
+typedef uint64_t TaskProgressKey;
+typedef uint64_t TaskProgressValue;
+
 enum ExpirationType {
 	EXPIRATION_TYPE_ROW = 2,
 	EXPIRATION_TYPE_PARTITION
@@ -115,6 +118,7 @@ enum SQLErrorCode {
 	GS_ERROR_SQL_INVALID_CLUSTER_STATUS,
 	GS_ERROR_SQL_TOTAL_MEMORY_EXCEEDED,
 	GS_ERROR_SQL_CONFIG_INVALID,
+	GS_ERROR_SQL_STORE_USE_EXCEEDED,
 
 	GS_ERROR_SQL_MODULE_CREATE_FAILED = 210000,
 	GS_ERROR_SQL_CONTEXT_PUT_FAILED,
@@ -268,6 +272,7 @@ enum SQLErrorCode {
 	GS_ERROR_SQL_PROC_RESULT_FAILED,
 	GS_ERROR_SQL_PROC_INVALID_CONSTRAINT_NULL,
 	GS_ERROR_SQL_PROC_INTERNAL_INDEX_UNMATCH,
+	GS_ERROR_SQL_PROC_PATTERN_MATCH_LIMIT_EXCEEDED,
 
 	GS_ERROR_LTS_UNSUPPORTED = 410000,
 	GS_ERROR_LTS_NO_MEMORY,
@@ -320,6 +325,9 @@ enum SQLTraceCode {
 	GS_TRACE_SQL_INVALID_NOSQL_RESPONSE,
 	GS_TRACE_SQL_LONG_QUERY,
 	GS_TRACE_SQL_LONG_UPDATING_CACHE_TABLE,
+	GS_TRACE_SQL_TOO_MUCH_RESOURCE_USE,
+	GS_TRACE_SQL_NODE_TIMEOUT,
+
 	GS_TRACE_SQL_HINT_INTERNAL = 240900,
 	GS_TRACE_SQL_HINT_WARNING,
 	GS_TRACE_SQL_HINT_INFO
@@ -447,15 +455,22 @@ enum SQLConfigTableParamId {
 	CONFIG_TABLE_SQL_SEND_PENDING_JOB_LIMIT,
 	CONFIG_TABLE_SQL_SEND_PENDING_TASK_CONCURRENCY,
 	CONFIG_TABLE_SQL_JOB_TOTAL_MEMORY_LIMIT,
+	CONFIG_TABLE_SQL_JOB_ESSENTIAL_MEMORY_LIMIT,
+	CONFIG_TABLE_SQL_JOB_NODE_TIMEOUT,
 
 	CONFIG_TABLE_SQL_NOSQL_FAILOVER_TIMEOUT,
 
 	CONFIG_TABLE_SQL_MULTI_INDEX_SCAN,
 	CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT,
 	CONFIG_TABLE_SQL_PLAN_VERSION,
+	CONFIG_TABLE_SQL_COST_BASED_INDEX_SCAN,
 	CONFIG_TABLE_SQL_COST_BASED_JOIN,
 	CONFIG_TABLE_SQL_COST_BASED_JOIN_DRIVING,
 	CONFIG_TABLE_SQL_COST_BASED_JOIN_EXPLICIT,
+	CONFIG_TABLE_SQL_INDEX_SCAN_COST_RATE,
+	CONFIG_TABLE_SQL_RANGE_SCAN_COST_RATE,
+	CONFIG_TABLE_SQL_BLOCK_SCAN_COUNT_RATE,
+	CONFIG_TABLE_SQL_PATTERN_MATCH_MEMORY_LIMIT_RATE,
 
 	CONFIG_TABLE_SQL_LOCAL_SERVICE_ADDRESS,
 	CONFIG_TABLE_SQL_NOTIFICATION_INTERFACE_ADDRESS,
@@ -475,8 +490,13 @@ enum SQLConfigTableParamId {
 
 	CONFIG_TABLE_SQL_FAIL_ON_TOTAL_MEMORY_LIMIT,
 	CONFIG_TABLE_SQL_WORK_MEMORY_RATE,
+	CONFIG_TABLE_SQL_STORE_USE_LIMIT_RATE,
 	CONFIG_TABLE_SQL_RESOURCE_CONTROL_LEVEL,
 	CONFIG_TABLE_SQL_EVENT_BUFFER_CACHE_SIZE,
+
+	CONFIG_TABLE_SQL_MONITORING_MEMORY_RATE,
+	CONFIG_TABLE_SQL_MONITORING_STORE_RATE,
+	CONFIG_TABLE_SQL_MONITORING_NETWORK_RATE,
 
 	CONFIG_TABLE_TRACE_SQL_TRACER_ID_START,
 
@@ -677,6 +697,17 @@ struct NameWithCaseSensitivity {
 	bool isCaseSensitive_;
 };
 
+struct LimitedQueryStringFormatter {
+	LimitedQueryStringFormatter(const char8_t *str, size_t limit);
+	std::ostream& format(std::ostream &os) const;
+
+	const char8_t *str_;
+	size_t limit_;
+};
+
+std::ostream& operator<<(
+		std::ostream &os, const LimitedQueryStringFormatter &formatter);
+
 struct TaskProfiler {
 
 	TaskProfiler();
@@ -684,8 +715,18 @@ struct TaskProfiler {
 	void copy(util::StackAllocator& alloc, const TaskProfiler& target);
 
 	UTIL_OBJECT_CODER_MEMBERS(
-		leadTime_, actualTime_, executionCount_,
-		worker_, rows_, address_, customData_);
+			leadTime_,
+			actualTime_,
+			executionCount_,
+			worker_,
+			rows_,
+			address_,
+			customData_,
+			UTIL_OBJECT_CODER_OPTIONAL(memoryUse_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(sqlStoreUse_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(dataStoreAccess_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(networkTransferSize_, -1),
+			UTIL_OBJECT_CODER_OPTIONAL(networkTime_, -1));
 
 	int64_t leadTime_;
 	int64_t actualTime_;
@@ -694,6 +735,12 @@ struct TaskProfiler {
 	util::Vector<int64_t>* rows_;
 	util::String* address_;
 	util::XArray<uint8_t>* customData_;
+
+	int64_t memoryUse_;
+	int64_t sqlStoreUse_;
+	int64_t dataStoreAccess_;
+	int64_t networkTransferSize_;
+	int64_t networkTime_;
 };
 
 int64_t convertToTime(util::String& timeStr);

@@ -284,6 +284,7 @@ BasicChunkBuffer<L>::BasicChunkBuffer(
 		ChunkBufferStats &stats) :
 		locker_(locker), partitionList_(nullptr),
 		pgId_(pgId), beginPId_(beginPId), endPId_(endPId),
+		timeCount_(1),
 		pool_(nullptr), chunkSize_(chunkSize), storeMemoryLimitBlockCount_(0),
 		compressorParam_(compressorParam), bufferTable_(NULL),
 		storeMemoryAgingSwapRate_(0.02), storeMemoryAgingSwapCount_(0),
@@ -720,6 +721,7 @@ void BasicChunkBuffer<L>::ChunkAccessor::pinChunkMissHit(
 			if (dirty) {
 				fr->isdirty_ = true;
 			}
+			fr->timeCount_ = bcBuffer_.timeCount_;
 			stats.table_(ChunkBufferStats::BUF_STAT_ACTIVE_COUNT).increment();
 			return;
 		} else {

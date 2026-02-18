@@ -28,7 +28,6 @@
 
 
 
-
 class PartitionGroupConfig;
 struct NodeDescriptor;
 /*!
@@ -146,6 +145,7 @@ public:
 
 	void getStats(Stats &stats);
 	bool getStats(PartitionGroupId pgId, Stats &stats);
+	bool getLiveStats(PartitionGroupId pgId, int64_t &count);
 	void getSocketStats(util::Vector<SocketStatsWithInfo> &statsList);
 
 	EventMonotonicTime getMonotonicTime();
@@ -2273,6 +2273,14 @@ inline bool EventEngine::getStats(PartitionGroupId pgId, Stats &stats) {
 	}
 	stats = eventWorkerList_[pgId].getStats();
 	return true;
+}
+
+inline bool EventEngine::getLiveStats(PartitionGroupId pgId, int64_t &count) {
+	if (pgId >= config_->concurrency_) {
+		return false;
+	}
+	return eventWorkerList_[pgId].getLiveStats(
+		Stats::EVENT_ACTIVE_EXECUTABLE_ONE_SHOT_COUNT, clockGenerator_->getMonotonicTime(), count);
 }
 
 inline void EventEngine::getSocketStats(

@@ -53,7 +53,6 @@ static const int32_t LONG_TERM_SYNC_CATCHUP = 2;
 
 static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 
-
 #define GS_THROW_SYNC_ERROR(errorCode, context, s1, s2) \
 	GS_THROW_USER_ERROR(errorCode, s1  \
 	<< " (pId=" << context->getPartitionId() \
@@ -105,11 +104,26 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) \
 	<< "), " << s2);
 
-
 #define GS_OUTPUT_SYNC(context, s1, s2) \
-	GS_TRACE_SYNC_INFO(context, s1, s2)
+	{ \
+	util::LockGuard<util::Mutex> guard(context->getPartitionTable()->getDumpLock()); \
+	std::cout << s1 << ", (pId=" << context->getPartitionId() \
+	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" \
+	<< context->getPartitionRevision().getRevisionNo() \
+	<< ", lsn=" << context->getPartitionTable()->getLSN(context->getPartitionId()) \
+	<< ", node=" << context->getPartitionTable()->dumpNodeAddress(0) << ")" << s2 << std::endl; \
+	}
 
-#define GS_OUTPUT_SYNC2(lock, s1)
+#define GS_OUTPUT_SYNC_DIRECT(LEVEL, context, s) \
+ GS_OUTPUT_DIRECT(LEVEL, DUMP_SYNC_LEVEL, s << ", (pId=" << context->getPartitionId() \
+	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" \
+	<< context->getPartitionRevision().getRevisionNo() \
+	<< ", lsn=" << context->getPartitionTable()->getLSN(context->getPartitionId()) \
+	<< ", node=" << context->getPartitionTable()->dumpNodeAddress(0) << ")")
+
+#define GS_OUTPUT_SYNC2(lock, s) { \
+	util::LockGuard<util::Mutex> guard(lock); \
+	std::cout<< s << std::endl; } \
 
 #define GS_TRACE_SYNC_NORMAL(s1) \
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1);
@@ -277,6 +291,41 @@ struct SyncOptStat {
 	uint32_t partitionNum_;
 };
 
+struct LongtermSyncStats {
+	LongtermSyncStats() : ssn_(0), eventType_(UNDEF_EVENT_TYPE), partitionRevisionNo_(0), elapsedTime_(0),
+		startTime_(0), endTime_(0), totalBlockCount_(0), checkpointTime_(0), baseLsn_(0),
+		processedBlockCount_(0), processedBlockTime_(0), processedLogCount_(0),
+		processedLogSize_(0), processedLogTime_(0), processedLsn_(0) {}
+
+	std::string dump() {
+		util::NormalOStringStream oss;
+		oss << "ssn=" << ssn_ << ", role=" << role_.dump() << "revision=" << partitionRevisionNo_
+			<< ", elapsedTime=" << elapsedTime_ << ", startTime=" << startTime_ << ", endTime=" << endTime_
+			<< ", totalBlockCount=" << totalBlockCount_ << ", checkpointTime=" << checkpointTime_
+			<< ", baseLsn=" << baseLsn_ << ", processedBlockCount=" << processedBlockCount_
+			<< ", processedBlockTime=" << processedBlockTime_ << ", processedLogCount=" << processedLogCount_
+			<<  ", processedLogSize=" << processedLogSize_
+			<< ", processedLogTime=" << processedLogTime_ << ", processedLsn=" << processedLsn_ << std::endl;
+		return oss.str();
+	}
+	int64_t ssn_;
+	PartitionRole role_;
+	EventType eventType_;
+	int32_t partitionRevisionNo_;
+	int64_t elapsedTime_;
+	int64_t startTime_;
+	int64_t endTime_;
+	int64_t totalBlockCount_;
+	int64_t checkpointTime_;
+	LogSequentialNumber baseLsn_;
+	int64_t processedBlockCount_;
+	int64_t processedBlockTime_;
+	int64_t processedLogCount_;
+	int64_t processedLogSize_;
+	int64_t processedLogTime_;
+	int64_t processedLsn_;
+};
+
 struct SearchLogInfo {
 	SearchLogInfo() : lsn_(UNDEF_LSN), offset_(0), logVersion_(-1) {}
 	LogSequentialNumber lsn_;
@@ -373,6 +422,13 @@ public:
 		return (sendBackups_[0].backupSyncId_);
 	}
 
+	NodeId getCatchupNodeId() {
+		if (sendBackups_.size() == 0) {
+			return UNDEF_NODEID;
+		}
+		return sendBackups_[0].nodeId_;
+	}
+
 	int32_t getId() const {
 		return id_;
 	}
@@ -401,6 +457,10 @@ public:
 
 	void updateVersion() {
 		version_++;
+	}
+
+	PartitionRole &getPartitionRole() {
+		return role_;
 	}
 
 	PartitionRevision& getPartitionRevision() {
@@ -444,6 +504,14 @@ public:
 		return processedChunkNum_;
 	}
 
+	void setTotalChunkNum(int64_t chunkNum) {
+		totalChunkNum_ = chunkNum;
+	}
+
+	int64_t getTotalChunkNum() {
+		return totalChunkNum_;
+	}
+
 	LogSequentialNumber getStartLsn() {
 		return startLsn_;
 	}
@@ -466,6 +534,7 @@ public:
 	void setProcessedLsn(LogSequentialNumber startLsn, LogSequentialNumber endLsn) {
 		if (processedLogNum_ == 0) {
 			startLsn_ = startLsn;
+			baseLsn_ = startLsn;
 		}
 		endLsn_ = endLsn;
 	}
@@ -559,6 +628,9 @@ public:
 	int64_t getElapsedTime() {
 		return (watch_.elapsedNanos() / 1000 / 1000);
 	}
+	int64_t getChunkLeadTime() {
+		return chunkLeadTime_;
+	}
 	void setSyncMode(
 		SyncMode mode, PartitionRoleStatus roleStatus) {
 		mode_ = mode;
@@ -590,6 +662,10 @@ public:
 		else {
 			return "LONG_TERM_SYNC";
 		}
+	}
+
+	void setPartitionRole(PartitionRole role) {
+		role_ = role;
 	}
 
 	void setLongSyncId(SyncId& syncId) {
@@ -651,6 +727,86 @@ public:
 
 	PartitionTable* getPartitionTable() {
 		return pt_;
+	}
+
+	int64_t getCheckpointStartTime() {
+		return checkpointStartTime_;
+	}
+
+	void startCheckpointTime() {
+		checkpointStartTime_ = watch_.elapsedMillis();
+	}
+
+	void endCheckpointTime() {
+		checkpointTime_ = (watch_.elapsedMillis() - checkpointStartTime_);
+	}
+
+	void setBaseLsn(LogSequentialNumber lsn) {
+		baseLsn_ = lsn;
+	 }
+
+	LogSequentialNumber getBaseLsn() {
+		return baseLsn_;
+	}
+	
+	int64_t getCheckpointTime() {
+		if (checkpointStartTime_ < 0) {
+			return 0;
+		}
+		if (checkpointTime_ >= 0) {
+			return checkpointTime_;
+		}
+		else {
+			return (watch_.elapsedMillis() - checkpointStartTime_);
+		}
+	}
+
+	void startChunkTime() {
+		chunkStartTime_ = watch_.elapsedMillis();
+	}
+
+	void endChunkTime() {
+		chunkTime_ = (watch_.elapsedMillis() - chunkStartTime_);
+	}
+
+	int64_t getChunkTime() {
+		if (chunkStartTime_ < 0) {
+			return 0;
+		}
+		if (chunkTime_ >= 0) {
+			return chunkTime_;
+		}
+		else {
+			return (watch_.elapsedMillis() - chunkStartTime_);
+		}
+	}
+
+	void startLogTime() {
+		logStartTime_ = watch_.elapsedMillis();
+	}
+
+	void endLogTime() {
+		logTime_ = (watch_.elapsedMillis() - logStartTime_);
+	}
+
+	int64_t getLogTime() {
+		if (logStartTime_ < 0) {
+			return 0;
+		}
+		if (logTime_ >= 0) {
+			return logTime_;
+		}
+		else {
+			return (watch_.elapsedMillis() - logStartTime_);
+		}
+	}
+
+	void startSync() {
+		startTime_ = util::DateTime::now(false).getUnixTime();
+	}
+
+	int64_t getStartTime() {
+		return startTime_;
 	}
 
 private:
@@ -731,6 +887,16 @@ private:
 	EventType eventType_;
 	EventType prevEventType_;
 	int64_t stateStartTime_;
+	int64_t totalChunkNum_;
+	int64_t checkpointStartTime_;
+	int64_t checkpointTime_;
+	int64_t chunkStartTime_;
+	int64_t chunkTime_;
+	int64_t logStartTime_;
+	int64_t logTime_;
+	int64_t startTime_;
+	PartitionRole role_;
+	LogSequentialNumber baseLsn_;
 };
 
 /*!
@@ -781,7 +947,45 @@ public:
 		return &syncOptStat_;
 	}
 
-	SyncManager(const ConfigTable& configTable, PartitionTable* pt);
+	class StatsManager {
+	public:
+
+		StatsManager(GlobalVariableSizeAllocator& varAlloc, size_t maxStats);
+		~StatsManager();
+
+		void put(LongtermSyncStats& stats);
+
+		struct Latch {
+			Latch(StatsManager& manager)
+				: guard_(manager.getLock()), statsDeque_(manager.getStatsDeque()) {}
+
+			util::AllocDeque<LongtermSyncStats*>& getStatsDeque() {
+				return statsDeque_;
+			}
+
+			util::LockGuard<util::Mutex> guard_;
+			util::AllocDeque<LongtermSyncStats*>& statsDeque_;
+		};
+
+		util::AllocDeque<LongtermSyncStats*>& getStatsDeque() {
+			return statsDeque_;
+		}
+
+		util::Mutex& getLock() { return lock_; }
+
+		void setMaxStats(size_t maxStats);
+
+	private:
+		util::Mutex lock_;
+		GlobalVariableSizeAllocator& varAlloc_;
+		util::AllocDeque<LongtermSyncStats*> statsDeque_;
+		size_t maxStats_;
+	};
+
+	StatsManager& getStatsManager() { return statsManager_; }
+
+
+	SyncManager(const ConfigTable& configTable, PartitionTable* pt, GlobalVariableSizeAllocator& varAlloc);
 
 	~SyncManager();
 
@@ -874,11 +1078,9 @@ public:
 		LogSequentialNumber lsn,
 		int32_t& waitTime);
 
-	int32_t getWaitTime(
-		PartitionId pId, EventType eventType);
+	int32_t getWaitTime(PartitionId pId, EventType eventType);
 
-	int32_t getTransactionEEQueueSize(
-		PartitionId pId);
+	int32_t getTransactionEEQueueSize(PartitionId pId);
 
 	void checkRestored(PartitionId pId);
 
@@ -897,6 +1099,19 @@ public:
 		return partitionList_;
 	}
 
+	void addTotalSyncWaitTime(int64_t waitTime) {
+		totalSyncWaitTime_ += waitTime;
+		totalSyncWaitCount_++;
+	}
+
+	int64_t getTotalSyncWaitTime() {
+		return totalSyncWaitTime_;
+	}
+
+	int64_t getTotalSyncWaitCount() {
+		return totalSyncWaitCount_;
+	}
+
 	uint64_t getContextCount() {
 		uint64_t retVal = 0;
 		for (size_t pos = 0;
@@ -906,8 +1121,11 @@ public:
 		return retVal;
 	}
 
+	int64_t getTotalSyncCheckpointTime() {
+		return totalSyncCheckpointTime_;
+	}
+
 	void checkCurrentContext(EventContext& ec, PartitionId pId, PartitionRevision& revision);
-	void resetCurrentSyncId(SyncContext* context);
 
 	void setCurrentSyncId(PartitionId pId, SyncContext* context) {
 		currentSyncEntry_.syncId_.contextId_ = context->getId();
@@ -919,16 +1137,6 @@ public:
 		syncEntries_.setEntry(pId, currentSyncEntry_);
 	}
 
-	void getCurrentSyncId(PartitionId& pId, SyncId& syncId) {
-		pId = currentSyncEntry_.pId_;
-		syncId.contextId_= currentSyncEntry_.syncId_.contextId_;
-		syncId.contextVersion_= currentSyncEntry_.syncId_.contextVersion_;
-	}
-
-	SyncId getCurrentSyncId(PartitionId pId) {
-		return syncEntries_.getEntry(pId).syncId_;
-	}
-
 	util::FixedSizeAllocator<util::Mutex>& getFixedSizeAllocator() {
 		return fixedSizeAlloc_;
 	}
@@ -938,6 +1146,8 @@ public:
 	}
 
 	SyncContext* getSyncContext(PartitionId pId, SyncId& syncId, bool withLock = true);
+	bool getSyncStats(PartitionId pId, LongtermSyncStats& stats);
+	bool getSyncStatsCore(SyncContext* context, LongtermSyncStats& stats);
 
 	void removeSyncContext(EventContext& ec, PartitionId pId, SyncContext*& context, bool isFailed);
 
@@ -1152,7 +1362,6 @@ private:
 			return keepLogLsnDifference_;
 		}
 
-
 		int32_t getParallelSyncNum() {
 			return parallelSyncNum_;
 		}
@@ -1318,9 +1527,6 @@ private:
 		LongSyncEntry& getEntry(PartitionId pId) {
 			return currentSyncEntryList_[pId];
 		}
-		void reset(PartitionId pId) {
-			currentSyncEntryList_[pId].reset();
-		}
 		std::vector< LongSyncEntry> currentSyncEntryList_;
 	};
 
@@ -1335,6 +1541,8 @@ private:
 	util::StackAllocator globalStackAlloc_;
 
 	SyncVariableSizeAllocator varSizeAlloc_;
+
+	GlobalVariableSizeAllocator &varSizeStatsAlloc_;
 
 	util::RWLock allocLock;
 
@@ -1360,6 +1568,12 @@ private:
 	RecoveryManager* recoveryMgr_;
 	KeepLogManager* keepLogMgr_;
 	CurrentSyncEntryList syncEntries_;
+	StatsManager statsManager_;
+	util::Atomic<int64_t> totalSyncWaitTime_;
+	util::Atomic<int64_t> totalSyncWaitCount_;
+	util::Atomic<int64_t> totalSyncCheckpointTime_;
+	util::Atomic<int64_t> totalSyncProcessedBlockTime_;
+	util::Atomic<int64_t> totalSyncProcessedLogTime_;
 };
 
 class LongtermSyncInfo {

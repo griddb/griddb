@@ -58,6 +58,26 @@ void SQLCoreExprs::CustomRegistrar::operator()() const {
 	add<SQLType::EXPR_RANGE_FILL_PREV, SQLExprs::PlanningExpression>();
 	add<SQLType::EXPR_RANGE_FILL_LINEAR, SQLExprs::PlanningExpression>();
 	add<SQLType::EXPR_LINEAR, LinearExpression>();
+
+	add<SQLType::EXPR_PATTERN_OPTION, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_ANCHOR, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_CONCAT, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_VARIABLE, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_REPEAT, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_OR, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_VARIABLE_LIST, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_VARIABLE_DEF, SQLExprs::PlanningExpression>();
+
+	add<SQLType::EXPR_PATTERN_PREV, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_NEXT, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_FIRST, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_LAST, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_PATTERN_CURRENT, SQLExprs::PlanningExpression>();
+
+	add<SQLType::FUNC_PREV, SQLExprs::PlanningExpression>();
+	add<SQLType::FUNC_NEXT, SQLExprs::PlanningExpression>();
+	add<SQLType::FUNC_FIRST, SQLExprs::PlanningExpression>();
+	add<SQLType::FUNC_LAST, SQLExprs::PlanningExpression>();
 }
 
 
@@ -71,6 +91,8 @@ void SQLCoreExprs::BasicRegistrar::operator()() const {
 	add<SQLType::FUNC_MIN, Functions::Min>();
 	add<SQLType::FUNC_NULLIF, Functions::NullIf>();
 	add<SQLType::FUNC_TYPEOF, Functions::TypeOf>();
+	add<SQLType::FUNC_CLASSIFIER, Functions::Classifier>();
+	add<SQLType::FUNC_MATCH_NUMBER, Functions::MatchNumber>();
 
 	add<SQLType::OP_CONCAT, Functions::Concat>();
 	add<SQLType::OP_MULTIPLY, Functions::Multiply>();
@@ -1184,6 +1206,31 @@ inline typename C::WriterType& SQLCoreExprs::Functions::TypeOf::operator()(
 
 	writer.append(typeStr, strlen(typeStr));
 	return writer;
+}
+
+
+template<typename C>
+inline typename C::WriterType* SQLCoreExprs::Functions::Classifier::operator()(
+		C &cxt) {
+	const SQLExprs::WindowState &state = cxt.getBase().resolveWindowState();
+
+	const TupleValue *varName = state.variableName_;
+	if (varName == NULL) {
+		return NULL;
+	}
+
+	typename C::WriterType &writer = cxt.getResultWriter();
+	const TupleString::BufferInfo &strBuf = TupleString(*varName).getBuffer();
+	writer.append(strBuf.first, strBuf.second);
+	return &writer;
+}
+
+
+template<typename C>
+inline int64_t SQLCoreExprs::Functions::MatchNumber::operator()(
+		C &cxt) {
+	const SQLExprs::WindowState &state = cxt.getBase().resolveWindowState();
+	return state.partitionValueCount_;
 }
 
 

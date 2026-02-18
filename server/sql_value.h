@@ -297,6 +297,8 @@ public:
 			TupleColumnType type, bool nullOnUnknown = false,
 			bool internal = false);
 
+	static void errorNonNull(TupleColumnType expectedType);
+
 private:
 	typedef TupleColumnTypeUtils BaseUtils;
 };

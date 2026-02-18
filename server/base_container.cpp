@@ -403,7 +403,12 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 	}
 
 	util::XArray<OId> allNormalOIdList(txn.getDefaultAllocator());
-	for (;;) {
+	uint64_t repeat = 0;
+	uint64_t repeatLimit = 100;
+	for (;; repeat++) {
+		if (repeat > repeatLimit) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
 		ResultSize limitBackup = sc.getLimit();
 		if (sc.getRestConditionNum() > 0 || !isExclusive()) {
 			sc.setLimit(MAX_RESULT_SIZE);
@@ -2776,14 +2781,37 @@ void BaseContainer::calcGroupId() {
 
 ContainerRowScanner::ContainerRowScanner(
 		const HandlerSet &handlerSet, RowArray &rowArray,
-		VirtualValueList *virtualValueList) :
+		VirtualValueList *virtualValueList, bool interruptionEnabled) :
 		handlerSet_(handlerSet),
 		rowArray_(rowArray),
-		virtualValueList_(virtualValueList) {
+		virtualValueList_(virtualValueList),
+		interruptedRowId_(UNDEF_ROWID),
+		interruptionEnabled_(interruptionEnabled),
+		interrupted_(false) {
 	assert(handlerSet_.getEntry<
 			BaseContainer::ROW_ARRAY_GENERAL>().isAvailable());
 	assert(handlerSet_.getEntry<
 			BaseContainer::ROW_ARRAY_PLAIN>().isAvailable());
+}
+
+void ContainerRowScanner::interrupt() {
+	interrupted_ = true;
+}
+
+bool ContainerRowScanner::checkInterruption(
+		BaseIndex::SearchContext &sc, RowId &lastCheckRowId) {
+	lastCheckRowId = interruptedRowId_;
+
+	if (lastCheckRowId == UNDEF_ROWID) {
+		return false;
+	}
+
+	sc.setSuspended(true);
+	return true;
+}
+
+void ContainerRowScanner::clearInterruption() {
+	interrupted_ = false;
 }
 
 ContainerRowScanner::HandlerEntry::HandlerEntry() :

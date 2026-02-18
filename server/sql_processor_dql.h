@@ -53,6 +53,7 @@ struct DQLProcs {
 
 	class CommonOption;
 	class SubOption;
+	class DefaultExtraOption;
 	template<typename T> class BasicSubOption;
 
 	class GroupOption;
@@ -259,6 +260,12 @@ public:
 
 	virtual uint32_t getTotalWorkerId();
 	virtual util::AllocatorLimitter* getAllocatorLimitter();
+	virtual void setInputPriority(uint32_t priorInput);
+	virtual void setProgress(
+			const TaskProgressKey &key, const TaskProgressValue *value);
+	virtual void getIndexScanCostConfig(
+			double &indexScanCostRate, double &rangeScanCostRate,
+			double &blockScanCountRate);
 
 private:
 	SQLContext& getBase();
@@ -391,6 +398,7 @@ public:
 	void exportTo(OptionOutput &out);
 
 	SQLOps::OpCode toCode(SQLOps::OpCodeBuilder &builder) const;
+	void setUpContext(SQLContext &cxt) const;
 
 	static bool isInputIgnorable(const SQLOps::OpCode &code);
 
@@ -413,6 +421,12 @@ public:
 
 	virtual void toCode(
 			SQLOps::OpCodeBuilder &builder, SQLOps::OpCode &code) const = 0;
+	virtual void setUpContext(SQLContext &cxt) const = 0;
+};
+
+class DQLProcs::DefaultExtraOption {
+public:
+	void setUpContext(SQLContext &cxt) const;
 };
 
 template<typename T>
@@ -425,8 +439,17 @@ public:
 
 	virtual void toCode(
 			SQLOps::OpCodeBuilder &builder, SQLOps::OpCode &code) const;
+	virtual void setUpContext(SQLContext &cxt) const;
 
 private:
+	enum {
+		WITH_EXTRA = (util::IsSame<T, ScanOption>::VALUE)
+	};
+	typedef typename util::BoolType<WITH_EXTRA>::Result ExtraOptionEnabled;
+
+	const T& getExtraOptionValue(const util::TrueType&) const;
+	DefaultExtraOption getExtraOptionValue(const util::FalseType&) const;
+
 	T optionValue_;
 };
 
@@ -531,6 +554,7 @@ public:
 	void toPlanNode(OptionOutput &out) const;
 
 	void toCode(SQLOps::OpCodeBuilder &builder, SQLOps::OpCode &code) const;
+	void setUpContext(SQLContext &cxt) const;
 
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_PARTIAL_OBJECT;

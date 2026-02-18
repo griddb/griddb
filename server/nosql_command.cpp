@@ -3540,12 +3540,10 @@ void NoSQLRequest::get(Event& request,
 				}
 				JobId jobId;
 				execution->getContext().getCurrentJobId(jobId);
-				JobManager::Latch jobLatch(jobId, "NoSQLRequest::get",
-					sqlSvc_->getExecutionManager()->getJobManager());
-				Job* job = jobLatch.get();
-				if (job) {
-					RAISE_EXCEPTION(SQLFailureSimulator::TARGET_POINT_10);
-					job->checkCancel("NoSQL Send", false);
+				const bool jobFound =
+						sqlSvc_->getExecutionManager()->getJobManager()->
+						checkNoSQLRequestCancel(jobId);
+				if (jobFound) {
 					GS_TRACE_WARNING(
 						SQL_SERVICE, GS_TRACE_SQL_LONG_EVENT_WAITING,
 						"Long event waiting (eventType=" << EventTypeUtility::getEventTypeName(eventType_) <<

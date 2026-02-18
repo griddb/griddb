@@ -356,6 +356,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 		  CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL)),
 	  reauthConfig_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),
+
 	  userCacheSize_(config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_SIZE)),
 	  userCacheUpdateInterval_(config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL)),
 	  ldapUrl_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_URL)),
@@ -431,6 +432,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 				(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + TIMER_MERGIN_SEC) *
 					1000,
 				TIMER_INTERVAL_MILLISEC);
+
 			replAllocator_[pgId] =
 				UTIL_NEW util::VariableSizeAllocator<>(util::AllocatorInfo(
 					ALLOCATOR_GROUP_TXN_STATE, "replicationVar"));
@@ -1851,7 +1853,6 @@ void TransactionManager::removeAllReplicationContext() {
 		replContextPartition_[pId] = NULL;
 	}
 }
-
 void TransactionManager::removeAllAuthenticationContext() {
 	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
 		delete authContextPartition_[pId];
@@ -1919,6 +1920,7 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(0)
 		.setDefault(0);
+
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_CONNECTION_LIMIT, INT32)
 		.setMin(3)
 		.setMax(65536)
@@ -2034,7 +2036,12 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setDefault(300);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_USE_SCAN_STAT, BOOL)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
-		.setDefault(false);
+		.setDefault(true);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TXN_MONITORING_STORE_RATE, DOUBLE)
+		.setMin(0)
+		.setDefault(0);
 }
 
 EventStart::EventStart(EventContext& ec, Event& ev, EventMonitor& monitor, DatabaseId dbId,  bool clientRequest) :

@@ -96,6 +96,8 @@ public:
 	*/
 	virtual bool finish(Context& cxt, InputId inputId);
 
+	virtual bool next(Context& cxt);
+
 	/*!
 		@brief パイプ処理
 		@note 全IputIdがcompleteになった時点で実行

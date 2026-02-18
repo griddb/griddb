@@ -18,7 +18,6 @@
 #include "sql_operator_join.h"
 #include "sql_operator_utils.h"
 
-
 const SQLOps::OpRegistrar
 SQLJoinOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -76,7 +75,10 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 		baseDrivingInput = 0;
 	}
 	else {
-		baseDrivingInput = detectDrivingInput(cxt, code, &small, &empty);
+		uint32_t priorInput;
+		baseDrivingInput =
+				detectDrivingInput(cxt, code, &small, &empty, priorInput);
+		cxt.getExtContext().setInputPriority(priorInput);
 	}
 
 	if (baseDrivingInput < 0) {
@@ -247,12 +249,14 @@ bool SQLJoinOps::Join::isOnlyEqKeyFound(
 }
 
 int32_t SQLJoinOps::Join::detectDrivingInput(
-		OpContext &cxt, const OpCode &code, bool *small, bool *empty) {
-	const int32_t baseDrivingInput =
-			detectDrivingInputDetail(cxt, code, small, empty, false);
+		OpContext &cxt, const OpCode &code, bool *small, bool *empty,
+		uint32_t &priorInput) {
+	const int32_t baseDrivingInput = detectDrivingInputDetail(
+			cxt, code, small, empty, false, priorInput);
 
 	if (baseDrivingInput >= 0 && *small && !(*empty)) {
-		return detectDrivingInputDetail(cxt, code, small, empty, true);
+		return detectDrivingInputDetail(
+				cxt, code, small, empty, true, priorInput);
 	}
 
 	return baseDrivingInput;
@@ -260,7 +264,9 @@ int32_t SQLJoinOps::Join::detectDrivingInput(
 
 int32_t SQLJoinOps::Join::detectDrivingInputDetail(
 		OpContext &cxt, const OpCode &code, bool *small, bool *empty,
-		bool exact) {
+		bool exact, uint32_t &priorInput) {
+	priorInput = 0;
+
 	const SQLValues::CompColumnList *keyList = code.findKeyColumnList();
 
 	const int64_t memLimit = SQLOps::OpConfig::resolve(
@@ -311,6 +317,7 @@ int32_t SQLJoinOps::Join::detectDrivingInputDetail(
 		return 0;
 	}
 	else {
+		priorInput = (sizeList[0] > sizeList[1] ? 1 : 0);
 		return -1;
 	}
 }

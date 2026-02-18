@@ -107,6 +107,7 @@ private:
 	class ContainerDetailStatsHandler;
 
 	class ReplicationStatsHandler;
+	class SyncStatsHandler;
 
 	struct ScanPositionData {
 		ScanPositionData();
@@ -151,13 +152,20 @@ private:
 
 struct MetaProcessor::ValueUtils {
 	static Value makeNull();
-	static Value makeString(util::StackAllocator &alloc, const char8_t *src,const uint32_t limit);
+	static Value makeString(
+			util::StackAllocator &alloc, const char8_t *src,
+			const uint32_t limit);
 	static Value makeBool(bool src);
 	static Value makeShort(int16_t src);
 	static Value makeInteger(int32_t src);
 	static Value makeLong(int64_t src);
 	static Value makeDouble(double src);
 	static Value makeTimestamp(Timestamp src);
+
+	static Value makeStringOptional(
+			util::StackAllocator &alloc, const char8_t *src,
+			const uint32_t limit);
+	static Value makeIntegerOptional(int32_t src, int32_t defaultValue);
 
 	static void toUpperString(util::String &str);
 };
@@ -330,6 +338,9 @@ protected:
 			NodeAffinityNumber affinityNumber);
 
 	Value makeString(util::StackAllocator &alloc, const char8_t *src) const;
+	static Value makeString(util::StackAllocator& alloc, const char8_t* src, Context& cxt);
+	Value makeStringOptional(
+			util::StackAllocator &alloc, const char8_t *src) const;
 
 	bool enableAdministratorScan() const;
 	template<typename T> static const char* getLimitTime(T time);
@@ -603,6 +614,21 @@ public:
 		TransactionContext& txn, ContainerId id, DatabaseId dbId,
 		ContainerAttribute attribute, BaseContainer* container) const;
 };
+
+struct LongtermSyncStats;
+
+class MetaProcessor::SyncStatsHandler :
+	public MetaProcessor::StoreCoreHandler {
+public:
+	explicit SyncStatsHandler(Context& cxt);
+
+	virtual void operator()(
+		TransactionContext& txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer* container) const;
+	static bool setStats(util::StackAllocator& alloc, MetaProcessor::Context &cxt,
+		MetaProcessor::ValueListBuilder<MetaType::SyncStatsMeta>& builder, LongtermSyncStats& stats);
+};
+
 
 struct MetaProcessor::ScanPosition {
 public:

@@ -386,6 +386,13 @@ const char8_t* SQLValues::TypeUtils::toString(
 	return str;
 }
 
+void SQLValues::TypeUtils::errorNonNull(TupleColumnType expectedType) {
+	GS_THROW_USER_ERROR(
+			GS_ERROR_SQL_PROC_UNSUPPORTED_TYPE_CONVERSION,
+			"Unacceptable NULL value (expectedType=" <<
+			toString(expectedType) << ")");
+}
+
 
 SQLValues::TypeSwitcher::TypeSwitcher(
 		TupleColumnType type1, TupleColumnType type2, bool nullableAlways) :

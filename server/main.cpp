@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 8;
+const int32_t GS_MINOR_VERSION = 9;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 40624;
+const int32_t GS_BUILD_NO = 40956;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -71,7 +71,6 @@ const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMETER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3"; 
-
 
 
 static void autoJoinCluster(const Event::Source &eventSource,
@@ -407,7 +406,7 @@ int main(int argc, char **argv) {
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
 		ClusterManager clsMgr(config, &pt, clsVersionId, configDir);
 
-		SyncManager syncMgr(config, &pt);
+		SyncManager syncMgr(config, &pt, varSizeAlloc);
 
 		TransactionManager txnMgr(config, false);
 
@@ -439,7 +438,7 @@ int main(int argc, char **argv) {
 
 		EventEngine::Config eeConfig;
 		EventEngine::Source source(eeVarSizeAlloc, fixedSizeAlloc);
-
+		
 		int32_t cacheSize = config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_SIZE);
 		int32_t cacheUpdateInterval = config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL);
 		UserCache userCache(cacheSize, varSizeAlloc, cacheUpdateInterval);
@@ -884,6 +883,8 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, AUDIT_DDL, CRITICAL);
 	MAIN_TRACE_DECLARE(config, AUDIT_DCL, CRITICAL);
 	MAIN_TRACE_DECLARE(config, REDO_MANAGER, WARNING);
+	MAIN_TRACE_DECLARE(config, RESOURCE_MONITOR, INFO);
+	MAIN_TRACE_DECLARE(config, RESOURCE_MONITOR_PLAN, INFO);
 	MAIN_TRACE_DECLARE(config, SITE_REPLICATION, WARNING);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
@@ -1050,4 +1051,9 @@ void StackMemoryLimitOverErrorHandler::operator()(util::Exception &e) {
 void NoSQLCommonUtils::getDatabaseVersion(int32_t &major, int32_t &minor) {
 	major = GS_MAJOR_VERSION;
 	minor = GS_MINOR_VERSION;
+}
+
+namespace dump {
+	util::Mutex dumpLock;
+	std::string hostName;
 }

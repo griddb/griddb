@@ -106,6 +106,12 @@ public:
 	virtual bool isAdministrator() = 0;
 	virtual uint32_t getTotalWorkerId() = 0;
 	virtual util::AllocatorLimitter* getAllocatorLimitter() = 0;
+	virtual void setInputPriority(uint32_t priorInput) = 0;
+	virtual void setProgress(
+			const TaskProgressKey &key, const TaskProgressValue *value) = 0;
+	virtual void getIndexScanCostConfig(
+			double &indexScanCostRate, double &rangeScanCostRate,
+			double &blockScanCountRate) = 0;
 };
 
 class SQLOps::OpCodeBuilder {
@@ -259,6 +265,8 @@ public:
 
 	static bool isAggregationArrangementRequired(
 			const Projection *pipeProj, const Projection *finishProj);
+
+	static bool isLargeOutputPossible(const Projection &proj);
 
 	static void resolveColumnTypeList(
 			const OpCode &code, ColumnTypeList &typeList,
@@ -581,6 +589,7 @@ public:
 	typedef util::AllocVector<LocalInfo> LocalInfoList;
 
 	typedef util::AllocVector<util::AllocString> NameList;
+	typedef util::AllocMap<util::AllocString, util::AllocString> NameMap;
 	typedef util::AllocVector<util::AllocString*> NameRefList;
 	typedef util::AllocVector<AnalysisOptimizationInfo> OptimizationList;
 	typedef util::AllocVector<AnalysisIndexInfo> IndexList;
@@ -593,6 +602,7 @@ public:
 	void addOperatorProfile(const OpProfilerId &id, const AnalysisInfo &info);
 	void addOptimizationProfile(
 			const OptimizationList *src, LocalOptimizationInfoList &dest);
+	void addCriterionProfile(const AnalysisInfo &src, LocalInfo &dest);
 	void addIndexProfile(
 			const OpProfilerId &id, const AnalysisIndexInfo &info);
 
@@ -600,6 +610,7 @@ public:
 
 	static AnalysisInfo getAnalysisInfo(OpProfiler *profiler, LocalInfo &src);
 	static OptimizationList* getOptimizations(LocalInfo &src);
+	static NameRefList* getCriterions(LocalInfo &src);
 	static bool findAnalysisIndexInfo(
 			LocalIndexInfo &src, AnalysisIndexInfo &dest);
 
@@ -624,6 +635,9 @@ struct SQLOps::OpProfiler::LocalInfo {
 	LocalOptimizationInfoList optimization_;
 	LocalIndexInfoList index_;
 	SubMap sub_;
+
+	NameMap criterion_;
+	NameRefList criterionRef_;
 
 	OptimizationList optRef_;
 	IndexList indexRef_;
@@ -661,6 +675,8 @@ class SQLOps::OpProfilerEntry {
 	typedef OpProfiler::LocalIndexInfo LocalIndexInfo;
 	typedef SQLOpUtils::AnalysisInfo AnalysisInfo;
 public:
+	struct Coders;
+
 	OpProfilerEntry(
 			const util::StdAllocator<void, void> &alloc, const OpProfilerId &id);
 
@@ -673,6 +689,8 @@ public:
 	OpProfilerOptimizationEntry& getOptimizationEntry();
 	OpProfilerIndexEntry& getIndexEntry(uint32_t ordinal);
 
+	void addCriterion(SQLOpTypes::PlannigCriterion criterion);
+
 private:
 	util::Stopwatch executionWatch_;
 	int64_t executionCount_;
@@ -682,6 +700,14 @@ private:
 
 	util::AllocUniquePtr<OpProfilerOptimizationEntry> optimization_;
 	util::AllocUniquePtr<OpProfilerIndexEntry> index_;
+};
+
+struct SQLOps::OpProfilerEntry::Coders {
+	static const util::NameCoderEntry<
+			SQLOpTypes::PlannigCriterion> CRITERION_LIST[];
+	static const util::NameCoder<
+			SQLOpTypes::PlannigCriterion,
+			SQLOpTypes::END_CRITERION> CRITERION_CODER;
 };
 
 class SQLOps::OpProfilerOptimizationEntry {
@@ -735,11 +761,13 @@ public:
 
 	void addIndexColumn(uint32_t column);
 	void addCondition(const SQLExprs::IndexCondition &cond);
+	void addNoIndexCondition();
 
 	void startSearch();
 	void finishSearch();
 
 	void addHitCount(int64_t count, bool onMvcc);
+	void addCost(int64_t cost);
 
 	void updateOrdinal(uint32_t ordinal);
 	void update();
@@ -765,6 +793,8 @@ private:
 	int64_t bulk_;
 	int64_t hit_;
 	int64_t mvccHit_;
+	int64_t cost_;
+	int64_t estimationCount_;
 };
 
 struct SQLOpUtils::AnalysisInfo {
@@ -780,6 +810,7 @@ struct SQLOpUtils::AnalysisInfo {
 			optimization_,
 			index_,
 			op_,
+			criterion_,
 			partial_);
 
 	static const util::NameCoderEntry<SQLOpTypes::Type> OP_TYPE_LIST[];
@@ -794,6 +825,7 @@ struct SQLOpUtils::AnalysisInfo {
 	util::AllocVector<AnalysisOptimizationInfo> *optimization_;
 	util::AllocVector<AnalysisIndexInfo> *index_;
 	util::AllocVector<AnalysisInfo> *op_;
+	SQLOps::OpProfiler::NameRefList *criterion_;
 	AnalysisPartialInfo *partial_;
 
 	uint64_t actualNanoTime_;
@@ -829,6 +861,7 @@ struct SQLOpUtils::AnalysisOptimizationInfo {
 
 struct SQLOpUtils::AnalysisIndexCondition {
 	enum ConditionType {
+		CONDITION_FULL,
 		CONDITION_RANGE,
 		CONDITION_RANGE_FIRST,
 		CONDITION_RANGE_LAST,
@@ -866,7 +899,9 @@ struct SQLOpUtils::AnalysisIndexInfo {
 			executionCount_,
 			actualTime_,
 			UTIL_OBJECT_CODER_OPTIONAL(hit_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(mvccHit_, 0));
+			UTIL_OBJECT_CODER_OPTIONAL(mvccHit_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(cost_, 0),
+			UTIL_OBJECT_CODER_OPTIONAL(estimationCount_, 0));
 
 	IndexProfiler::ModificationType modification_;
 	util::AllocString *name_;
@@ -878,6 +913,8 @@ struct SQLOpUtils::AnalysisIndexInfo {
 	int64_t actualTime_;
 	int64_t hit_;
 	int64_t mvccHit_;
+	int64_t cost_;
+	int64_t estimationCount_;
 };
 
 class SQLOpUtils::CustomOpProjectionRegistrar :

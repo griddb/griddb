@@ -289,6 +289,124 @@ struct SQLCoreExprs::Specs {
 				ExprSpec::FLAG_INHERIT2> Type;
 	};
 
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_OPTION, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_LONG> >,
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_ANCHOR, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_BOOL>,
+				Base::In<TupleTypes::TYPE_BOOL> >,
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_CONCAT, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_REPEAT1 |
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_ARGS_LISTING> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_VARIABLE, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG> >,
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_ARGS_LISTING> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_REPEAT, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG> >,
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_OR, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_REPEAT1 |
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_ARGS_LISTING> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_VARIABLE_LIST, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_REPEAT1 |
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_ARGS_LISTING> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_VARIABLE_DEF, C> {
+		typedef Base::Type<TupleTypes::TYPE_BOOL, Base::InList<
+				Base::In<TupleTypes::TYPE_STRING>,
+				Base::In<TupleTypes::TYPE_BOOL> >,
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_ARGS_LISTING> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_PREV, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_INHERIT2 |
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_ARGS_LISTING> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_NEXT, C> {
+		typedef typename Spec<SQLType::EXPR_PATTERN_PREV, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_FIRST, C> {
+		typedef typename Spec<SQLType::EXPR_PATTERN_PREV, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_LAST, C> {
+		typedef typename Spec<SQLType::EXPR_PATTERN_PREV, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_PATTERN_CURRENT, C> {
+		typedef typename Spec<SQLType::EXPR_PATTERN_PREV, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_PREV, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC |
+				ExprSpec::FLAG_PATTERN_MATCH_ONLY> Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_NEXT, C> {
+		typedef typename Spec<SQLType::FUNC_PREV, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_FIRST, C> {
+		typedef typename Spec<SQLType::FUNC_PREV, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_LAST, C> {
+		typedef typename Spec<SQLType::FUNC_PREV, C>::Type Type;
+	};
+
 
 	template<int C> struct Spec<SQLType::FUNC_COALESCE, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
@@ -330,6 +448,20 @@ struct SQLCoreExprs::Specs {
 		typedef Base::Type<TupleTypes::TYPE_STRING, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
 				ExprSpec::FLAG_NON_NULLABLE> Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_CLASSIFIER, C> {
+		typedef Base::Type<TupleTypes::TYPE_STRING, Base::InList<>,
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_PATTERN_MATCH_ONLY |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_MATCH_NUMBER, C> {
+		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<>,
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_PATTERN_MATCH_ONLY |
+				ExprSpec::FLAG_DYNAMIC> Type;
 	};
 
 	template<int C> struct Spec<SQLType::OP_CONCAT, C> {
@@ -1702,6 +1834,20 @@ struct SQLCoreExprs::Functions {
 	struct TypeOf {
 		template<typename C>
 		typename C::WriterType& operator()(C &cxt, const TupleValue &value);
+	};
+
+	struct Classifier {
+		typedef DefaultPolicy::AsAllocatable Policy;
+
+		template<typename C>
+		typename C::WriterType* operator()(C &cxt);
+	};
+
+	struct MatchNumber {
+		typedef DefaultPolicy::AsAllocatable Policy;
+
+		template<typename C>
+		int64_t operator()(C &cxt);
 	};
 
 	struct Concat {
