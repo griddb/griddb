@@ -5,7 +5,7 @@
 ![GitHub release](https://img.shields.io/github/release/griddb/griddb_nosql.svg)
 ## Overview
   GridDB is Database for IoT with both NoSQL interface and SQL Interface.
-
+` add questions about open source software in control to @S-pegin`
   Please refer to [GridDB Features Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_FeaturesReference.md) for functionality.
 
   This repository includes server and Java client. And [jdbc repository](https://github.com/griddb/jdbc) includes JDBC Driver.
