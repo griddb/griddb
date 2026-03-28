@@ -1020,7 +1020,7 @@ int gsGetValueString(
 	return -1;
 }
 
-int gsGetValueBool(SQLCursor *pCur, int iCol, int8_t *value) {
+int gsGetValueBool(SQLCursor *pCur, int iCol, bool *value) {
 	static_cast<void>(pCur);
 	static_cast<void>(iCol);
 	static_cast<void>(value);
@@ -1094,7 +1094,7 @@ int gsGetValueStringNull(SQLCursor *pCur, int iCol,
 	return -1;
 }
 
-int gsGetValueBoolNull(SQLCursor *pCur, int iCol, int8_t *value, int *pRes) {
+int gsGetValueBoolNull(SQLCursor *pCur, int iCol, bool *value, int *pRes) {
 	static_cast<void>(pCur);
 	static_cast<void>(iCol);
 	static_cast<void>(value);
